@@ -19,5 +19,9 @@ if [ -n "${FAKE_CLAUDE_RESULTS:-}" ]; then
   claude_result="${claude_results[$claude_result_index]}"
 fi
 
+if [ -n "${FAKE_CLAUDE_WRITE_FILE:-}" ]; then
+  printf '%s\n' "fake claude left this work uncommitted" > "$FAKE_CLAUDE_WRITE_FILE"
+fi
+
 printf '%s\n' "$claude_result"
 exit "${FAKE_CLAUDE_EXIT:-0}"
