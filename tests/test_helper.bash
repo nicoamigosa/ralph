@@ -2,6 +2,7 @@
 
 PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 TEST_REAL_TEE="$(command -v tee)"
+TEST_REAL_GIT="$(command -v git)"
 
 setup() {
   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ralph-tests.XXXXXX")"
@@ -16,6 +17,7 @@ setup() {
   git -C "$TEST_REPO" config user.name "ralph tests"
 
   export RALPH_TEST_REAL_TEE="$TEST_REAL_TEE"
+  export RALPH_TEST_REAL_GIT="$TEST_REAL_GIT"
   export PATH="$PROJECT_ROOT/tests/fakes:$PATH"
   export GH_MUTATION_LOG="$TEST_ROOT/mutations.log"
   export FAKE_AGENT_LOG="$TEST_ROOT/agents.log"

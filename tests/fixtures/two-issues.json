@@ -1,0 +1,42 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {
+      "number": 1,
+      "title": "First issue",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    },
+    {
+      "number": 2,
+      "title": "Second issue",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    }
+  ],
+  "pull_requests": [
+    {
+      "number": 101,
+      "head": "ralph/issue-1",
+      "available_before_codex": false,
+      "labels": [],
+      "comments": [],
+      "mergeCommit": {"oid": "1111111111111111111111111111111111111111"}
+    },
+    {
+      "number": 102,
+      "head": "ralph/issue-2",
+      "available_before_codex": false,
+      "labels": [],
+      "comments": [],
+      "mergeCommit": {"oid": "2222222222222222222222222222222222222222"}
+    }
+  ],
+  "checks": "pass"
+}

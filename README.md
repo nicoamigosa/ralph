@@ -99,6 +99,12 @@ Si una corrida se corta (Ctrl-C, tope de uso, caída), la siguiente **reutiliza*
 la rama y el PR existentes en vez de recrearlos, y salta lo ya mergeado. Volver
 a correr `./ralph/once.sh` siempre es seguro.
 
+Ralph nunca crea commits para tapar trabajo que Codex dejó sin commitear: conserva
+el árbol y detiene la corrida con código 70 para que el estado pueda recuperarse
+manualmente. También detiene la corrida ante fallos de `checkout`, `fetch`,
+`push` o `pull --ff-only`; un conflicto que Codex no resuelve se aborta cuando
+es posible, conserva el árbol si no lo es y deja el PR etiquetado para un humano.
+
 ## Fallos del revisor vs. rechazos
 
 Un revisor que **no llegó a correr** (API 529, red caída, crash) no es un

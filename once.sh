@@ -343,21 +343,48 @@ pr_for_branch() {
   gh pr list --head "$1" --state open --json number --jq '.[0].number // empty' 2>/dev/null
 }
 
+checkout_or_fail() {
+  local branch="$1"
+  if git checkout "$branch" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "❌ No pude hacer checkout de '$branch'; detengo la corrida."
+  return 70
+}
+
 # Pone la rama al día con la base antes de cada revisión, para que el revisor
 # vea lo que de verdad se va a mergear. Siempre con merge, nunca rebase: Codex
 # trabaja sobre esta rama y el merge final es --squash. Si hay conflictos los
 # resuelve Codex (sin consumir ronda de revisión); si no lo logra, el PR queda
-# para un humano. Devuelve: 0 al día · 1 conflicto sin resolver · 8/9 tope de uso.
+# para un humano. Devuelve: 0 al día · 70 fallo fatal · 8/9 tope de uso.
 update_branch_with_base() {
   local branch="$1" pr="$2" rc conflicted
-  git fetch -q origin "$BASE_BRANCH" >/dev/null 2>&1
-  git merge-base --is-ancestor "origin/$BASE_BRANCH" HEAD && return 0
+  if ! git fetch -q origin "$BASE_BRANCH" >/dev/null 2>&1; then
+    echo "❌ No pude traer '$BASE_BRANCH'; conservo el estado y detengo la corrida."
+    return 70
+  fi
+  if git merge-base --is-ancestor "origin/$BASE_BRANCH" HEAD; then
+    return 0
+  else
+    rc=$?
+    if [ "$rc" -ne 1 ]; then
+      echo "❌ No pude comprobar la relación entre '$branch' y '$BASE_BRANCH'; detengo la corrida."
+      return 70
+    fi
+  fi
   echo "🔄 Pongo $branch al día con $BASE_BRANCH..."
   if git merge --no-edit "origin/$BASE_BRANCH" >/dev/null 2>&1; then
-    git push -q origin "$branch" >/dev/null 2>&1 || true
+    if ! git push -q origin "$branch" >/dev/null 2>&1; then
+      echo "❌ No pude publicar $branch; conservo el estado y detengo la corrida."
+      return 70
+    fi
     return 0
   fi
   conflicted="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+  if [ -z "$conflicted" ]; then
+    echo "❌ El merge de '$BASE_BRANCH' falló sin dejar conflictos identificables; conservo el estado y detengo la corrida."
+    return 70
+  fi
   echo "⚔️  Conflictos con $BASE_BRANCH en: $conflicted. Codex los resuelve..."
   run_codex "Your branch has a merge in progress from the base branch, with conflicts.
 
@@ -372,17 +399,26 @@ $conflicted
 $PROMPT_CONFLICTS"
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    git merge --abort >/dev/null 2>&1 || git reset -q --hard
+    if ! git merge --abort >/dev/null 2>&1; then
+      echo "⚠️  No pude abortar el merge; conservo el árbol en conflicto para recuperación manual."
+    fi
+    add_label "$pr" "$NEEDS_HUMAN_LABEL"
+    gh pr comment "$pr" --body "🤖 Ralph no pudo resolver los conflictos con \`$BASE_BRANCH\`: el PR queda para un humano." >/dev/null 2>&1 || true
     return "$rc"
   fi
   if [ -n "$(git status --porcelain)" ] || ! git merge-base --is-ancestor "origin/$BASE_BRANCH" HEAD; then
-    git merge --abort >/dev/null 2>&1 || git reset -q --hard
+    if ! git merge --abort >/dev/null 2>&1; then
+      echo "⚠️  No pude abortar el merge; conservo el árbol en conflicto para recuperación manual."
+    fi
     echo "🙋 Codex no resolvió los conflictos con $BASE_BRANCH. PR #$pr queda para un humano."
     add_label "$pr" "$NEEDS_HUMAN_LABEL"
     gh pr comment "$pr" --body "🤖 Ralph no pudo poner la rama al día con \`$BASE_BRANCH\`: conflictos sin resolver en $conflicted. Necesita un humano." >/dev/null 2>&1 || true
-    return 1
+    return 70
   fi
-  git push -q origin "$branch" >/dev/null 2>&1 || true
+  if ! git push -q origin "$branch" >/dev/null 2>&1; then
+    echo "❌ No pude publicar $branch; conservo el estado y detengo la corrida."
+    return 70
+  fi
   return 0
 }
 
@@ -423,10 +459,13 @@ process_issue() {
   # Idempotencia: si la rama ya existe (corrida anterior interrumpida) la
   # reutilizamos. Recrearla con 'checkout -B' descartaría ese trabajo.
   if git show-ref --verify --quiet "refs/heads/$branch"; then
-    git checkout "$branch" >/dev/null 2>&1 || return 0
+    checkout_or_fail "$branch" || return 70
     prior_work="$(git log --oneline "$BASE_BRANCH..$branch" 2>/dev/null)"
   else
-    git checkout -b "$branch" "$BASE_BRANCH" >/dev/null 2>&1 || return 0
+    if ! git checkout -b "$branch" "$BASE_BRANCH" >/dev/null 2>&1; then
+      echo "❌ No pude crear y hacer checkout de '$branch'; detengo la corrida."
+      return 70
+    fi
     prior_work=""
   fi
 
@@ -436,7 +475,7 @@ process_issue() {
   if [ -n "$pr" ] && gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null \
        | grep -qx "$NEEDS_HUMAN_LABEL"; then
     echo "🙋 PR #$pr espera revisión humana; no lo toco."
-    git checkout "$BASE_BRANCH" >/dev/null 2>&1
+    checkout_or_fail "$BASE_BRANCH" || return 70
     return 0
   fi
 
@@ -472,16 +511,17 @@ $PROMPT_IMPLEMENT"
     rc=$?
     [ "$rc" -ne 0 ] && return "$rc"
 
-    # Red de seguridad: si el agente dejó cambios sin commitear, los persistimos.
+    # El agente debe dejar el trabajo commiteado. Preservamos el árbol para
+    # recuperación manual, pero nunca fabricamos un commit por él.
     if [ -n "$(git status --porcelain)" ]; then
-      git add -A
-      git commit -q -m "ralph: progreso sin commitear en issue #$num"
+      echo "❌ Codex dejó cambios sin commitear; conservo el estado y detengo la corrida."
+      return 70
     fi
 
     pr="$(pr_for_branch "$branch")"
     if [ -z "$pr" ]; then
       echo "⚠️  Codex no dejó PR abierto para #$num. Branch preservado, sin merge."
-      git checkout "$BASE_BRANCH" >/dev/null 2>&1
+      checkout_or_fail "$BASE_BRANCH" || return 70
       return 0
     fi
     echo "📬 PR #$pr abierto."
@@ -495,10 +535,6 @@ $PROMPT_IMPLEMENT"
   while [ "$round" -le "$MAX_ROUNDS" ]; do
     update_branch_with_base "$branch" "$pr"
     rc=$?
-    if [ "$rc" -eq 1 ]; then
-      git checkout "$BASE_BRANCH" >/dev/null 2>&1
-      return 0
-    fi
     [ "$rc" -ne 0 ] && return "$rc"
 
     echo "🔍 Claude revisa PR #$pr (ronda $round/$MAX_ROUNDS)..."
@@ -534,13 +570,15 @@ $PROMPT_REVIEW"
     fi
     if [ "$ci_ok" -eq 1 ]; then
       echo "🟢 CI verde. Mergeo PR #$pr."
-      git checkout "$BASE_BRANCH" >/dev/null 2>&1
+      checkout_or_fail "$BASE_BRANCH" || return 70
       if gh pr merge "$pr" "$MERGE_METHOD" --delete-branch >/dev/null 2>&1; then
         git branch -D "$branch" >/dev/null 2>&1 || true
         merged_sha="$(gh pr view "$pr" --json mergeCommit --jq .mergeCommit.oid 2>/dev/null)"
         # La base local debe traer el merge: los issues dependientes heredan ese código.
-        git pull --ff-only origin "$BASE_BRANCH" >/dev/null 2>&1 \
-          || echo "⚠️  No pude actualizar '$BASE_BRANCH' local con --ff-only; revisá a mano."
+        if ! git pull --ff-only origin "$BASE_BRANCH" >/dev/null 2>&1; then
+          echo "❌ No pude actualizar '$BASE_BRANCH' local con --ff-only; conservo el estado y detengo la corrida."
+          return 70
+        fi
         # Producción rota no admite otro despliegue encima: si el hook falla, para toda la corrida.
         if [ -n "$POST_MERGE_CHECK" ]; then
           echo "🩺 Verifico producción con $POST_MERGE_CHECK $merged_sha..."
@@ -571,7 +609,7 @@ $PROMPT_REVIEW"
         if [ "$infra_retries" -gt "$MAX_INFRA_RETRIES" ]; then
           echo "⚠️  El revisor no arrancó en $MAX_INFRA_RETRIES intentos (fallo de infraestructura, no del código)."
           echo "🔸 #$num queda sin revisar; PR #$pr abierto y SIN label: un rerun lo retoma."
-          git checkout "$BASE_BRANCH" >/dev/null 2>&1
+          checkout_or_fail "$BASE_BRANCH" || return 70
           return 0
         fi
         backoff=$((60 * 3 ** (infra_retries - 1)))
@@ -587,7 +625,7 @@ $PROMPT_REVIEW"
       echo "🙋 #$num agotó las $MAX_ROUNDS rondas sin PASS. PR #$pr queda abierto para revisión humana."
       add_label "$pr" "$NEEDS_HUMAN_LABEL"
       gh pr comment "$pr" --body "🤖 Ralph agotó las $MAX_ROUNDS rondas de revisión sin alcanzar PASS. Sin merge: necesita un humano." >/dev/null 2>&1 || true
-      git checkout "$BASE_BRANCH" >/dev/null 2>&1
+      checkout_or_fail "$BASE_BRANCH" || return 70
       return 0
     fi
 
@@ -611,16 +649,21 @@ $PROMPT_REVISE"
     rc=$?
     [ "$rc" -ne 0 ] && return "$rc"
 
+    # Las correcciones también deben llegar commiteadas por Codex; preservar
+    # cambios sin commit es preferible a inventar historia o perderlos.
     if [ -n "$(git status --porcelain)" ]; then
-      git add -A
-      git commit -q -m "ralph: correcciones sin commitear en issue #$num"
+      echo "❌ Codex dejó cambios sin commitear; conservo el estado y detengo la corrida."
+      return 70
     fi
-    git push -q origin "$branch" >/dev/null 2>&1 || true
+    if ! git push -q origin "$branch" >/dev/null 2>&1; then
+      echo "❌ No pude publicar $branch; conservo el estado y detengo la corrida."
+      return 70
+    fi
 
     round=$((round + 1))
   done
 
-  git checkout "$BASE_BRANCH" >/dev/null 2>&1
+  checkout_or_fail "$BASE_BRANCH" || return 70
   return 0
 }
 
@@ -751,9 +794,9 @@ select_issues() {
         elif [ "$rc" -eq 8 ]; then
           wait_for_reset "$num"
           continue   # reintenta el MISMO issue en la ventana nueva
-        elif [ "$rc" -eq 70 ]; then
-          echo "🛑 Fallo de infraestructura en tee. Detengo la corrida."
-          exit 70
+        elif [ "$rc" -ne 0 ]; then
+          echo "🛑 Fallo fatal (rc=$rc). Detengo la corrida."
+          exit "$rc"
         fi
         break
       done

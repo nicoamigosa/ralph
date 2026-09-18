@@ -17,6 +17,16 @@ if [ -n "$output_file" ]; then
   printf '%s\n' "${FAKE_CODEX_RESULT:-fake codex completed}" > "$output_file"
 fi
 
+if [ -n "${FAKE_CODEX_WRITE_FILE:-}" ]; then
+  printf '%s\n' "fake codex left this work uncommitted" > "$FAKE_CODEX_WRITE_FILE"
+fi
+
+if [ -n "${FAKE_CODEX_COMMIT_FILE:-}" ]; then
+  printf '%s\n' "fake codex committed this correction" > "$FAKE_CODEX_COMMIT_FILE"
+  "$RALPH_TEST_REAL_GIT" add -- "$FAKE_CODEX_COMMIT_FILE"
+  "$RALPH_TEST_REAL_GIT" commit -q -m "fake codex correction"
+fi
+
 if [ "${FAKE_CODEX_CREATE_PR:-0}" = "1" ]; then
   : > "$FAKE_CODEX_PR_STATE"
 fi

@@ -27,7 +27,7 @@ load test_helper
 
   run_once
 
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 42 ]
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
   ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
   [[ "$output" == *"Claude terminó con rc=42"* ]]
@@ -45,6 +45,75 @@ load test_helper
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
   ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
   [[ "$output" != *"🎉 #1 mergeado a main y cerrado."* ]]
+}
+
+@test "uncommitted codex work stops without an automatic commit" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_WRITE_FILE="$TEST_REPO/uncommitted.txt"
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  [ -f "$TEST_REPO/uncommitted.txt" ]
+  [ "$(git -C "$TEST_REPO" status --porcelain -- uncommitted.txt)" = "?? uncommitted.txt" ]
+  ! git -C "$TEST_REPO" log --all --format='%s' | grep -Fq 'ralph: progreso sin commitear en issue #1'
+  ! grep -Eq '^claude ' "$FAKE_AGENT_LOG"
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [[ "$output" == *"cambios sin commitear"* ]]
+}
+
+@test "git push failure stops with the branch and PR still open" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
+  export FAKE_CLAUDE_RESULTS='<verdict>CHANGES_REQUESTED</verdict>|<verdict>PASS</verdict>'
+  export FAKE_CODEX_COMMIT_FILE="$TEST_REPO/review-fix.txt"
+  export FAKE_GIT_FAIL=push
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-99
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [[ "$output" == *"Fallo fatal (rc=70)"* ]]
+}
+
+@test "git pull failure after merge stops before the next issue" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/two-issues.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_GIT_FAIL=pull
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  grep -Fq 'pr merge 101 --squash --delete-branch' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [[ "$output" == *"Fallo fatal (rc=70)"* ]]
+}
+
+@test "unresolved merge preserves a recoverable tree and labels the PR" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
+  export FAKE_CODEX_EXIT=42
+
+  git -C "$TEST_REPO" switch -q -c ralph/issue-99
+  printf '%s\n' 'branch version' > "$TEST_REPO/conflict.txt"
+  git -C "$TEST_REPO" add conflict.txt
+  git -C "$TEST_REPO" commit -q -m 'branch conflict'
+  git -C "$TEST_REPO" switch -q main
+  printf '%s\n' 'base version' > "$TEST_REPO/conflict.txt"
+  git -C "$TEST_REPO" add conflict.txt
+  git -C "$TEST_REPO" commit -q -m 'base conflict'
+  git -C "$TEST_REPO" push -q origin HEAD:main
+  git -C "$TEST_REPO" switch -q ralph/issue-99
+
+  run_once
+
+  [ "$status" -eq 42 ]
+  [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
+  grep -Fq 'api repos/nicoamigosa/ralph/issues/199/labels -f labels[]=ralph-needs-human' "$GH_MUTATION_LOG"
+  ! grep -Eq 'git reset( -q)? --hard' "$PROJECT_ROOT/once.sh"
 }
 
 @test "tee failure returns 70 and stops the run" {
