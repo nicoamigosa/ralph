@@ -176,6 +176,22 @@ Las salidas soportadas y sus fixtures versionados son Codex CLI **0.154.x**
 (`tests/fixtures/claude-2.1.277-success.json`). Una actualización de cualquiera
 de esos formatos requiere actualizar primero el fixture y el adaptador.
 
+Los fixtures se capturaron de ejecuciones reales en este host. Codex CLI
+reportó la versión 0.154.0 con codex --version y Claude Code reportó la versión
+2.1.277 con claude --version.
+
+El comando exacto de captura de Codex fue:
+
+    codex exec --json -o "$capture_dir/last-message.txt" --skip-git-repo-check "Respond with exactly: real codex fixture capture. Do not modify files, run commands, or use tools."
+
+El comando exacto de captura de Claude fue:
+
+    claude --model opus --dangerously-skip-permissions --print --output-format json "Respond with exactly: <verdict>PASS</verdict>. Do not modify files, run commands, or use tools."
+
+En ambas ejecuciones stdout y stderr se redirigieron a archivos separados; los
+fixtures contienen el stdout crudo. codex-0.154.0-truncated.jsonl es el mismo
+stdout real de Codex cortado a mitad del evento turn.completed.
+
 ## Fallos del revisor vs. rechazos
 
 Un revisor que **no llegó a correr** (API 529, red caída, crash) no es un

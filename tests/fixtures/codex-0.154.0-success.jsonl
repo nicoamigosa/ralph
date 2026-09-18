@@ -1,4 +1,4 @@
-{"type":"thread.started","thread_id":"thread_019c8d55e8f17b7a"}
+{"type":"thread.started","thread_id":"01a0b6a9-d7ea-7de0-b2d0-3e885968eabc"}
 {"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_019c8d55e8f17b7a","type":"agent_message","text":"implementation complete"}}
-{"type":"turn.completed","usage":{"input_tokens":42,"cached_input_tokens":0,"output_tokens":7}}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"real codex fixture capture"}}
+{"type":"turn.completed","usage":{"input_tokens":14886,"cached_input_tokens":9984,"cache_write_input_tokens":0,"output_tokens":9,"reasoning_output_tokens":0}}
