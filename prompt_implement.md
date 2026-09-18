@@ -18,6 +18,21 @@ the issue: a separate reviewer agent takes over from there.
   other than the one you were given.
 - Never touch secrets, credentials, or `.env*` files.
 
+# Your environment
+
+You are running inside an orchestrator (`ralph`, `once.sh`). Facts about it:
+
+- The `once.sh` and `codex exec` processes you can see in `ps` are your own
+  host and yourself, not a stuck or concurrent run. They are waiting for you.
+- Never send signals to, kill, or wait on any process you did not start
+  yourself. Never touch `once.sh`, `codex`, `claude`, `gh` or `bats` processes
+  that are already running. There is no other agent working on your branch.
+- Gates can take several minutes (test suites that spawn subprocesses, CI
+  polling). Let them finish. If a command takes longer than you expect, keep
+  waiting or report it in the PR; do not interrupt it and do not "recover" it.
+- Any process you did start (a dev server, a watcher) must be gone before you
+  finish.
+
 # 1. Learn the project before you touch it
 
 This loop is project-agnostic: assume nothing about language, framework, package
