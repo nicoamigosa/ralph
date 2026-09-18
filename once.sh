@@ -657,25 +657,27 @@ run_sandbox_preflight() {
   [ "$CODEX_SANDBOX" = "danger-full-access" ] && return 0
 
   build_codex_sandbox_config || return $?
-  if ! codex sandbox "${CODEX_SANDBOX_CONFIG_ARGS[@]}" --help >/dev/null 2>&1; then
+  if ! codex sandbox "${CODEX_SANDBOX_CONFIG_ARGS[@]}" \
+      -c "sandbox_mode=\"$CODEX_SANDBOX\"" --help >/dev/null 2>&1; then
     echo "⚠️  codex sandbox no está disponible en esta plataforma; omito la sonda de escritura de .git."
     return 0
   fi
 
-  if probe_error="$(codex sandbox "${CODEX_SANDBOX_CONFIG_ARGS[@]}" -- \
+  if probe_error="$(codex sandbox "${CODEX_SANDBOX_CONFIG_ARGS[@]}" \
+      -c "sandbox_mode=\"$CODEX_SANDBOX\"" -- \
       sh -c 'touch .git/.ralph-probe && rm .git/.ralph-probe' 2>&1)"; then
     return 0
   fi
   if printf '%s\n' "$probe_error" | grep -Eqi \
-      'not available|not supported|unsupported|only available on linux|linux.*only|unknown (command|subcommand)|unrecognized (command|subcommand)|no such command'; then
+      'only available on (linux|macos|darwin|windows)|(linux|macos|darwin|windows) (sandbox )?(is )?(not supported|unsupported)|not supported on (this|your) (platform|operating system)|unsupported (platform|operating system)|unknown (command|subcommand)|unrecognized (command|subcommand)|no such command'; then
     echo "⚠️  codex sandbox no está disponible en esta plataforma; omito la sonda de escritura de .git."
     return 0
   fi
 
   printf '❌ El sandbox configurado (%s) no permite escribir .git; la sonda de preflight falló.\n' \
     "$CODEX_SANDBOX" >&2
-  printf '   Corregí la configuración de Codex para permitir "%s/.git" en sandbox_workspace_write.writable_roots.\n' \
-    "$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' 'la raíz del repo')" >&2
+  printf '   Corregí la versión de codex y verificá que sandbox_mode="%s" (RALPH_CODEX_SANDBOX) esté soportado; ralph configura writable_roots automáticamente.\n' \
+    "$CODEX_SANDBOX" >&2
   [ -n "$probe_error" ] && printf '   Detalle: %s\n' "$probe_error" >&2
   return 1
 }

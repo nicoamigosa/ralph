@@ -59,6 +59,7 @@ load test_helper
   probe_line="$(grep -n -m 1 -F -- 'ralph-probe' "$FAKE_AGENT_LOG" | cut -d: -f1)"
   exec_line="$(grep -n -m 1 -F -- 'codex exec' "$FAKE_AGENT_LOG" | cut -d: -f1)"
   [ "$probe_line" -lt "$exec_line" ]
+  grep -Fq -- '-c sandbox_mode="workspace-write"' "$FAKE_AGENT_LOG"
   grep -Fq -- "sandbox_workspace_write.writable_roots=[\"$TEST_REPO/.git\"]" "$FAKE_AGENT_LOG"
 }
 
@@ -72,7 +73,21 @@ load test_helper
   [ "$status" -eq 1 ]
   [[ "$output" == *"sandbox configurado (workspace-write)"* ]]
   [[ "$output" == *"no permite escribir .git"* ]]
-  [[ "$output" == *"writable_root"* ]]
+  [[ "$output" == *"versión de codex"* ]]
+  [[ "$output" == *"sandbox_mode"* ]]
+  [[ "$output" == *"RALPH_CODEX_SANDBOX"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight fails closed for a generic unsupported filesystem operation" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_SANDBOX_EXIT=1
+  export FAKE_CODEX_SANDBOX_ERROR='touch: .git/.ralph-probe: Operation not supported'
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no permite escribir .git"* ]]
   ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
 }
 
