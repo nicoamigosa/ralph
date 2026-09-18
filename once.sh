@@ -47,7 +47,10 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #   RALPH_MAX_ROUNDS     revisiones de Claude por PR     (default: 3)
 #   RALPH_CODEX_MODEL    modelo del implementador        (default: gpt-5.6-luna)
 #   RALPH_CODEX_EFFORT   reasoning effort de Codex       (default: xhigh)
-#   RALPH_CODEX_SANDBOX  sandbox de Codex                (default: workspace-write)
+#   RALPH_CODEX_SANDBOX  sandbox de Codex                (default: workspace-write; .git
+#                           es sólo lectura allí, ralph lo habilita como writable_root,
+#                           ejecuta una sonda de preflight y reemplaza writable_roots
+#                           configurado; danger-full-access no se recomienda)
 #   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus)
 #   RALPH_MERGE_METHOD   método de merge del PR          (default: --squash)
 #   RALPH_MAX_INFRA_RETRIES  reintentos ante caída del revisor (default: 3)
@@ -584,14 +587,37 @@ run_agent_group() {
   return "$agent_rc"
 }
 
+build_codex_sandbox_config() {
+  local REPO_ROOT git_root toml_git_root
+  CODEX_SANDBOX_CONFIG_ARGS=(
+    -c "model_reasoning_effort=\"$CODEX_EFFORT\""
+    -c 'sandbox_workspace_write.network_access=true'
+  )
+  [ "$CODEX_SANDBOX" = "workspace-write" ] || return 0
+
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "❌ No pude resolver la raíz del repo para habilitar .git en Codex." >&2
+    return 70
+  }
+  git_root="$REPO_ROOT/.git"
+  toml_git_root="$(jq -Rn --arg path "$git_root" '$path')" || {
+    echo "❌ No pude escapar la ruta de .git para la configuración de Codex." >&2
+    return 70
+  }
+  CODEX_SANDBOX_CONFIG_ARGS=(
+    "${CODEX_SANDBOX_CONFIG_ARGS[@]}"
+    -c "sandbox_workspace_write.writable_roots=[$toml_git_root]"
+  )
+}
+
 run_codex() {
   local prompt="$1" limit_rc
   : > "$AGENT_LOG"; : > "$LAST_MSG"
+  build_codex_sandbox_config || return $?
   AGENT_COMMAND=(
     codex exec
     --model "$CODEX_MODEL"
-    -c "model_reasoning_effort=\"$CODEX_EFFORT\""
-    -c 'sandbox_workspace_write.network_access=true'
+    "${CODEX_SANDBOX_CONFIG_ARGS[@]}"
     --sandbox "$CODEX_SANDBOX"
     --skip-git-repo-check
     -o "$LAST_MSG"
@@ -623,6 +649,37 @@ run_claude() {
   limit_rc=$?
   [ "$limit_rc" -eq 0 ] || return "$limit_rc"
   return 0
+}
+
+run_sandbox_preflight() {
+  local probe_error
+  [ "$DRY_RUN" = "1" ] && return 0
+  [ "$CODEX_SANDBOX" = "danger-full-access" ] && return 0
+
+  build_codex_sandbox_config || return $?
+  if ! codex sandbox "${CODEX_SANDBOX_CONFIG_ARGS[@]}" \
+      -c "sandbox_mode=\"$CODEX_SANDBOX\"" --help >/dev/null 2>&1; then
+    echo "⚠️  codex sandbox no está disponible en esta plataforma; omito la sonda de escritura de .git."
+    return 0
+  fi
+
+  if probe_error="$(codex sandbox "${CODEX_SANDBOX_CONFIG_ARGS[@]}" \
+      -c "sandbox_mode=\"$CODEX_SANDBOX\"" -- \
+      sh -c 'touch .git/.ralph-probe && rm .git/.ralph-probe' 2>&1)"; then
+    return 0
+  fi
+  if printf '%s\n' "$probe_error" | grep -Eqi \
+      'only available on (linux|macos|darwin|windows)|(linux|macos|darwin|windows) (sandbox )?(is )?(not supported|unsupported)|not supported on (this|your) (platform|operating system)|unsupported (platform|operating system)|unknown (command|subcommand)|unrecognized (command|subcommand)|no such command'; then
+    echo "⚠️  codex sandbox no está disponible en esta plataforma; omito la sonda de escritura de .git."
+    return 0
+  fi
+
+  printf '❌ El sandbox configurado (%s) no permite escribir .git; la sonda de preflight falló.\n' \
+    "$CODEX_SANDBOX" >&2
+  printf '   Corregí la versión de codex y verificá que sandbox_mode="%s" (RALPH_CODEX_SANDBOX) esté soportado; ralph configura writable_roots automáticamente.\n' \
+    "$CODEX_SANDBOX" >&2
+  [ -n "$probe_error" ] && printf '   Detalle: %s\n' "$probe_error" >&2
+  return 1
 }
 
 # 'gh pr edit --add-label' revienta en versiones de gh que aún consultan
@@ -1338,6 +1395,7 @@ print_plan() {
 if [ "$DRY_RUN" = "1" ]; then
   print_plan
 else
+  run_sandbox_preflight || exit $?
   select_issues run
   echo "🏁 No quedan issues '$LABEL' listos para procesar."
 fi

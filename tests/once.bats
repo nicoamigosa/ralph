@@ -23,6 +23,116 @@ load test_helper
   [[ "$first_lines" == *"exit 2"* ]]
 }
 
+@test "workspace-write gives codex exec an absolute writable .git root" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq -- "-c sandbox_workspace_write.writable_roots=[\"$TEST_REPO/.git\"]" "$FAKE_AGENT_LOG"
+}
+
+@test "danger-full-access does not override writable roots" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CODEX_SANDBOX=danger-full-access
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  run grep -F -- "sandbox_workspace_write.writable_roots" "$FAKE_AGENT_LOG"
+  [ "$status" -eq 1 ]
+}
+
+@test "preflight probes .git before the first codex exec" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq -- 'codex sandbox' "$FAKE_AGENT_LOG"
+  probe_line="$(grep -n -m 1 -F -- 'ralph-probe' "$FAKE_AGENT_LOG" | cut -d: -f1)"
+  exec_line="$(grep -n -m 1 -F -- 'codex exec' "$FAKE_AGENT_LOG" | cut -d: -f1)"
+  [ "$probe_line" -lt "$exec_line" ]
+  grep -Fq -- '-c sandbox_mode="workspace-write"' "$FAKE_AGENT_LOG"
+  grep -Fq -- "sandbox_workspace_write.writable_roots=[\"$TEST_REPO/.git\"]" "$FAKE_AGENT_LOG"
+}
+
+@test "preflight fails closed when the sandbox cannot write .git" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_SANDBOX_EXIT=1
+  export FAKE_CODEX_SANDBOX_ERROR='touch: .git/.ralph-probe: Read-only file system'
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"sandbox configurado (workspace-write)"* ]]
+  [[ "$output" == *"no permite escribir .git"* ]]
+  [[ "$output" == *"versión de codex"* ]]
+  [[ "$output" == *"sandbox_mode"* ]]
+  [[ "$output" == *"RALPH_CODEX_SANDBOX"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight fails closed for a generic unsupported filesystem operation" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_SANDBOX_EXIT=1
+  export FAKE_CODEX_SANDBOX_ERROR='touch: .git/.ralph-probe: Operation not supported'
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no permite escribir .git"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "unavailable codex sandbox warns and continues" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_SANDBOX_HELP_EXIT=127
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"codex sandbox no está disponible"* ]]
+  run grep -F -- 'codex sandbox --' "$FAKE_AGENT_LOG"
+  [ "$status" -eq 1 ]
+  grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "platform without a usable codex sandbox warns and continues" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_SANDBOX_EXIT=1
+  export FAKE_CODEX_SANDBOX_ERROR='Linux sandbox is only available on Linux'
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"codex sandbox no está disponible"* ]]
+  grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "dry-run skips the sandbox preflight" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_DRY_RUN=1
+  export FAKE_CODEX_SANDBOX_EXIT=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Ralph dry-run plan"* ]]
+  [[ "$output" != *"codex sandbox"* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+}
+
 @test "mktemp failure stops through fail with a clear message" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_MKTEMP_EXIT=1
@@ -235,7 +345,7 @@ load test_helper
   [ "$status" -eq 0 ]
   [[ "$output" == *"#1 bloqueado: formato inválido en ## Blocked by: - #12 (parser)"* ]]
   [[ "$output" == *"#12, #13"* ]]
-  ! grep -Eq '^(codex|claude) ' "$FAKE_AGENT_LOG"
+  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
 }
 
@@ -429,7 +539,7 @@ load test_helper
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
   ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
   ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
-  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
   [[ "$runner_output" == *"CI ausente"* ]]
   [[ "$runner_output" == *"ci_pending"* ]]
 }
@@ -450,7 +560,7 @@ load test_helper
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
   ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
   ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
-  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
   [[ "$runner_output" == *"ci_pending"* ]]
 }
 
@@ -549,7 +659,7 @@ load test_helper
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
   ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
   ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
-  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
   [[ "$runner_output" == *"ci_pending"* ]]
 }
 
@@ -566,7 +676,7 @@ load test_helper
   [ "$status" -eq 0 ]
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
   ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
-  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
   [[ "$runner_output" == *"ci_pending"* ]]
 }
 
@@ -682,7 +792,7 @@ load test_helper
   grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
   run bash -c '! grep -Fq "$1" "$2"' _ 'issue close' "$GH_MUTATION_LOG"
   [ "$status" -eq 0 ]
-  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
   [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 1 ]
   [[ "$runner_output" == *"Fallo fatal (rc=70)"* ]]
 }
