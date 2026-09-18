@@ -23,6 +23,12 @@ La revisión, los checks y el merge quedan ligados al mismo SHA: Ralph compara e
 usa `--match-head-commit` al mergear. `RALPH_MERGE_METHOD` sólo admite
 `--squash`, `--merge` o `--rebase`; cualquier otro valor detiene el preflight.
 
+La política de CI es `required` por defecto. Si GitHub todavía no reporta checks,
+Ralph espera hasta `RALPH_CI_TIMEOUT_SECONDS` (30 minutos por defecto), deja el
+issue en estado `ci_pending` y no manda una corrección a Codex ni mergea. Un
+fallo explícito de un check sí se comenta en el PR para Codex. Para repos sin CI,
+`RALPH_CI_POLICY=none` es una excepción explícita y queda avisada en la salida.
+
 ## Es agnóstico al proyecto
 
 Instalá una release etiquetada como `ralph/` en cualquier repo con remoto de
@@ -177,6 +183,8 @@ Todo por entorno, todo opcional:
 | `RALPH_MERGE_METHOD` | `--squash` |
 | `RALPH_NEEDS_HUMAN_LABEL` | `ralph-needs-human` |
 | `RALPH_MAX_INFRA_RETRIES` | `3` |
+| `RALPH_CI_POLICY` | `required` |
+| `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${FAKE_SLEEP_NOOP:-0}" = "1" ]; then
+  exit 0
+fi
+
+exec "$RALPH_TEST_REAL_SLEEP" "$@"

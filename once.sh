@@ -43,6 +43,8 @@
 #   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus)
 #   RALPH_MERGE_METHOD   método de merge del PR          (default: --squash)
 #   RALPH_MAX_INFRA_RETRIES  reintentos ante caída del revisor (default: 3)
+#   RALPH_CI_POLICY          required o none explícito       (default: required)
+#   RALPH_CI_TIMEOUT_SECONDS espera de CI requerido         (default: 1800)
 #   RALPH_POST_MERGE_CHECK   script que certifica producción tras cada merge;
 #                            recibe el SHA mergeado, ≠0 para toda la corrida
 #                            (default: vacío = desactivado)
@@ -67,6 +69,8 @@ NEEDS_HUMAN_LABEL="${RALPH_NEEDS_HUMAN_LABEL:-ralph-needs-human}"
 MAX_INFRA_RETRIES="${RALPH_MAX_INFRA_RETRIES:-3}"
 ISSUE_ORDER="${RALPH_ISSUE_ORDER:-}"
 POST_MERGE_CHECK="${RALPH_POST_MERGE_CHECK:-}"
+CI_POLICY="${RALPH_CI_POLICY:-required}"
+CI_TIMEOUT_SECONDS="${RALPH_CI_TIMEOUT_SECONDS:-1800}"
 DRY_RUN="${RALPH_DRY_RUN:-0}"
 
 CHECKPOINT_FILE="$SCRIPT_DIR/last_run.md"
@@ -85,6 +89,14 @@ fail() { echo "❌ $*" >&2; exit 1; }
 case "$MERGE_METHOD" in
   --squash|--merge|--rebase) ;;
   *) fail "RALPH_MERGE_METHOD debe ser exactamente --squash, --merge o --rebase." ;;
+esac
+
+case "$CI_POLICY" in
+  required|none) ;;
+  *) fail "RALPH_CI_POLICY debe ser exactamente required o none." ;;
+esac
+case "$CI_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) fail "RALPH_CI_TIMEOUT_SECONDS debe ser un entero no negativo." ;;
 esac
 
 repo_host() {
@@ -447,24 +459,44 @@ $PROMPT_CONFLICTS"
 }
 
 # CI verde es condición de merge además del PASS. Devuelve 0 si los checks
-# pasan (o si el repo no tiene ninguno: avisa y no bloquea); 1 si están en
-# rojo, tras dejar en el PR el ítem que Codex debe corregir.
+# pasan, 1 si hay un fallo real (tras dejar en el PR el ítem que Codex debe
+# corregir), y 2 si la ausencia o el estado de CI sigue pendiente.
 wait_for_ci() {
-  local pr="$1" branch="$2" out run_url
-  out="$(gh pr checks "$pr" --watch --fail-fast 2>&1)" && return 0
-  if printf '%s' "$out" | grep -q "no checks reported"; then
-    # Puede ser que el run aún no se registró tras el último push.
-    sleep 30
-    out="$(gh pr checks "$pr" --watch --fail-fast 2>&1)" && return 0
-    if printf '%s' "$out" | grep -q "no checks reported"; then
-      echo "⚠️  PR #$pr no tiene checks de CI; mergeo sin esa garantía."
+  local pr="$1" branch="$2" out run_url started now deadline checks_rc pending_reason remaining
+
+  if [ "$CI_POLICY" = "none" ]; then
+    echo "⚠️  CI sin checks: política RALPH_CI_POLICY=none explícita; continúo sin esa garantía."
+    return 0
+  fi
+
+  started="$(date +%s 2>/dev/null)" || return 2
+  deadline=$((started + CI_TIMEOUT_SECONDS))
+  while :; do
+    out="$(gh pr checks "$pr" --fail-fast 2>&1)"
+    checks_rc=$?
+    if [ "$checks_rc" -eq 0 ]; then
       return 0
     fi
-  fi
-  run_url="$(gh run list --branch "$branch" --limit 1 --json url --jq '.[0].url' 2>/dev/null)"
-  echo "🔴 CI en rojo en PR #$pr: ${run_url:-sin URL del run}"
-  gh pr comment "$pr" --body "1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
-  return 1
+    if printf '%s' "$out" | grep -qi "no checks reported"; then
+      pending_reason="CI ausente"
+    elif [ "$checks_rc" -ne 1 ] || printf '%s' "$out" | grep -qiE \
+      'pending|queued|in progress|waiting|could not|unable|network|connect|connection|timed out|timeout|rate limit'; then
+      pending_reason="CI pendiente por infraestructura"
+    else
+      run_url="$(gh run list --branch "$branch" --limit 1 --json url --jq '.[0].url' 2>/dev/null)"
+      echo "🔴 CI en rojo en PR #$pr: ${run_url:-sin URL del run}"
+      gh pr comment "$pr" --body "1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
+      return 1
+    fi
+
+    now="$(date +%s 2>/dev/null)" || return 2
+    if [ "$now" -ge "$deadline" ]; then
+      echo "⚠️  $pending_reason en PR #$pr; estado ci_pending, sin merge."
+      return 2
+    fi
+    remaining=$((deadline - now))
+    sleep $(( remaining > 30 ? 30 : remaining ))
+  done
 }
 
 # ------------------------------------------------------------ ciclo por issue --
@@ -475,7 +507,7 @@ process_issue() {
   local num="$1"
   local branch="${BRANCH_PREFIX}${num}"
   local rc issue_ctx commits pr round verdict comments prior_work reviewed_sha
-  local infra_retries comments_before comments_after backoff merged_sha ci_ok
+  local infra_retries comments_before comments_after backoff merged_sha ci_ok ci_rc
 
   echo ""
   echo "════ Issue #$num ($branch) ════"
@@ -601,7 +633,14 @@ $PROMPT_REVIEW"
       rc=$?
       [ "$rc" -ne 0 ] && return "$rc"
       echo "✅ PASS en la ronda $round. Espero CI de PR #$pr..."
-      wait_for_ci "$pr" "$branch" && ci_ok=1
+      wait_for_ci "$pr" "$branch"
+      ci_rc=$?
+      if [ "$ci_rc" -eq 0 ]; then
+        ci_ok=1
+      elif [ "$ci_rc" -eq 2 ]; then
+        checkout_or_fail "$BASE_BRANCH" || return 70
+        return 0
+      fi
     fi
     if [ "$ci_ok" -eq 1 ]; then
       if [ -n "$(git status --porcelain)" ]; then

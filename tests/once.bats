@@ -47,6 +47,112 @@ load test_helper
   [[ "$output" != *"🎉 #1 mergeado a main y cerrado."* ]]
 }
 
+@test "CI ausente con política required queda ci_pending sin mergear" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT="no checks reported"
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+  unset RALPH_CI_POLICY
+
+  run_once
+  runner_output="$output"
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [[ "$runner_output" == *"CI ausente"* ]]
+  [[ "$runner_output" == *"ci_pending"* ]]
+}
+
+@test "timeout de CI ausente no mergea ni manda corrección a Codex" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT="no checks reported"
+  export RALPH_CI_TIMEOUT_SECONDS=60
+  export FAKE_DATE_FAST_FORWARD=1
+  export FAKE_SLEEP_NOOP=1
+  unset RALPH_CI_POLICY
+
+  run_once
+  runner_output="$output"
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [[ "$runner_output" == *"ci_pending"* ]]
+}
+
+@test "checks de CI que aparecen dentro del timeout permiten el merge" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULTS="no checks reported|pass"
+  export RALPH_CI_TIMEOUT_SECONDS=60
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+  grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  [ "$(cat "$FAKE_CI_CALL_COUNT_FILE")" -eq 2 ]
+}
+
+@test "RALPH_CI_POLICY=none permite mergear sin checks con aviso explícito" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT="no checks reported"
+  export RALPH_CI_POLICY=none
+
+  run_once
+  runner_output="$output"
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+  grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  [[ "$runner_output" == *"RALPH_CI_POLICY=none"* ]]
+}
+
+@test "check fallido deja el run en el PR para Codex y no mergea" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT=fail
+  export FAKE_CI_RUN_URL="https://github.com/nicoamigosa/ralph/actions/runs/456"
+  export RALPH_MAX_ROUNDS=1
+
+  run_once
+  runner_output="$output"
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  grep -Fq "$FAKE_CI_RUN_URL" "$GH_MUTATION_LOG"
+  [[ "$runner_output" == *"CI en rojo"* ]]
+}
+
+@test "fallo de infraestructura de CI queda ci_pending sin corrección" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT="failed to connect to GitHub API"
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+  runner_output="$output"
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [[ "$runner_output" == *"ci_pending"* ]]
+}
+
 @test "HEAD distinto de headRefOid antes de revisar detiene sin invocar Claude" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
