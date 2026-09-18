@@ -214,7 +214,7 @@ Todo por entorno, todo opcional:
 | `RALPH_MAX_ROUNDS` | `3` |
 | `RALPH_CODEX_MODEL` | `gpt-5.6-luna` |
 | `RALPH_CODEX_EFFORT` | `xhigh` |
-| `RALPH_CODEX_SANDBOX` | `workspace-write` |
+| `RALPH_CODEX_SANDBOX` | `workspace-write` (en este modo Codex monta `.git` como sólo lectura; ralph lo habilita como `writable_root` y ejecuta una sonda de preflight; `danger-full-access` no se recomienda) |
 | `RALPH_CLAUDE_MODEL` | `opus` |
 | `RALPH_MERGE_METHOD` | `--squash` |
 | `RALPH_NEEDS_HUMAN_LABEL` | `ralph-needs-human` |
@@ -224,6 +224,13 @@ Todo por entorno, todo opcional:
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
+
+Con `RALPH_CODEX_SANDBOX=workspace-write`, ralph reemplaza cualquier
+`writable_roots` configurado por el usuario en `~/.codex/config.toml` por la
+raíz `.git` absoluta del repositorio actual. Antes del primer issue ejecuta una
+sonda sin modelo que escribe y borra un archivo allí; si `codex sandbox` no está
+disponible en la plataforma, avisa y continúa. `danger-full-access` evita esa
+restricción, pero no se recomienda porque expone todo el filesystem.
 
 ## Distribución y versión
 
