@@ -53,14 +53,18 @@ load test_helper
   export FAKE_CODEX_WRITE_FILE="$TEST_REPO/uncommitted.txt"
 
   run_once
+  runner_output="$output"
 
   [ "$status" -eq 70 ]
   [ -f "$TEST_REPO/uncommitted.txt" ]
   [ "$(git -C "$TEST_REPO" status --porcelain -- uncommitted.txt)" = "?? uncommitted.txt" ]
-  ! git -C "$TEST_REPO" log --all --format='%s' | grep -Fq 'ralph: progreso sin commitear en issue #1'
-  ! grep -Eq '^claude ' "$FAKE_AGENT_LOG"
-  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
-  [[ "$output" == *"cambios sin commitear"* ]]
+  run bash -c '! git -C "$1" log --all --format="%s" | grep -Fq "$2"' _ "$TEST_REPO" 'ralph: progreso sin commitear en issue #1'
+  [ "$status" -eq 0 ]
+  run bash -c '! grep -Eq "$1" "$2"' _ '^claude ' "$FAKE_AGENT_LOG"
+  [ "$status" -eq 0 ]
+  run bash -c '! grep -Fq "$1" "$2"' _ 'pr merge' "$GH_MUTATION_LOG"
+  [ "$status" -eq 0 ]
+  [[ "$runner_output" == *"cambios sin commitear"* ]]
 }
 
 @test "git push failure stops with the branch and PR still open" {
@@ -70,12 +74,15 @@ load test_helper
   export FAKE_GIT_FAIL=push
 
   run_once
+  runner_output="$output"
 
   [ "$status" -eq 70 ]
   git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-99
-  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
-  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
-  [[ "$output" == *"Fallo fatal (rc=70)"* ]]
+  run bash -c '! grep -Fq "$1" "$2"' _ 'pr merge' "$GH_MUTATION_LOG"
+  [ "$status" -eq 0 ]
+  run bash -c '! grep -Fq "$1" "$2"' _ 'issue close' "$GH_MUTATION_LOG"
+  [ "$status" -eq 0 ]
+  [[ "$runner_output" == *"Fallo fatal (rc=70)"* ]]
 }
 
 @test "git pull failure after merge stops before the next issue" {
@@ -84,13 +91,15 @@ load test_helper
   export FAKE_GIT_FAIL=pull
 
   run_once
+  runner_output="$output"
 
   [ "$status" -eq 70 ]
   grep -Fq 'pr merge 101 --squash --delete-branch' "$GH_MUTATION_LOG"
-  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  run bash -c '! grep -Fq "$1" "$2"' _ 'issue close' "$GH_MUTATION_LOG"
+  [ "$status" -eq 0 ]
   [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
   [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 1 ]
-  [[ "$output" == *"Fallo fatal (rc=70)"* ]]
+  [[ "$runner_output" == *"Fallo fatal (rc=70)"* ]]
 }
 
 @test "unresolved merge preserves a recoverable tree and labels the PR" {
@@ -113,7 +122,8 @@ load test_helper
   [ "$status" -eq 42 ]
   [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
   grep -Fq 'api repos/nicoamigosa/ralph/issues/199/labels -f labels[]=ralph-needs-human' "$GH_MUTATION_LOG"
-  ! grep -Eq 'git reset( -q)? --hard' "$PROJECT_ROOT/once.sh"
+  run bash -c '! grep -Eq "$1" "$2"' _ 'git reset( -q)? --hard' "$PROJECT_ROOT/once.sh"
+  [ "$status" -eq 0 ]
 }
 
 @test "usage limit during conflict keeps the PR unlabeled for retry" {
@@ -135,8 +145,10 @@ load test_helper
   run_once
 
   [ "$status" -eq 0 ]
-  ! grep -Fq 'labels[]=' "$GH_MUTATION_LOG"
-  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  run bash -c '! grep -Fq "$1" "$2"' _ 'labels[]=' "$GH_MUTATION_LOG"
+  [ "$status" -eq 0 ]
+  run bash -c '! grep -Fq "$1" "$2"' _ 'pr comment' "$GH_MUTATION_LOG"
+  [ "$status" -eq 0 ]
 }
 
 @test "tee failure returns 70 and stops the run" {
