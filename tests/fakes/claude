@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'claude %s\n' "$*" >> "$FAKE_AGENT_LOG"
+printf '%s\n' "${FAKE_CLAUDE_RESULT:-<verdict>PASS</verdict>}"
+exit "${FAKE_CLAUDE_EXIT:-0}"

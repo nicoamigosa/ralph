@@ -67,6 +67,7 @@ NEEDS_HUMAN_LABEL="${RALPH_NEEDS_HUMAN_LABEL:-ralph-needs-human}"
 MAX_INFRA_RETRIES="${RALPH_MAX_INFRA_RETRIES:-3}"
 ISSUE_ORDER="${RALPH_ISSUE_ORDER:-}"
 POST_MERGE_CHECK="${RALPH_POST_MERGE_CHECK:-}"
+DRY_RUN="${RALPH_DRY_RUN:-0}"
 
 CHECKPOINT_FILE="$SCRIPT_DIR/last_run.md"
 AGENT_LOG="$(mktemp -t ralph-agent.XXXXXX)"
@@ -81,9 +82,37 @@ RESET_EPOCH=""
 
 fail() { echo "❌ $*" >&2; exit 1; }
 
-for cmd in git gh codex claude; do
+repo_host() {
+  local remote
+  remote="$(git remote get-url origin 2>/dev/null || true)"
+  case "$remote" in
+    http://*|https://*)
+      remote="${remote#*://}"
+      printf '%s\n' "${remote%%/*}"
+      ;;
+    git@*:*)
+      remote="${remote#git@}"
+      printf '%s\n' "${remote%%:*}"
+      ;;
+    ssh://*)
+      remote="${remote#ssh://}"
+      remote="${remote#*@}"
+      printf '%s\n' "${remote%%/*}"
+      ;;
+    *)
+      printf '%s\n' "github.com"
+      ;;
+  esac
+}
+
+for cmd in git gh; do
   command -v "$cmd" >/dev/null 2>&1 || fail "Falta '$cmd' en el PATH."
 done
+if [ "$DRY_RUN" != "1" ]; then
+  for cmd in codex claude; do
+    command -v "$cmd" >/dev/null 2>&1 || fail "Falta '$cmd' en el PATH."
+  done
+fi
 for f in prompt_implement.md prompt_review.md prompt_revise.md prompt_conflicts.md; do
   [ -f "$SCRIPT_DIR/$f" ] || fail "Falta $SCRIPT_DIR/$f."
 done
@@ -97,9 +126,10 @@ git remote get-url origin >/dev/null 2>&1 || fail "No hay remoto 'origin'."
 gh auth status >/dev/null 2>&1 || fail "gh no está autenticado (corré 'gh auth login')."
 REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
 [ -n "$REPO_SLUG" ] || fail "No pude resolver el repo de GitHub."
+REPO_HOST="$(repo_host)"
 
 # El working tree debe estar limpio: vamos a saltar entre branches y mergear.
-if [ -n "$(git status --porcelain)" ]; then
+if [ "$DRY_RUN" != "1" ] && [ -n "$(git status --porcelain)" ]; then
   fail "Working tree sucio. Commiteá o stasheá antes de correr ralph."
 fi
 
@@ -110,13 +140,19 @@ PROMPT_CONFLICTS="$(cat "$SCRIPT_DIR/prompt_conflicts.md")"
 
 # Un PR necesita que su base exista en el remoto.
 if ! git ls-remote --exit-code --heads origin "$BASE_BRANCH" >/dev/null 2>&1; then
-  echo "📤 La base '$BASE_BRANCH' no existe en origin; la publico."
-  git push -u origin "$BASE_BRANCH" >/dev/null 2>&1 || fail "No pude publicar '$BASE_BRANCH'."
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "⚠️  La base '$BASE_BRANCH' no existe en origin; dry-run continúa sin publicar."
+  else
+    echo "📤 La base '$BASE_BRANCH' no existe en origin; la publico."
+    git push -u origin "$BASE_BRANCH" >/dev/null 2>&1 || fail "No pude publicar '$BASE_BRANCH'."
+  fi
 fi
 
 # Label con el que marcamos los PRs que agotaron las rondas.
-gh label create "$NEEDS_HUMAN_LABEL" --color B60205 \
-  --description "Ralph agotó las rondas de revisión; necesita un humano" >/dev/null 2>&1 || true
+if [ "$DRY_RUN" != "1" ]; then
+  gh label create "$NEEDS_HUMAN_LABEL" --color B60205 \
+    --description "Ralph agotó las rondas de revisión; necesita un humano" >/dev/null 2>&1 || true
+fi
 
 echo "🔧 base=$BASE_BRANCH · label=$LABEL · rondas=$MAX_ROUNDS · $CODEX_MODEL($CODEX_EFFORT) → $CLAUDE_MODEL"
 
@@ -128,16 +164,36 @@ echo "🔧 base=$BASE_BRANCH · label=$LABEL · rondas=$MAX_ROUNDS · $CODEX_MOD
 # lista es una preferencia de orden, nunca una fuente de trabajo.
 # Lee los números por stdin, uno por línea; los imprime igual.
 apply_issue_order() {
-  local all first rest n
+  local all rest n candidate is_first
+  local -a first=()
   all="$(cat)"
   [ -z "$ISSUE_ORDER" ] && { printf '%s\n' "$all"; return 0; }
-  first=""
   for n in $ISSUE_ORDER; do
-    printf '%s\n' "$all" | grep -qx "$n" && first="$first$n "
+    while IFS= read -r candidate; do
+      if [ "$candidate" = "$n" ]; then
+        first+=("$n")
+        break
+      fi
+    done <<EOF
+$all
+EOF
   done
-  rest="$(printf '%s\n' "$all" | grep -vxF "$(printf '%s\n' $first)" || true)"
-  printf '%s\n' $first
-  [ -n "$rest" ] && printf '%s\n' "$rest"
+  rest=""
+  while IFS= read -r n; do
+    [ -z "$n" ] && continue
+    is_first=0
+    for candidate in "${first[@]}"; do
+      if [ "$candidate" = "$n" ]; then
+        is_first=1
+        break
+      fi
+    done
+    [ "$is_first" -eq 1 ] || rest="${rest}${n}"$'\n'
+  done <<EOF
+$all
+EOF
+  [ "${#first[@]}" -gt 0 ] && printf '%s\n' "${first[@]}"
+  [ -n "$rest" ] && printf '%s' "$rest"
   return 0
 }
 
@@ -460,7 +516,7 @@ $PROMPT_REVIEW"
     if [ "$ci_ok" -eq 1 ]; then
       echo "🟢 CI verde. Mergeo PR #$pr."
       git checkout "$BASE_BRANCH" >/dev/null 2>&1
-      if gh pr merge "$pr" $MERGE_METHOD --delete-branch >/dev/null 2>&1; then
+      if gh pr merge "$pr" "$MERGE_METHOD" --delete-branch >/dev/null 2>&1; then
         git branch -D "$branch" >/dev/null 2>&1 || true
         merged_sha="$(gh pr view "$pr" --json mergeCommit --jq .mergeCommit.oid 2>/dev/null)"
         # La base local debe traer el merge: los issues dependientes heredan ese código.
@@ -549,78 +605,153 @@ $PROMPT_REVISE"
   return 0
 }
 
+# --------------------------------------------------------------- selector --
+
+refs_csv() {
+  local refs="${1:-}" ref result=""
+  while IFS= read -r ref; do
+    [ -z "$ref" ] && continue
+    [ -n "$result" ] && result="$result,"
+    result="$result$ref"
+  done <<EOF
+$refs
+EOF
+  [ -n "$result" ] && printf '%s' "$result" || printf '%s' "none"
+}
+
+pr_needs_human() {
+  local pr="$1" labels
+  [ -z "$pr" ] && return 1
+  labels="$(gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null || true)"
+  printf '%s\n' "$labels" | grep -Fqx "$NEEDS_HUMAN_LABEL"
+}
+
+print_plan_issue() {
+  local num="$1" priority="$2" parents="$3" blockers="$4" needs_human="$5" pr="$6" exclusion="$7"
+  local pr_text="${pr:-none}"
+  printf '#%s priority=%s host=%s parents=%s blockers=%s needs-human=%s pr=%s' \
+    "$num" "$priority" "$REPO_HOST" "$(refs_csv "$parents")" \
+    "$(refs_csv "$blockers")" "$needs_human" "$pr_text"
+  [ -n "$exclusion" ] && printf ' excluded=%s' "$exclusion"
+  printf '\n'
+}
+
+# Selecciona issues y, en modo plan, describe exactamente las mismas decisiones
+# sin checkout, agentes, labels, push ni merge. El modo normal conserva el ciclo
+# de pasadas para que un blocker cerrado durante la corrida desbloquee a otro.
+select_issues() {
+  local mode="$1"
+  local attempted=" " progress=1 numbers n num priority parents blockers open_blockers
+  local epics p b state pr needs_human exclusion rc
+
+  while [ "$progress" -eq 1 ]; do
+    progress=0
+    numbers="$(gh issue list --state open --label "$LABEL" --json number \
+      --jq 'sort_by(.number) | .[].number' | apply_issue_order)"
+    [ -z "$numbers" ] && break
+
+    # Cachear bodies de la pasada (una llamada por issue) para detectar épicos y blockers.
+    unset BODY; declare -A BODY
+    # Blockers ya confirmados cerrados. Sólo cacheamos CLOSED: es un estado final,
+    # mientras que OPEN puede dejar de serlo dentro de esta misma pasada.
+    unset CLOSED_BLOCKER; declare -A CLOSED_BLOCKER
+    epics=" "
+    for n in $numbers; do
+      BODY[$n]="$(gh issue view "$n" --json body --jq '.body')"
+      for p in $(printf '%s' "${BODY[$n]}" | section_refs 'Parent'); do
+        epics="$epics$p "
+      done
+    done
+
+    priority=0
+    for num in $numbers; do
+      priority=$((priority + 1))
+      parents="$(printf '%s' "${BODY[$num]}" | section_refs 'Parent')"
+      blockers="$(printf '%s' "${BODY[$num]}" | section_refs 'Blocked by')"
+      open_blockers=""
+      for b in $blockers; do
+        [ -n "${CLOSED_BLOCKER[$b]:-}" ] && continue
+        state="$(gh issue view "$b" --json state --jq '.state' 2>/dev/null || echo OPEN)"
+        if [ "$state" = "CLOSED" ]; then
+          CLOSED_BLOCKER[$b]=1
+        else
+          [ -n "$open_blockers" ] && open_blockers="$open_blockers"$'\n'
+          open_blockers="${open_blockers}${b}"
+        fi
+      done
+
+      pr="$(pr_for_branch "${BRANCH_PREFIX}${num}")"
+      needs_human=no
+      pr_needs_human "$pr" && needs_human=yes
+
+      if [ "$mode" = "plan" ]; then
+        exclusion=""
+        case "$epics" in *" $num "*) exclusion="parent";; esac
+        [ -n "$exclusion" ] || if [ -n "$open_blockers" ]; then
+          exclusion="blocked-by:$(refs_csv "$open_blockers")"
+        fi
+        [ -n "$exclusion" ] || if [ "$needs_human" = yes ]; then
+          exclusion="needs-human"
+        fi
+        print_plan_issue "$num" "$priority" "$parents" "$blockers" \
+          "$needs_human" "$pr" "$exclusion"
+        continue
+      fi
+
+      # Ya intentado en esta corrida: no reprocesar.
+      case "$attempted" in *" $num "*) continue;; esac
+      # Es un épico/padre (lo referencia otro issue): no se implementa.
+      case "$epics" in *" $num "*) echo "↪️  #$num es épico/padre, lo omito."; continue;; esac
+
+      # ¿Tiene blockers todavía abiertos? Si sí, lo dejamos para la próxima pasada.
+      # El listado de la pasada no sirve para decidir esto: la API de GitHub es
+      # eventualmente consistente, así que justo después de cerrar un issue todavía
+      # lo devuelve abierto y sus dependientes quedan bloqueados de mentira. Peor,
+      # si esa pasada no llega a intentar nada el bucle termina por falta de
+      # progreso. Consultamos el estado real de cada blocker al evaluarlo, lo que
+      # además desbloquea en la misma pasada a los que dependían de un issue que
+      # acabamos de cerrar.
+      if [ -n "$open_blockers" ]; then
+        echo "⏭️  #$num bloqueado por dependencias abiertas, lo salto por ahora."
+        continue
+      fi
+      if [ "$needs_human" = yes ]; then
+        echo "🙋 PR #$pr espera revisión humana; no lo toco."
+        continue
+      fi
+
+      # Reintenta automáticamente ante el tope de sesión; ante el tope semanal,
+      # para y deja contexto para reanudar a mano.
+      while :; do
+        process_issue "$num"
+        rc=$?
+        if [ "$rc" -eq 9 ]; then
+          echo "🛑 Tope semanal alcanzado. Paro y guardo contexto."
+          write_checkpoint
+          exit 0
+        elif [ "$rc" -eq 8 ]; then
+          wait_for_reset "$num"
+          continue   # reintenta el MISMO issue en la ventana nueva
+        fi
+        break
+      done
+
+      attempted="$attempted$num "
+      progress=1
+    done
+  done
+}
+
+print_plan() {
+  echo "Ralph dry-run plan (read-only)"
+  select_issues plan
+}
+
 # ------------------------------------------------------------------- bucle --
 
-# Repetimos pasadas mientras haya progreso, para que los issues que se
-# desbloquean al cerrarse sus blockers se procesen en la misma corrida.
-attempted=" "
-progress=1
-while [ "$progress" -eq 1 ]; do
-  progress=0
-
-  numbers="$(gh issue list --state open --label "$LABEL" --json number \
-    --jq 'sort_by(.number) | .[].number' | apply_issue_order)"
-  [ -z "$numbers" ] && break
-  # Cachear bodies de la pasada (una llamada por issue) para detectar épicos y blockers.
-  unset BODY; declare -A BODY
-  # Blockers ya confirmados cerrados. Sólo cacheamos CLOSED: es un estado final,
-  # mientras que OPEN puede dejar de serlo dentro de esta misma pasada.
-  unset CLOSED_BLOCKER; declare -A CLOSED_BLOCKER
-  epics=" "
-  for n in $numbers; do
-    BODY[$n]="$(gh issue view "$n" --json body --jq '.body')"
-    for p in $(printf '%s' "${BODY[$n]}" | section_refs 'Parent'); do
-      epics="$epics$p "
-    done
-  done
-
-  for num in $numbers; do
-    # Ya intentado en esta corrida: no reprocesar.
-    case "$attempted" in *" $num "*) continue;; esac
-    # Es un épico/padre (lo referencia otro issue): no se implementa.
-    case "$epics" in *" $num "*) echo "↪️  #$num es épico/padre, lo omito."; continue;; esac
-
-    # ¿Tiene blockers todavía abiertos? Si sí, lo dejamos para la próxima pasada.
-    # El listado de la pasada no sirve para decidir esto: la API de GitHub es
-    # eventualmente consistente, así que justo después de cerrar un issue todavía
-    # lo devuelve abierto y sus dependientes quedan bloqueados de mentira. Peor,
-    # si esa pasada no llega a intentar nada el bucle termina por falta de
-    # progreso. Consultamos el estado real de cada blocker al evaluarlo, lo que
-    # además desbloquea en la misma pasada a los que dependían de un issue que
-    # acabamos de cerrar.
-    blocked=0
-    for b in $(printf '%s' "${BODY[$num]}" | section_refs 'Blocked by'); do
-      [ -n "${CLOSED_BLOCKER[$b]:-}" ] && continue
-      if [ "$(gh issue view "$b" --json state --jq '.state' 2>/dev/null || echo OPEN)" = "CLOSED" ]; then
-        CLOSED_BLOCKER[$b]=1
-      else
-        blocked=1; break
-      fi
-    done
-    if [ "$blocked" -eq 1 ]; then
-      echo "⏭️  #$num bloqueado por dependencias abiertas, lo salto por ahora."
-      continue
-    fi
-
-    # Reintenta automáticamente ante el tope de sesión; ante el tope semanal,
-    # para y deja contexto para reanudar a mano.
-    while :; do
-      process_issue "$num"
-      rc=$?
-      if [ "$rc" -eq 9 ]; then
-        echo "🛑 Tope semanal alcanzado. Paro y guardo contexto."
-        write_checkpoint
-        exit 0
-      elif [ "$rc" -eq 8 ]; then
-        wait_for_reset "$num"
-        continue   # reintenta el MISMO issue en la ventana nueva
-      fi
-      break
-    done
-
-    attempted="$attempted$num "
-    progress=1
-  done
-done
-
-echo "🏁 No quedan issues '$LABEL' listos para procesar."
+if [ "$DRY_RUN" = "1" ]; then
+  print_plan
+else
+  select_issues run
+  echo "🏁 No quedan issues '$LABEL' listos para procesar."
+fi
