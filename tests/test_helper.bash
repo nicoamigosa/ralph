@@ -4,6 +4,7 @@ PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 TEST_REAL_TEE="$(command -v tee)"
 TEST_REAL_GIT="$(command -v git)"
 TEST_REAL_DATE="$(command -v date)"
+TEST_REAL_SLEEP="$(command -v sleep)"
 
 setup() {
   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ralph-tests.XXXXXX")"
@@ -21,6 +22,8 @@ setup() {
   export RALPH_TEST_REAL_TEE="$TEST_REAL_TEE"
   export RALPH_TEST_REAL_GIT="$TEST_REAL_GIT"
   export RALPH_TEST_REAL_DATE="$TEST_REAL_DATE"
+  export RALPH_TEST_REAL_SLEEP="$TEST_REAL_SLEEP"
+  export FAKE_CI_CALL_COUNT_FILE="$TEST_ROOT/ci-calls"
   export PATH="$PROJECT_ROOT/tests/fakes:$PATH"
   export GH_MUTATION_LOG="$TEST_ROOT/mutations.log"
   export FAKE_AGENT_LOG="$TEST_ROOT/agents.log"
@@ -33,6 +36,7 @@ setup() {
   printf '0\n' > "$FAKE_CODEX_CALL_COUNT_FILE"
   printf '0\n' > "$FAKE_CLAUDE_CALL_COUNT_FILE"
   printf '0\n' > "$FAKE_DATE_CALL_COUNT_FILE"
+  printf '0\n' > "$FAKE_CI_CALL_COUNT_FILE"
 }
 
 teardown() {

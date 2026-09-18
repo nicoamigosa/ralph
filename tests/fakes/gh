@@ -101,13 +101,64 @@ case "${1:-}" in
         fi
         ;;
       checks)
+        checks_has_watch=0
+        checks_has_fail_fast=0
+        for checks_arg in "$@"; do
+          case "$checks_arg" in
+            --watch) checks_has_watch=1 ;;
+            --fail-fast) checks_has_fail_fast=1 ;;
+          esac
+        done
+        if [ "$checks_has_fail_fast" -eq 1 ] && [ "$checks_has_watch" -eq 0 ]; then
+          printf '%s\n' 'cannot use `--fail-fast` flag without `--watch` flag' >&2
+          exit 1
+        fi
         if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ]; then
           : > "${GH_MUTATION_LOG}.head-changed"
+        fi
+        if [ -n "${FAKE_CI_RESULT:-}" ]; then
+          case "$FAKE_CI_RESULT" in
+            pass) printf '%s\n' 'pass'; exit 0 ;;
+            pending) printf '%s\n' 'Checks are pending'; exit 8 ;;
+            infra) printf '%s\n' 'failed to connect to GitHub API'; exit 2 ;;
+            *) printf '%s\n' "$FAKE_CI_RESULT"; exit 1 ;;
+          esac
+        fi
+        if [ -n "${FAKE_CI_RESULTS:-}" ]; then
+          IFS='|' read -r -a ci_results <<< "$FAKE_CI_RESULTS"
+          ci_call=0
+          if [ -f "${FAKE_CI_CALL_COUNT_FILE:-}" ]; then
+            read -r ci_call < "$FAKE_CI_CALL_COUNT_FILE"
+          fi
+          ci_call=$((ci_call + 1))
+          printf '%s\n' "$ci_call" > "$FAKE_CI_CALL_COUNT_FILE"
+          ci_result_index=$((ci_call - 1))
+          if [ "$ci_result_index" -ge "${#ci_results[@]}" ]; then
+            ci_result_index=$((${#ci_results[@]} - 1))
+          fi
+          ci_result="${ci_results[$ci_result_index]}"
+          case "$ci_result" in
+            pass) exit 0 ;;
+            fail) printf '%s\n' 'Some checks failed'; exit 1 ;;
+            pending) printf '%s\n' 'Checks are pending'; exit 8 ;;
+            infra) printf '%s\n' 'failed to connect to GitHub API'; exit 2 ;;
+            *) printf '%s\n' "$ci_result"; exit 1 ;;
+          esac
         fi
         [ "$(fixture_jq '.checks')" = "pass" ]
         ;;
       merge|comment)
         mutation "$*"
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
+    ;;
+  run)
+    case "${2:-}" in
+      list)
+        printf '%s\n' "${FAKE_CI_RUN_URL:-https://github.com/nicoamigosa/ralph/actions/runs/123}"
         ;;
       *)
         exit 2
