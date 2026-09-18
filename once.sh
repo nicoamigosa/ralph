@@ -45,6 +45,7 @@
 #   RALPH_MAX_INFRA_RETRIES  reintentos ante caída del revisor (default: 3)
 #   RALPH_CI_POLICY          required o none explícito       (default: required)
 #   RALPH_CI_TIMEOUT_SECONDS espera de CI requerido         (default: 1800)
+#   RALPH_REQUIRED_CHECKS_JSON lista JSON de checks obligatorios (default: vacío)
 #   RALPH_POST_MERGE_CHECK   script que certifica producción tras cada merge;
 #                            recibe el SHA mergeado, ≠0 para toda la corrida
 #                            (default: vacío = desactivado)
@@ -71,6 +72,7 @@ ISSUE_ORDER="${RALPH_ISSUE_ORDER:-}"
 POST_MERGE_CHECK="${RALPH_POST_MERGE_CHECK:-}"
 CI_POLICY="${RALPH_CI_POLICY:-required}"
 CI_TIMEOUT_SECONDS="${RALPH_CI_TIMEOUT_SECONDS:-1800}"
+REQUIRED_CHECKS_JSON="${RALPH_REQUIRED_CHECKS_JSON:-}"
 DRY_RUN="${RALPH_DRY_RUN:-0}"
 
 CHECKPOINT_FILE="$SCRIPT_DIR/last_run.md"
@@ -125,6 +127,15 @@ repo_host() {
 for cmd in git gh; do
   command -v "$cmd" >/dev/null 2>&1 || fail "Falta '$cmd' en el PATH."
 done
+if [ "$DRY_RUN" != "1" ]; then
+  command -v jq >/dev/null 2>&1 || fail "Falta 'jq' en el PATH para leer los resultados de CI."
+fi
+if [ -n "$REQUIRED_CHECKS_JSON" ]; then
+  if ! jq -e 'type == "array" and all(.[]; type == "string" and length > 0)' \
+      >/dev/null 2>&1 <<<"$REQUIRED_CHECKS_JSON"; then
+    fail "RALPH_REQUIRED_CHECKS_JSON debe ser una lista JSON de nombres no vacíos."
+  fi
+fi
 if [ "$DRY_RUN" != "1" ]; then
   for cmd in codex claude; do
     command -v "$cmd" >/dev/null 2>&1 || fail "Falta '$cmd' en el PATH."
@@ -458,11 +469,118 @@ $PROMPT_CONFLICTS"
   return 0
 }
 
+# Revisa todos los checks obligatorios del SHA exacto que Claude vio. Devuelve
+# 0 si cada uno terminó en success, 1 si alguno terminó en un estado distinto,
+# y 2 si alguno está ausente, pendiente o la API no responde. Los estados
+# auxiliares quedan en variables globales para distinguir rechazo de espera.
+check_required_checks() {
+  local reviewed_sha="$1"
+  local check_runs_pages statuses_pages check_runs statuses results_json
+  local required state failed pending missing
+
+  REQUIRED_CHECKS_STATE="infrastructure"
+  REQUIRED_CHECKS_FAILURES=""
+  check_runs_pages="$(gh api --paginate --slurp \
+    "repos/$REPO_SLUG/commits/$reviewed_sha/check-runs" 2>/dev/null)" || return 2
+  statuses_pages="$(gh api --paginate --slurp \
+    "repos/$REPO_SLUG/commits/$reviewed_sha/statuses" 2>/dev/null)" || return 2
+  check_runs="$(jq -c '[.[] | .check_runs[]?]' <<<"$check_runs_pages" 2>/dev/null)" || return 2
+  statuses="$(jq -c '[.[][]?]' <<<"$statuses_pages" 2>/dev/null)" || return 2
+  results_json="$(jq -cn --argjson check_runs "$check_runs" --argjson statuses "$statuses" \
+    '{check_runs: $check_runs, statuses: $statuses}' 2>/dev/null)" || return 2
+
+  if [ -z "$REQUIRED_CHECKS_JSON" ]; then
+    state="$(jq -r --arg sha "$reviewed_sha" '
+      ([.check_runs[]? | select(.head_sha == $sha) |
+        {state: ((.conclusion // "") | ascii_downcase)}] +
+       [.statuses[]? | select(.sha == $sha) |
+        {state: ((.state // "") | ascii_downcase)}]) as $results |
+      if ($results | length) == 0 then
+        "missing"
+      elif any($results[]; .state == "" or .state == "queued" or
+               .state == "in_progress" or .state == "pending") then
+        "pending"
+      elif all($results[]; .state == "success") then
+        "success"
+      else
+        "failure"
+      end
+    ' <<<"$results_json" 2>/dev/null)" || return 2
+    case "$state" in
+      success)
+        REQUIRED_CHECKS_STATE="success"
+        return 0
+        ;;
+      failure)
+        REQUIRED_CHECKS_STATE="failure"
+        REQUIRED_CHECKS_FAILURES="check reportado sin éxito"
+        return 1
+        ;;
+      pending)
+        REQUIRED_CHECKS_STATE="pending"
+        return 2
+        ;;
+      missing)
+        REQUIRED_CHECKS_STATE="missing"
+        return 2
+        ;;
+      *) return 2 ;;
+    esac
+  fi
+
+  failed=0
+  pending=0
+  missing=0
+  while IFS= read -r required; do
+    [ -n "$required" ] || continue
+    state="$(jq -r --arg name "$required" --arg sha "$reviewed_sha" '
+      ([.check_runs[]? | select(.name == $name and .head_sha == $sha)]) as $runs |
+      ([.statuses[]? | select(.context == $name and .sha == $sha)]) as $statuses |
+      if any($runs[]?; ((.conclusion // "") | ascii_downcase) == "success") or
+         any($statuses[]?; ((.state // "") | ascii_downcase) == "success") then
+        "success"
+      elif any($runs[]?; ((.conclusion // "") | ascii_downcase) != "") or
+           any($statuses[]?; ((.state // "") | ascii_downcase) != "") then
+        "failure"
+      elif ($runs | length) > 0 or ($statuses | length) > 0 then
+        "pending"
+      else
+        "missing"
+      end
+    ' <<<"$results_json" 2>/dev/null)" || return 2
+    case "$state" in
+      success) ;;
+      failure)
+        failed=1
+        REQUIRED_CHECKS_FAILURES="${REQUIRED_CHECKS_FAILURES}${REQUIRED_CHECKS_FAILURES:+, }$required"
+        ;;
+      pending) pending=1 ;;
+      missing) missing=1 ;;
+      *) return 2 ;;
+    esac
+  done < <(jq -r '.[]' <<<"$REQUIRED_CHECKS_JSON")
+
+  if [ "$failed" -eq 1 ]; then
+    REQUIRED_CHECKS_STATE="failure"
+    return 1
+  fi
+  if [ "$missing" -eq 1 ]; then
+    REQUIRED_CHECKS_STATE="missing"
+    return 2
+  fi
+  if [ "$pending" -eq 1 ]; then
+    REQUIRED_CHECKS_STATE="pending"
+    return 2
+  fi
+  REQUIRED_CHECKS_STATE="success"
+  return 0
+}
+
 # CI verde es condición de merge además del PASS. Devuelve 0 si los checks
 # pasan, 1 si hay un fallo real (tras dejar en el PR el ítem que Codex debe
 # corregir), y 2 si la ausencia o el estado de CI sigue pendiente.
 wait_for_ci() {
-  local pr="$1" branch="$2" out run_url started now deadline checks_rc pending_reason remaining
+  local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining
 
   if [ "$CI_POLICY" = "none" ]; then
     echo "⚠️  CI sin checks: política RALPH_CI_POLICY=none explícita; continúo sin esa garantía."
@@ -472,29 +590,45 @@ wait_for_ci() {
   started="$(date +%s 2>/dev/null)" || return 2
   deadline=$((started + CI_TIMEOUT_SECONDS))
   while :; do
-    out="$(gh pr checks "$pr" 2>&1)"
+    check_required_checks "$reviewed_sha"
     checks_rc=$?
     if [ "$checks_rc" -eq 0 ]; then
       return 0
+    elif [ "$checks_rc" -eq 1 ]; then
+      run_url="$(gh run list --branch "$branch" --limit 1 --json url --jq '.[0].url' 2>/dev/null)"
+      if [ -n "$REQUIRED_CHECKS_JSON" ]; then
+        echo "🔴 CI obligatorio en rojo en PR #$pr: ${REQUIRED_CHECKS_FAILURES:-check sin éxito} (${run_url:-sin URL del run})"
+        gh pr comment "$pr" --body "1. CI obligatorio en rojo: ${REQUIRED_CHECKS_FAILURES:-check sin éxito}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
+      else
+        echo "🔴 CI en rojo en PR #$pr: ${run_url:-sin URL del run}"
+        gh pr comment "$pr" --body "1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
+      fi
+      return 1
+    else
+      case "$REQUIRED_CHECKS_STATE" in
+        missing)
+          if [ -n "$REQUIRED_CHECKS_JSON" ]; then
+            pending_reason="CI obligatorio ausente"
+          else
+            pending_reason="CI ausente"
+          fi
+          ;;
+        pending)
+          if [ -n "$REQUIRED_CHECKS_JSON" ]; then
+            pending_reason="CI obligatorio pendiente"
+          else
+            pending_reason="CI pendiente"
+          fi
+          ;;
+        *)
+          if [ -n "$REQUIRED_CHECKS_JSON" ]; then
+            pending_reason="CI obligatorio pendiente por infraestructura"
+          else
+            pending_reason="CI pendiente por infraestructura"
+          fi
+          ;;
+      esac
     fi
-    case "$checks_rc" in
-      8)
-        pending_reason="CI pendiente"
-        ;;
-      1)
-        if printf '%s' "$out" | grep -qi "no checks reported"; then
-          pending_reason="CI ausente"
-        else
-          run_url="$(gh run list --branch "$branch" --limit 1 --json url --jq '.[0].url' 2>/dev/null)"
-          echo "🔴 CI en rojo en PR #$pr: ${run_url:-sin URL del run}"
-          gh pr comment "$pr" --body "1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
-          return 1
-        fi
-        ;;
-      *)
-        pending_reason="CI pendiente por infraestructura"
-        ;;
-    esac
 
     now="$(date +%s 2>/dev/null)" || return 2
     if [ "$now" -ge "$deadline" ]; then
@@ -640,7 +774,7 @@ $PROMPT_REVIEW"
       rc=$?
       [ "$rc" -ne 0 ] && return "$rc"
       echo "✅ PASS en la ronda $round. Espero CI de PR #$pr..."
-      wait_for_ci "$pr" "$branch"
+      wait_for_ci "$pr" "$branch" "$reviewed_sha"
       ci_rc=$?
       if [ "$ci_rc" -eq 0 ]; then
         ci_ok=1
