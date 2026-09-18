@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -n "${FAKE_SLEEP_LOG:-}" ] && [ "${1:-}" != "0.01" ] && [ "${1:-}" != "0.1" ]; then
+  printf '%s\n' "$*" >> "$FAKE_SLEEP_LOG"
+fi
+
 if [ "${FAKE_SLEEP_NOOP:-0}" = "1" ]; then
   exit 0
 fi

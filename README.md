@@ -164,7 +164,7 @@ mezcla con stderr.
 El contrato interno de ambos adaptadores es:
 
 ```json
-{"status":"ok|rate_limited|auth_error|config_error|failed|unknown","retry_at":null,"limit_scope":"session|weekly|unknown","retryable":false,"exit_code":0,"final_message":null}
+{"status":"ok|rate_limited|auth_error|config_error|failed|unknown","retry_at":null,"limit_scope":"session|weekly|unknown","retryable":false,"exit_code":0,"final_message":null,"error":null}
 ```
 
 `ok` exige exit code cero y una salida terminal válida: `turn.completed` para
@@ -205,10 +205,16 @@ a "corregir" contra una revisión que nunca existió.
 
 ## Topes de uso
 
-- **Tope de sesión** (de Claude o de Codex): no es un fallo del issue. El script
-  espera a que reabra la ventana y reintenta el mismo issue.
-- **Tope semanal**: para y escribe `ralph/last_run.md` con el estado para que
-  reanudes a mano.
+Los adaptadores clasifican un tope sólo desde un evento de error o metadatos
+estructurados del proveedor. Respuestas, diffs, mensajes finales y salida de
+herramientas no son señales de uso. Un `retry_at` sólo se acepta como epoch o
+timestamp RFC3339 con zona dentro de esa señal; si falta, queda `null` y el
+reintento es inmediato, sin inventar una sesión o una semana.
+
+Cada issue admite como máximo `RALPH_MAX_LIMIT_RETRIES` reintentos. Un reset
+fiable se espera sólo hasta ese instante y queda acotado por
+`RALPH_DEADLINE_EPOCH` cuando existe. `auth_error` y `config_error` detienen la
+corrida y escriben checkpoint; `unknown` registra el error y no espera.
 
 ## Archivos
 
@@ -220,7 +226,7 @@ a "corregir" contra una revisión que nunca existió.
 | `prompt_revise.md` | Codex: atender los comentarios de la revisión |
 | `prompt_conflicts.md` | Codex: resolver los conflictos al poner la rama al día con la base |
 | `VERSION` | Release instalada; la compara `update.sh --check` |
-| `last_run.md` | Checkpoint, generado al parar por tope semanal (no se versiona) |
+| `last_run.md` | Checkpoint, generado al detenerse por límite/error global (no se versiona) |
 
 ## Niveles de configuración
 
@@ -259,6 +265,8 @@ Todo por entorno, todo opcional:
 | `RALPH_MERGE_METHOD` | `--squash` |
 | `RALPH_NEEDS_HUMAN_LABEL` | `ralph-needs-human` |
 | `RALPH_MAX_INFRA_RETRIES` | `3` |
+| `RALPH_MAX_LIMIT_RETRIES` | `3` |
+| `RALPH_DEADLINE_EPOCH` | vacío (sin deadline global) |
 | `RALPH_CI_POLICY` | `required` |
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
@@ -266,6 +274,7 @@ Todo por entorno, todo opcional:
 | `RALPH_DRY_RUN` | `0` (sólo mostrar el plan cuando vale `1`) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 | `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |
+| `RALPH_CHECKPOINT_FILE` | `$SCRIPT_DIR/last_run.md` |
 
 Con `RALPH_CODEX_SANDBOX=workspace-write`, ralph reemplaza cualquier
 `writable_roots` configurado por el usuario en `~/.codex/config.toml` por la

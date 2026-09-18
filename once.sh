@@ -35,10 +35,9 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 # Idempotente: si una corrida se corta, la siguiente REUTILIZA la rama y el PR
 # existentes en vez de recrearlos, y salta lo ya mergeado.
 #
-# Límites de uso (de Claude o de Codex):
-#   - Tope de sesión: NO es un fallo del issue. El script espera a que reabra la
-#     ventana y reintenta el MISMO issue.
-#   - Tope semanal: para y deja un checkpoint (ralph/last_run.md).
+# Límites de uso (de Claude o de Codex): los adaptadores sólo aceptan señales
+# estructuradas del proveedor, reintentan el mismo issue como máximo
+# RALPH_MAX_LIMIT_RETRIES veces y nunca fabrican una hora de reset.
 #
 # Config por entorno (todo opcional):
 #   RALPH_LABEL          label que marca issues AFK      (default: ready-for-agent)
@@ -54,6 +53,8 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus)
 #   RALPH_MERGE_METHOD   método de merge del PR          (default: --squash)
 #   RALPH_MAX_INFRA_RETRIES  reintentos ante caída del revisor (default: 3)
+#   RALPH_MAX_LIMIT_RETRIES  reintentos ante un tope del proveedor (default: 3)
+#   RALPH_DEADLINE_EPOCH     deadline global opcional, como epoch UTC
 #   RALPH_CI_POLICY          required o none explícito       (default: required)
 #   RALPH_CI_TIMEOUT_SECONDS espera de CI requerido         (default: 1800)
 #   RALPH_REQUIRED_CHECKS_JSON lista JSON de checks obligatorios (default: vacío)
@@ -79,6 +80,8 @@ CLAUDE_MODEL="${RALPH_CLAUDE_MODEL:-opus}"
 MERGE_METHOD="${RALPH_MERGE_METHOD:---squash}"
 NEEDS_HUMAN_LABEL="${RALPH_NEEDS_HUMAN_LABEL:-ralph-needs-human}"
 MAX_INFRA_RETRIES="${RALPH_MAX_INFRA_RETRIES:-3}"
+MAX_LIMIT_RETRIES="${RALPH_MAX_LIMIT_RETRIES:-3}"
+DEADLINE_EPOCH="${RALPH_DEADLINE_EPOCH:-}"
 ISSUE_ORDER="${RALPH_ISSUE_ORDER:-}"
 POST_MERGE_CHECK="${RALPH_POST_MERGE_CHECK:-}"
 CI_POLICY="${RALPH_CI_POLICY:-required}"
@@ -86,7 +89,7 @@ CI_TIMEOUT_SECONDS="${RALPH_CI_TIMEOUT_SECONDS:-1800}"
 REQUIRED_CHECKS_JSON="${RALPH_REQUIRED_CHECKS_JSON:-}"
 DRY_RUN="${RALPH_DRY_RUN:-0}"
 
-CHECKPOINT_FILE="$SCRIPT_DIR/last_run.md"
+CHECKPOINT_FILE="${RALPH_CHECKPOINT_FILE:-$SCRIPT_DIR/last_run.md}"
 AGENT_LOG="$(mktemp "${TMPDIR:-/tmp}/ralph-agent.XXXXXX")" \
   || fail "No pude crear el temporal para el log del agente."
 LAST_MSG="$(mktemp "${TMPDIR:-/tmp}/ralph-lastmsg.XXXXXX")" \
@@ -99,6 +102,7 @@ AGENT_STDERR=""
 ADAPTER_RESULT_FILE=""
 ADAPTER_FINAL_MESSAGE=""
 ADAPTER_EXIT_CODE=0
+ADAPTER_ERROR=""
 
 CURRENT_ISSUE=""
 CURRENT_PHASE="preflight"
@@ -234,6 +238,13 @@ trap cleanup_on_exit EXIT
 # Seteados por los runners cuando un agente reporta un tope de uso.
 LIMIT_KIND=""
 RESET_EPOCH=""
+LIMIT_ERROR=""
+
+# Códigos privados del adaptador para que el bucle principal pueda distinguir
+# un tope reintentable de errores que deben detener la corrida.
+LIMIT_RETRY_RC=8
+AUTH_ERROR_RC=65
+CONFIG_ERROR_RC=66
 
 # ---------------------------------------------------------------- preflight --
 
@@ -248,6 +259,14 @@ case "$CI_POLICY" in
 esac
 case "$CI_TIMEOUT_SECONDS" in
   ''|*[!0-9]*) fail "RALPH_CI_TIMEOUT_SECONDS debe ser un entero no negativo." ;;
+esac
+case "$MAX_LIMIT_RETRIES" in
+  ''|*[!0-9]*) fail "RALPH_MAX_LIMIT_RETRIES debe ser un entero no negativo." ;;
+esac
+case "$DEADLINE_EPOCH" in
+  '') ;;
+  *[!0-9]*) fail "RALPH_DEADLINE_EPOCH debe ser un epoch entero no negativo." ;;
+  *) ;;
 esac
 
 repo_host() {
@@ -439,77 +458,133 @@ format_epoch() {
   fi
 }
 
-parse_clock_epoch() {
-  local clock="$1"
+# Convierte únicamente epochs enteros o timestamps RFC3339 con zona. No se
+# aceptan horas humanas, nombres de zona implícitos ni valores derivados de
+# stdout/stderr.
+parse_zoned_timestamp_epoch() {
+  local timestamp="$1" mac_timestamp length
+  case "$timestamp" in
+    ????-??-??T??:??:??Z|????-??-??T??:??:??+??:??|????-??-??T??:??:??-??:??) ;;
+    *) return 1 ;;
+  esac
   if [ "$(uname -s)" = "Darwin" ]; then
-    TZ='America/New_York' date -j -f '%I:%M%p' "$clock" +%s 2>/dev/null
+    mac_timestamp="$timestamp"
+    if [[ "$mac_timestamp" == *Z ]]; then
+      mac_timestamp="${mac_timestamp%Z}+0000"
+    else
+      length="${#mac_timestamp}"
+      mac_timestamp="${mac_timestamp:0:length-3}${mac_timestamp:length-2:2}"
+    fi
+    date -j -f '%Y-%m-%dT%H:%M:%S%z' "$mac_timestamp" +%s 2>/dev/null
   else
-    TZ='America/New_York' date --date="$clock" +%s 2>/dev/null
+    date -u -d "$timestamp" +%s 2>/dev/null
   fi
 }
 
-# Si el log del agente termina con "... limit · resets 4:10am", devuelve ese
-# instante como epoch (el mensaje lo da en America/New_York).
-reset_epoch_from_text() {
-  local text="$1" clock e now
-  clock="$(printf '%s' "$text" | grep -oiE '[0-9]{1,2}:[0-9]{2}[[:space:]]*(am|pm)' | head -1)"
-  [ -z "$clock" ] && return 0
-  e="$(parse_clock_epoch "$clock")" || return 0
-  now="$(date +%s)"
-  [ "$e" -le "$now" ] && e=$((e + 86400))   # si esa hora ya pasó hoy, es mañana
-  echo "$e"
+normalize_retry_at() {
+  local signal="$1" retry_type retry_value epoch
+  retry_type="$(jq -r '.retry_at | type' <<<"$signal")"
+  case "$retry_type" in
+    number)
+      jq -e '.retry_at >= 0 and (.retry_at | floor) == .retry_at' \
+        >/dev/null 2>&1 <<<"$signal" || return 0
+      jq -r '.retry_at' <<<"$signal"
+      ;;
+    string)
+      retry_value="$(jq -r '.retry_at' <<<"$signal")"
+      case "$retry_value" in
+        ''|*[!0-9]*)
+          epoch="$(parse_zoned_timestamp_epoch "$retry_value")" || return 0
+          ;;
+        *)
+          epoch="$retry_value"
+          ;;
+      esac
+      printf '%s\n' "$epoch"
+      ;;
+  esac
 }
 
-reset_epoch_from_log() {
-  reset_epoch_from_text "$(tail -n 40 "$AGENT_LOG")"
+provider_signal_from_event() {
+  jq -c '
+    if (.type == "error" or .type == "turn.failed") then
+      if (.error | type) == "object" then .error
+      elif (.provider_error | type) == "object" then .provider_error
+      elif (.metadata.error | type) == "object" then .metadata.error
+      elif (.provider_metadata.error | type) == "object" then .provider_metadata.error
+      elif (.metadata.rate_limit | type) == "object" then .metadata.rate_limit
+      elif (.provider_metadata.rate_limit | type) == "object" then .provider_metadata.rate_limit
+      elif (.metadata | type) == "object" then .metadata
+      elif (.provider_metadata | type) == "object" then .provider_metadata
+      elif ((.code // .kind // .status // .retry_at) != null) then .
+      else empty end
+    elif (.type == "result" and .is_error == true) then
+      if (.error | type) == "object" then .error
+      elif (.provider_error | type) == "object" then .provider_error
+      elif (.metadata.error | type) == "object" then .metadata.error
+      elif (.provider_metadata.error | type) == "object" then .provider_metadata.error
+      elif (.metadata.rate_limit | type) == "object" then .metadata.rate_limit
+      elif (.provider_metadata.rate_limit | type) == "object" then .provider_metadata.rate_limit
+      elif (.metadata | type) == "object" then .metadata
+      elif (.provider_metadata | type) == "object" then .provider_metadata
+      elif ((.code // .kind // .status // .retry_at) != null) then .
+      else empty end
+    else empty end
+  ' <<<"$1"
 }
 
-# ¿La corrida murió por tope de uso del proveedor? Miramos SOLO el final del log:
-# el aviso llega al cierre, mientras que el prompt (que Codex ecoa al principio)
-# puede contener cualquier frase y daría falsos positivos.
-# Devuelve: 0 si no hubo tope · 8 tope de sesión · 9 tope semanal.
-classify_limit() {
-  local tail_log now
-  if [ "$#" -gt 0 ]; then
-    tail_log="$1"
-  else
-    tail_log="$(tail -n 40 "$AGENT_LOG")"
-  fi
-  printf '%s' "$tail_log" | grep -qiE \
-    "you('ve| have) (hit|reached) your .*limit|usage limit|rate limit|limit[^a-z0-9]*resets" \
-    || return 0
+classify_provider_signal() {
+  local signal="$1" code scope retry_at error_message
+  code="$(jq -r 'if (.rate_limit == true or (.rate_limit | type) == "object" or .rate_limited == true) then "rate_limit" else (.code // .error_code // .kind // .type // .status // "") end | tostring | ascii_downcase' <<<"$signal")"
+  scope="$(jq -r '(.limit_scope // .scope // "") | tostring | ascii_downcase' <<<"$signal")"
+  retry_at="$(normalize_retry_at "$signal")"
+  error_message="$(jq -r '(.message // .detail // .code // "provider error") | tostring' <<<"$signal")"
 
-  if [ "$#" -gt 0 ]; then
-    RESET_EPOCH="$(reset_epoch_from_text "$tail_log")"
-  else
-    RESET_EPOCH="$(reset_epoch_from_log)"
-  fi
-  now="$(date +%s)"
-  # Primero por la palabra del mensaje (señal fiable); si no aparece, por la
-  # distancia al reset (un tope de sesión reabre en pocas horas).
-  if printf '%s' "$tail_log" | grep -qi "week"; then
-    LIMIT_KIND="semanal"; return 9
-  elif printf '%s' "$tail_log" | grep -qi "session"; then
-    LIMIT_KIND="de sesión"; return 8
-  elif [ -n "$RESET_EPOCH" ] && [ "$((RESET_EPOCH - now))" -gt 28800 ]; then
-    LIMIT_KIND="semanal"; return 9
-  fi
-  LIMIT_KIND="de sesión"; return 8
+  ADAPTER_ERROR="$error_message"
+  ADAPTER_RETRY_AT="null"
+  ADAPTER_LIMIT_SCOPE="unknown"
+  ADAPTER_RETRYABLE=false
+  case "$code" in
+    rate_limit|rate_limited|rate_limit_exceeded|usage_limit|quota_exceeded|too_many_requests|429)
+      ADAPTER_STATUS="rate_limited"
+      ADAPTER_RETRYABLE=true
+      [ -n "$retry_at" ] && ADAPTER_RETRY_AT="$retry_at"
+      case "$scope" in
+        weekly|week) ADAPTER_LIMIT_SCOPE="weekly" ;;
+        session|day|daily) ADAPTER_LIMIT_SCOPE="session" ;;
+      esac
+      ;;
+    auth_error|authentication_error|unauthorized|invalid_api_key|not_authenticated|401)
+      ADAPTER_STATUS="auth_error"
+      ;;
+    config_error|configuration_error|invalid_configuration|invalid_model|unsupported_model|invalid_option|unsupported_option)
+      ADAPTER_STATUS="config_error"
+      ;;
+    *)
+      ADAPTER_STATUS="unknown"
+      ;;
+  esac
 }
 
-# Espera hasta que reabra la ventana de uso, en bloques de <=10min (robusto
-# ante suspensión de la máquina). Usa RESET_EPOCH si se conoce; si no, 1h.
+# Espera hasta el instante fiable entregado por el proveedor, en bloques de
+# <=10min. Devuelve 2 si el deadline global vence antes del reset.
 wait_for_reset() {
   local issue="$1" target now remaining
+  [ -n "$RESET_EPOCH" ] || {
+    echo "⏭️  Tope sin retry_at fiable; reintento de #$issue sin espera."
+    return 0
+  }
   now="$(date +%s)"
-  if [ -n "$RESET_EPOCH" ] && [ "$RESET_EPOCH" -gt "$now" ]; then
-    target=$((RESET_EPOCH + 120))           # +2 min de colchón
-  else
-    target=$((now + 3600))
+  target="$RESET_EPOCH"
+  if [ -n "$DEADLINE_EPOCH" ] && [ "$target" -gt "$DEADLINE_EPOCH" ]; then
+    echo "🛑 El reset del proveedor excede el deadline global; no reintento #$issue."
+    return 2
   fi
+  [ "$target" -gt "$now" ] || return 0
   echo "⏳ Tope $LIMIT_KIND. Reintento de #$issue ~$(format_epoch "$target" '+%H:%M') (en $(((target - now) / 60)) min)..."
   while :; do
-    remaining=$((target - $(date +%s)))
+    now="$(date +%s)"
+    remaining=$((target - now))
     [ "$remaining" -le 0 ] && break
     sleep $(( remaining > 600 ? 600 : remaining ))
   done
@@ -680,8 +755,10 @@ write_adapter_result() {
       --argjson retry_at "$retry_at_json" \
       --argjson retryable "$ADAPTER_RETRYABLE" \
       --argjson exit_code "$ADAPTER_EXIT_CODE" \
+      --arg error "${ADAPTER_ERROR:-}" \
       '{status: $status, retry_at: $retry_at, limit_scope: $limit_scope,
-        retryable: $retryable, exit_code: $exit_code, final_message: $final_message}' \
+        retryable: $retryable, exit_code: $exit_code, final_message: $final_message,
+        error: (if $error == "" then null else $error end)}' \
       > "$ADAPTER_RESULT_FILE"
   else
     jq -cn \
@@ -690,48 +767,35 @@ write_adapter_result() {
       --argjson retry_at "$retry_at_json" \
       --argjson retryable "$ADAPTER_RETRYABLE" \
       --argjson exit_code "$ADAPTER_EXIT_CODE" \
+      --arg error "${ADAPTER_ERROR:-}" \
       '{status: $status, retry_at: $retry_at, limit_scope: $limit_scope,
-        retryable: $retryable, exit_code: $exit_code, final_message: null}' \
+        retryable: $retryable, exit_code: $exit_code, final_message: null,
+        error: (if $error == "" then null else $error end)}' \
       > "$ADAPTER_RESULT_FILE"
   fi
 }
 
 classify_adapter_failure() {
-  local text="$1" limit_rc
-  ADAPTER_STATUS="failed"
+  local signal="${1:-}"
+  ADAPTER_STATUS="unknown"
   ADAPTER_RETRY_AT="null"
   ADAPTER_LIMIT_SCOPE="unknown"
   ADAPTER_RETRYABLE=false
-
-  classify_limit "$text"
-  limit_rc=$?
-  if [ "$limit_rc" -eq 8 ] || [ "$limit_rc" -eq 9 ]; then
-    ADAPTER_STATUS="rate_limited"
-    ADAPTER_RETRYABLE=true
-    if [ "$limit_rc" -eq 9 ]; then
-      ADAPTER_LIMIT_SCOPE="weekly"
-    else
-      ADAPTER_LIMIT_SCOPE="session"
-    fi
-    ADAPTER_RETRY_AT="$RESET_EPOCH"
-    [ -n "$ADAPTER_RETRY_AT" ] || ADAPTER_RETRY_AT="null"
-  elif printf '%s' "$text" | grep -Eqi \
-      'unauthori[sz]ed|authentication|not authenticated|login required|api key|(^|[^0-9])401([^0-9]|$)'; then
-    ADAPTER_STATUS="auth_error"
-  elif printf '%s' "$text" | grep -Eqi \
-      'configuration error|invalid (configuration|config|model|sandbox|option)|unknown (model|option)|unsupported (model|sandbox|option)'; then
-    ADAPTER_STATUS="config_error"
+  ADAPTER_ERROR="agent failed without a recognized provider error signal"
+  if [ -n "$signal" ]; then
+    classify_provider_signal "$signal"
   fi
 }
 
 parse_codex_result() {
   local stdout_file="$1" stderr_file="$2" last_message_file="$3" process_rc="$4"
-  local line event_type event_message="" invalid=0 completed=0 item_message=""
-  local output_text stderr_tail last_message=""
+  local line event_type provider_signal="" invalid=0 completed=0 item_message=""
+  local last_message=""
   ADAPTER_STATUS="failed"
   ADAPTER_RETRY_AT="null"
   ADAPTER_LIMIT_SCOPE="unknown"
   ADAPTER_RETRYABLE=false
+  ADAPTER_ERROR=""
   ADAPTER_FINAL_MESSAGE=""
   ADAPTER_FINAL_MESSAGE_SET=0
   ADAPTER_EXIT_CODE="$process_rc"
@@ -752,7 +816,7 @@ parse_codex_result() {
         fi
         ;;
       turn.failed|error)
-        event_message="$(jq -r '(.error.message // .message // "")' <<<"$line")"
+        provider_signal="$(provider_signal_from_event "$line" || true)"
         ;;
       item.completed)
         if jq -e '.item.type == "agent_message" and (.item.text | type == "string")' \
@@ -773,31 +837,34 @@ parse_codex_result() {
     ADAPTER_FINAL_MESSAGE_SET=1
   fi
 
-  output_text="$event_message"
-  stderr_tail="$(tail -n 40 "$stderr_file" 2>/dev/null || true)"
-  if [ -n "$stderr_tail" ]; then
-    [ -n "$output_text" ] && output_text+=$'\n'
-    output_text+="$stderr_tail"
-  fi
-  if [ "$process_rc" -ne 0 ] || [ "$invalid" -ne 0 ] || [ "$completed" -ne 1 ] \
+  if [ -n "$provider_signal" ]; then
+    classify_adapter_failure "$provider_signal"
+  elif [ "$process_rc" -ne 0 ] || [ "$invalid" -ne 0 ] || [ "$completed" -ne 1 ] \
       || [ "$ADAPTER_FINAL_MESSAGE_SET" -ne 1 ]; then
-    classify_adapter_failure "$output_text"
+    if [ "$process_rc" -ne 0 ]; then
+      classify_adapter_failure
+    else
+      ADAPTER_STATUS="failed"
+      ADAPTER_ERROR="Codex output did not contain a valid terminal event"
+    fi
   else
     ADAPTER_STATUS="ok"
     ADAPTER_RETRYABLE=false
     ADAPTER_LIMIT_SCOPE="unknown"
     ADAPTER_RETRY_AT="null"
+    ADAPTER_ERROR=""
   fi
   write_adapter_result
 }
 
 parse_claude_result() {
   local stdout_file="$1" stderr_file="$2" process_rc="$3"
-  local result_json="" subtype="" is_error="false" output_text="" stderr_tail="" result_present=0
+  local result_json="" subtype="" is_error="false" provider_signal="" result_present=0
   ADAPTER_STATUS="failed"
   ADAPTER_RETRY_AT="null"
   ADAPTER_LIMIT_SCOPE="unknown"
   ADAPTER_RETRYABLE=false
+  ADAPTER_ERROR=""
   ADAPTER_FINAL_MESSAGE=""
   ADAPTER_FINAL_MESSAGE_SET=0
   ADAPTER_EXIT_CODE="$process_rc"
@@ -813,24 +880,25 @@ parse_claude_result() {
     fi
     subtype="$(jq -r '.subtype // ""' <<<"$result_json")"
     is_error="$(jq -r '(.is_error // false)' <<<"$result_json")"
-    output_text="$(jq -r '[.error // "", .result // ""] | map(tostring) | join(" ")' <<<"$result_json")"
-    stderr_tail="$(tail -n 40 "$stderr_file" 2>/dev/null || true)"
-    if [ -n "$stderr_tail" ]; then
-      [ -n "$output_text" ] && output_text+=$'\n'
-      output_text+="$stderr_tail"
-    fi
-  else
-    output_text="$(tail -n 40 "$stderr_file" 2>/dev/null || true)"
+    provider_signal="$(provider_signal_from_event "$result_json" || true)"
   fi
 
   if [ "$process_rc" -ne 0 ] || [ "$result_present" -ne 1 ] \
       || [ "$subtype" != "success" ] || [ "$is_error" != "false" ]; then
-    classify_adapter_failure "$output_text"
+    if [ -n "$provider_signal" ]; then
+      classify_adapter_failure "$provider_signal"
+    elif [ "$process_rc" -ne 0 ]; then
+      classify_adapter_failure
+    else
+      ADAPTER_STATUS="failed"
+      ADAPTER_ERROR="Claude output did not contain a valid successful result"
+    fi
   else
     ADAPTER_STATUS="ok"
     ADAPTER_RETRYABLE=false
     ADAPTER_LIMIT_SCOPE="unknown"
     ADAPTER_RETRY_AT="null"
+    ADAPTER_ERROR=""
   fi
   write_adapter_result
 }
@@ -841,10 +909,15 @@ finish_adapter() {
     rate_limited)
       RESET_EPOCH=""
       [ "$ADAPTER_RETRY_AT" != "null" ] && RESET_EPOCH="$ADAPTER_RETRY_AT"
-      case "$ADAPTER_LIMIT_SCOPE" in
-        weekly) LIMIT_KIND="semanal"; return 9 ;;
-        *) LIMIT_KIND="de sesión"; return 8 ;;
-      esac
+      LIMIT_ERROR="${ADAPTER_ERROR:-provider rate limit}"
+      LIMIT_KIND="${ADAPTER_LIMIT_SCOPE:-unknown}"
+      return "$LIMIT_RETRY_RC"
+      ;;
+    auth_error)
+      return "$AUTH_ERROR_RC"
+      ;;
+    config_error)
+      return "$CONFIG_ERROR_RC"
       ;;
     *)
       [ "$ADAPTER_EXIT_CODE" -ne 0 ] && return "$ADAPTER_EXIT_CODE"
@@ -879,6 +952,7 @@ run_codex() {
     ADAPTER_FINAL_MESSAGE=""
     ADAPTER_FINAL_MESSAGE_SET=0
     ADAPTER_EXIT_CODE="$process_rc"
+    ADAPTER_ERROR="agent capture failed"
     write_adapter_result
     return "$process_rc"
   fi
@@ -909,6 +983,7 @@ run_claude() {
     ADAPTER_FINAL_MESSAGE=""
     ADAPTER_FINAL_MESSAGE_SET=0
     ADAPTER_EXIT_CODE="$process_rc"
+    ADAPTER_ERROR="agent capture failed"
     write_adapter_result
     return "$process_rc"
   fi
@@ -988,7 +1063,8 @@ verify_reviewed_head() {
 # vea lo que de verdad se va a mergear. Siempre con merge, nunca rebase: Codex
 # trabaja sobre esta rama y el merge final es --squash. Si hay conflictos los
 # resuelve Codex (sin consumir ronda de revisión); si no lo logra, el PR queda
-# para un humano. Devuelve: 0 al día · 70 fallo fatal · 8/9 tope de uso.
+# para un humano. Devuelve: 0 al día · 70 fallo fatal · 8 señal estructurada
+# de tope del proveedor.
 update_branch_with_base() {
   local branch="$1" pr="$2" rc conflicted
   if ! git fetch -q origin "$BASE_BRANCH" >/dev/null 2>&1; then
@@ -1239,7 +1315,8 @@ wait_for_ci() {
 # ------------------------------------------------------------ ciclo por issue --
 
 # Procesa UN issue: implementación por Codex, revisión por Claude, hasta
-# MAX_ROUNDS. Devuelve: 0 normal · 8 tope de sesión · 9 tope semanal.
+# MAX_ROUNDS. Devuelve: 0 normal · 8 tope estructurado · códigos privados para
+# auth/config · código del agente ante unknown o fallo de infraestructura.
 process_issue() {
   local num="$1"
   local branch="${BRANCH_PREFIX}${num}"
@@ -1626,18 +1703,49 @@ select_issues() {
         continue
       fi
 
-      # Reintenta automáticamente ante el tope de sesión; ante el tope semanal,
-      # para y deja contexto para reanudar a mano.
+      # Los topes sólo reintentan este issue y tienen un techo global por issue.
+      # Un reset fiable puede demorar el reintento, pero nunca se inventa una
+      # espera cuando el proveedor no entregó retry_at.
+      limit_retries=0
       while :; do
         process_issue "$num"
         rc=$?
-        if [ "$rc" -eq 9 ]; then
-          echo "🛑 Tope semanal alcanzado. Paro y guardo contexto."
-          write_checkpoint
-          exit 0
-        elif [ "$rc" -eq 8 ]; then
+        if [ "$rc" -eq "$LIMIT_RETRY_RC" ] && [ "$ADAPTER_STATUS" = "rate_limited" ]; then
+          if [ "$limit_retries" -ge "$MAX_LIMIT_RETRIES" ]; then
+            echo "🛑 Tope del proveedor: máximo $MAX_LIMIT_RETRIES reintentos para #$num; guardo contexto."
+            write_checkpoint "tope del proveedor agotó el máximo de $MAX_LIMIT_RETRIES reintentos para #$num (${LIMIT_ERROR:-sin detalle})."
+            exit 0
+          fi
+          limit_retries=$((limit_retries + 1))
+          if [ -n "$DEADLINE_EPOCH" ]; then
+            now="$(date +%s)" || exit 1
+            if [ "$now" -ge "$DEADLINE_EPOCH" ]; then
+              echo "🛑 Deadline global alcanzado; no reintento #$num."
+              write_checkpoint "deadline global alcanzado antes del reintento de #$num."
+              exit 0
+            fi
+          fi
           wait_for_reset "$num"
-          continue   # reintenta el MISMO issue en la ventana nueva
+          wait_rc=$?
+          if [ "$wait_rc" -eq 2 ]; then
+            write_checkpoint "deadline global alcanzado antes del reset del proveedor para #$num."
+            exit 0
+          elif [ "$wait_rc" -ne 0 ]; then
+            echo "❌ No pude esperar el reset del proveedor; detengo la corrida."
+            exit 1
+          fi
+          continue   # reintenta el MISMO issue
+        elif [ "$rc" -eq "$AUTH_ERROR_RC" ]; then
+          echo "❌ auth_error del proveedor: ${ADAPTER_ERROR:-sin detalle}. Detengo la corrida."
+          write_checkpoint "auth_error del proveedor para #$num: ${ADAPTER_ERROR:-sin detalle}."
+          exit 1
+        elif [ "$rc" -eq "$CONFIG_ERROR_RC" ]; then
+          echo "❌ config_error del proveedor: ${ADAPTER_ERROR:-sin detalle}. Detengo la corrida."
+          write_checkpoint "config_error del proveedor para #$num: ${ADAPTER_ERROR:-sin detalle}."
+          exit 1
+        elif [ "$ADAPTER_STATUS" = "unknown" ]; then
+          echo "❌ unknown del proveedor: ${ADAPTER_ERROR:-sin detalle}. No espero ni reintento."
+          exit "$rc"
         elif [ "$rc" -ne 0 ]; then
           echo "🛑 Fallo fatal (rc=$rc). Detengo la corrida."
           exit "$rc"
