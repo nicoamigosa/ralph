@@ -4,8 +4,10 @@ PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 
 setup() {
   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ralph-tests.XXXXXX")"
+  TEST_ORIGIN="$TEST_ROOT/origin.git"
   TEST_REPO="$TEST_ROOT/repo"
-  git clone -q "$PROJECT_ROOT" "$TEST_REPO"
+  git clone -q --bare "$PROJECT_ROOT" "$TEST_ORIGIN"
+  git clone -q "$TEST_ORIGIN" "$TEST_REPO"
   if ! git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/main; then
     git -C "$TEST_REPO" branch main HEAD
   fi
@@ -16,8 +18,10 @@ setup() {
   export GH_MUTATION_LOG="$TEST_ROOT/mutations.log"
   export FAKE_AGENT_LOG="$TEST_ROOT/agents.log"
   export FAKE_CODEX_PR_STATE="$TEST_ROOT/codex-created-pr"
+  export FAKE_CLAUDE_CALL_COUNT_FILE="$TEST_ROOT/claude-calls"
   : > "$GH_MUTATION_LOG"
   : > "$FAKE_AGENT_LOG"
+  printf '0\n' > "$FAKE_CLAUDE_CALL_COUNT_FILE"
 }
 
 teardown() {

@@ -33,3 +33,18 @@ load test_helper
   grep -Fq 'pr merge 101 --squash --delete-branch' "$GH_MUTATION_LOG"
   grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
 }
+
+@test "review corrections push only to the isolated test remote" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
+  export FAKE_CLAUDE_RESULTS='<verdict>CHANGES_REQUESTED</verdict>|<verdict>PASS</verdict>'
+
+  project_branches_before="$(git -C "$PROJECT_ROOT" for-each-ref --format='%(refname)' 'refs/heads/ralph/*')"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✏️  Codex corrige PR #199"* ]]
+  git --git-dir="$TEST_ORIGIN" show-ref --verify --quiet refs/heads/ralph/issue-99
+  project_branches_after="$(git -C "$PROJECT_ROOT" for-each-ref --format='%(refname)' 'refs/heads/ralph/*')"
+  [ "$project_branches_after" = "$project_branches_before" ]
+}

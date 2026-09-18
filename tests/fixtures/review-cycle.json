@@ -1,0 +1,31 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {
+      "number": 99,
+      "title": "Review cycle",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    }
+  ],
+  "pull_requests": [
+    {
+      "number": 199,
+      "head": "ralph/issue-99",
+      "available_before_codex": true,
+      "labels": [],
+      "comments": [
+        {
+          "author": {"login": "reviewer"},
+          "body": "1. Aislá el remoto del harness."
+        }
+      ],
+      "mergeCommit": {"oid": "9999999999999999999999999999999999999999"}
+    }
+  ],
+  "checks": "pass"
+}
