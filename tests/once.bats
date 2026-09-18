@@ -68,6 +68,98 @@ load test_helper
   ! grep -Fq -- '-d ' "$FAKE_DATE_LOG"
 }
 
+@test "a signal inside codex's process group is an infrastructure failure, not a host death" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_SIGNAL_GROUP=1
+  export FAKE_CODEX_SIGNAL_MARKER="$TEST_ROOT/codex-signal"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 143 ]
+  [ -f "$FAKE_CODEX_SIGNAL_MARKER" ]
+  [[ "$output" == *"fallo de infraestructura"* ]]
+  [[ "$output" == *"rc=143"* ]]
+  ! grep -Fq 'claude ' "$FAKE_AGENT_LOG"
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "finishing codex removes its orphaned child process" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_CHILD_PID_FILE="$TEST_ROOT/codex-child.pid"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  child_pid="$(cat "$FAKE_CODEX_CHILD_PID_FILE")"
+  child_alive=0
+  kill -0 "$child_pid" 2>/dev/null && child_alive=1
+  [ "$child_alive" -eq 0 ] || kill -KILL "$child_pid" 2>/dev/null || true
+  [ "$child_alive" -eq 0 ]
+}
+
+@test "TERM during implementation records the phase and preserves the checked out tree" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_WAIT_FILE="$TEST_ROOT/codex-waiting"
+  export RALPH_CI_POLICY=none
+  before_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+
+  bash -c 'cd "$1" && exec bash "$2/once.sh"' _ "$TEST_REPO" "$PROJECT_ROOT" \
+    > "$TEST_ROOT/runner.log" 2>&1 &
+  runner_pid=$!
+  for _ in {1..50}; do
+    [ -f "$FAKE_CODEX_WAIT_FILE" ] && break
+    sleep 0.1
+  done
+  [ -f "$FAKE_CODEX_WAIT_FILE" ]
+
+  kill -TERM "$runner_pid"
+  if wait "$runner_pid"; then
+    runner_rc=0
+  else
+    runner_rc=$?
+  fi
+
+  [ "$runner_rc" -eq 143 ]
+  grep -Fq 'corrida terminada por señal TERM durante implementación del issue #1' "$TEST_ROOT/runner.log"
+  [ "$(git -C "$TEST_REPO" branch --show-current)" = "ralph/issue-1" ]
+  [ "$(git -C "$TEST_REPO" rev-parse HEAD)" = "$before_sha" ]
+  [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
+}
+
+@test "TERM records the signal in an existing summary.json" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_WAIT_FILE="$TEST_ROOT/codex-waiting"
+  export RALPH_CI_POLICY=none
+  printf '%s\n' '{"errors":[]}' > "$TEST_REPO/summary.json"
+  git -C "$TEST_REPO" switch -q main
+  git -C "$TEST_REPO" add summary.json
+  git -C "$TEST_REPO" commit -q -m 'test summary'
+
+  bash -c 'cd "$1" && exec bash "$2/once.sh"' _ "$TEST_REPO" "$PROJECT_ROOT" \
+    > "$TEST_ROOT/runner.log" 2>&1 &
+  runner_pid=$!
+  for _ in {1..50}; do
+    [ -f "$FAKE_CODEX_WAIT_FILE" ] && break
+    sleep 0.1
+  done
+  [ -f "$FAKE_CODEX_WAIT_FILE" ]
+
+  kill -TERM "$runner_pid"
+  if wait "$runner_pid"; then
+    runner_rc=0
+  else
+    runner_rc=$?
+  fi
+
+  [ "$runner_rc" -eq 143 ]
+  jq -e '.stop_reason == "signal:TERM" and .signal.name == "TERM" and .signal.issue == 1 and .signal.phase == "implementación"' \
+    "$TEST_REPO/summary.json"
+}
+
 @test "dry run prints the selector plan without mutations or agents" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
   export RALPH_DRY_RUN=1

@@ -47,4 +47,22 @@ if [ "${FAKE_CODEX_CREATE_PR:-0}" = "1" ]; then
   : > "$FAKE_CODEX_PR_STATE"
 fi
 
+if [ "${FAKE_CODEX_SIGNAL_GROUP:-0}" = "1" ]; then
+  trap 'printf "%s\n" signal-handled > "$FAKE_CODEX_SIGNAL_MARKER"; exit 143' TERM
+  agent_pgid="$(ps -o pgid= -p "$$" | tr -d '[:space:]')"
+  kill -TERM -- "-$agent_pgid"
+fi
+
+if [ -n "${FAKE_CODEX_CHILD_PID_FILE:-}" ]; then
+  sleep "${FAKE_CODEX_CHILD_SECONDS:-30}" &
+  printf '%s\n' "$!" > "$FAKE_CODEX_CHILD_PID_FILE"
+fi
+
+if [ -n "${FAKE_CODEX_WAIT_FILE:-}" ]; then
+  : > "$FAKE_CODEX_WAIT_FILE"
+  while :; do
+    sleep 1
+  done
+fi
+
 exit "$codex_exit"
