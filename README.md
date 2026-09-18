@@ -115,6 +115,12 @@ El formato esperado en el cuerpo del issue:
 - #28
 ```
 
+Los encabezados de estas secciones se comparan sin distinguir mayúsculas y
+la sección termina en el siguiente `## `. Cada referencia debe ocupar una
+línea completa (`#N` o `- #N`, con espacios opcionales); se tolera un `\r`
+final. En `## Blocked by`, cualquier línea no vacía fuera de ese formato
+bloquea el issue y Ralph informa explícitamente el error.
+
 ## Idempotencia
 
 Si una corrida se corta (Ctrl-C, tope de uso, caída), la siguiente **reutiliza**

@@ -85,6 +85,41 @@ load test_helper
   [ ! -s "$FAKE_AGENT_LOG" ]
 }
 
+@test "section references stop at the next heading" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/section-refs.json"
+  export RALPH_DRY_RUN=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"#1 priority=1 host=github.com parents=none blockers=12 needs-human=no pr=none excluded=blocked-by:12"* ]]
+  [[ "$output" == *"#2 priority=2 host=github.com parents=none blockers=12 needs-human=no pr=none excluded=blocked-by:12"* ]]
+  [[ "$output" != *"blockers=12,999"* ]]
+}
+
+@test "section references require one documented reference per line" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/section-format.json"
+  export RALPH_DRY_RUN=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"#1 priority=1 host=github.com parents=42 blockers=12,13,14,15 needs-human=no pr=none excluded=blocked-by:12,13,14,15"* ]]
+  [[ "$output" != *"parents=42,43,44,45"* ]]
+}
+
+@test "invalid Blocked by content blocks the issue explicitly" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/invalid-blocked-by.json"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"#1 bloqueado: formato inválido en ## Blocked by: - #12 (parser)"* ]]
+  [[ "$output" == *"#12, #13"* ]]
+  ! grep -Eq '^(codex|claude) ' "$FAKE_AGENT_LOG"
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
 @test "claude PASS with a nonzero exit never merges the issue" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1

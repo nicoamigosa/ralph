@@ -1,0 +1,17 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {
+      "number": 1,
+      "title": "Section format",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "## blocked BY\r\n- #12\r\n  #13\r\n-#14\r\n#15\r\n\r\n## Parent\r\n#42\r\n#43 (parser)\r\n#44, #45\r\n",
+      "comments": []
+    }
+  ],
+  "pull_requests": [],
+  "checks": "pass"
+}
