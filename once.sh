@@ -1735,11 +1735,11 @@ select_issues() {
             exit 1
           fi
           continue   # reintenta el MISMO issue
-        elif [ "$rc" -eq "$AUTH_ERROR_RC" ]; then
+        elif [ "$rc" -eq "$AUTH_ERROR_RC" ] && [ "$ADAPTER_STATUS" = "auth_error" ]; then
           echo "❌ auth_error del proveedor: ${ADAPTER_ERROR:-sin detalle}. Detengo la corrida."
           write_checkpoint "auth_error del proveedor para #$num: ${ADAPTER_ERROR:-sin detalle}."
           exit 1
-        elif [ "$rc" -eq "$CONFIG_ERROR_RC" ]; then
+        elif [ "$rc" -eq "$CONFIG_ERROR_RC" ] && [ "$ADAPTER_STATUS" = "config_error" ]; then
           echo "❌ config_error del proveedor: ${ADAPTER_ERROR:-sin detalle}. Detengo la corrida."
           write_checkpoint "config_error del proveedor para #$num: ${ADAPTER_ERROR:-sin detalle}."
           exit 1

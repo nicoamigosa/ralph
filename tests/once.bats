@@ -1007,6 +1007,21 @@ load test_helper
   [ "$(jq -r '.exit_code' "$result_file")" = 1 ]
 }
 
+@test "raw auth exit code without a provider signal stays unknown" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=65
+  export RALPH_CI_POLICY=none
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 65 ]
+  [[ "$output" == *"unknown del proveedor"* ]]
+  result_file="$RUN_DIR/codex-1.result.json"
+  [ "$(jq -r '.status' "$result_file")" = unknown ]
+  [ ! -e "$TEST_REPO/last_run.md" ]
+}
+
 @test "successful codex tool output mentioning rate limit is not a usage limit" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
