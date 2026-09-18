@@ -133,6 +133,25 @@ manualmente. También detiene la corrida ante fallos de `checkout`, `fetch`,
 `push` o `pull --ff-only`; un conflicto que Codex no resuelve se aborta cuando
 es posible, conserva el árbol si no lo es y deja el PR etiquetado para un humano.
 
+## Procesos
+
+Cada `codex exec` y `claude` se lanza en su propia sesión/grupo de procesos.
+Cuando existe `setsid` se usa para crear la sesión; en macOS sin `setsid`, Bash
+5 usa job control (`set -m`) para obtener un grupo separado. La salida se
+transmite por `tee`, pero el grupo del agente queda aislado del grupo de
+`once.sh`: una señal dirigida al agente no termina el orquestador.
+
+Al terminar un agente, Ralph termina su grupo completo, incluidos procesos
+huérfanos como servidores, watchers o tests colgados. Comprueba que el grupo no
+sea el suyo antes de hacerlo, por lo que nunca se mata a sí mismo. Un agente que
+termina por señal (`rc >= 128`) es un fallo de infraestructura: no produce
+veredicto ni éxito.
+
+`once.sh` atiende `TERM`, `INT` y `HUP`. Registra la señal, la fase y el issue,
+conserva el árbol y la rama en el estado en que estaban y sale con `128 + señal`;
+no hace checkout ni reset destructivo. Cuando #25 configure `RUN_DIR` y ya
+exista allí `summary.json`, también guarda allí el motivo y los datos de la señal.
+
 ## Fallos del revisor vs. rechazos
 
 Un revisor que **no llegó a correr** (API 529, red caída, crash) no es un

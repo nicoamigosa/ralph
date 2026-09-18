@@ -5,4 +5,13 @@ if [ "${FAKE_SLEEP_NOOP:-0}" = "1" ]; then
   exit 0
 fi
 
+if [ "${FAKE_SLEEP_DISCOVERY_GATE_FILE:-}" != "" ] && [ "${1:-}" = "0.01" ] \
+    && [ ! -f "${FAKE_SLEEP_DISCOVERY_RELEASE_FILE:-}" ]; then
+  : > "$FAKE_SLEEP_DISCOVERY_GATE_FILE"
+  while [ ! -f "$FAKE_SLEEP_DISCOVERY_RELEASE_FILE" ]; do
+    "$RALPH_TEST_REAL_SLEEP" 0.01
+  done
+  exit 0
+fi
+
 exec "$RALPH_TEST_REAL_SLEEP" "$@"

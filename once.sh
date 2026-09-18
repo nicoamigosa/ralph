@@ -88,7 +88,127 @@ AGENT_LOG="$(mktemp "${TMPDIR:-/tmp}/ralph-agent.XXXXXX")" \
   || fail "No pude crear el temporal para el log del agente."
 LAST_MSG="$(mktemp "${TMPDIR:-/tmp}/ralph-lastmsg.XXXXXX")" \
   || fail "No pude crear el temporal para el último mensaje."
-trap 'rm -f "$AGENT_LOG" "$LAST_MSG"' EXIT
+
+CURRENT_ISSUE=""
+CURRENT_PHASE="preflight"
+CURRENT_AGENT_PID=""
+CURRENT_AGENT_PGID=""
+CURRENT_AGENT_FIFO=""
+CURRENT_TEE_PID=""
+SIGNAL_EXITING=0
+
+process_group_for_pid() {
+  ps -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
+process_is_running() {
+  local state
+  state="$(ps -o stat= -p "$1" 2>/dev/null | tr -d '[:space:]')"
+  case "$state" in
+    ''|Z*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+terminate_agent_group() {
+  local own_pgid agent_pgid
+  own_pgid="$(process_group_for_pid "$$")"
+  agent_pgid="$CURRENT_AGENT_PGID"
+  if [ -z "$agent_pgid" ] && [ -n "$CURRENT_AGENT_PID" ]; then
+    agent_pgid="$(process_group_for_pid "$CURRENT_AGENT_PID")"
+  fi
+  if [ -n "$agent_pgid" ] && [ "$agent_pgid" != "$own_pgid" ] && [ "$agent_pgid" != 0 ]; then
+    kill -TERM -- "-$agent_pgid" 2>/dev/null || true
+    kill -KILL -- "-$agent_pgid" 2>/dev/null || true
+    return 0
+  fi
+  if [ -n "$CURRENT_AGENT_PID" ] && [ "$CURRENT_AGENT_PID" != "$$" ] \
+      && process_is_running "$CURRENT_AGENT_PID"; then
+    kill -TERM "$CURRENT_AGENT_PID" 2>/dev/null || true
+    kill -KILL "$CURRENT_AGENT_PID" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+terminate_agent_processes() {
+  local agent_terminated=0
+  if terminate_agent_group; then
+    agent_terminated=1
+  fi
+  if [ -n "$CURRENT_TEE_PID" ]; then
+    kill -TERM "$CURRENT_TEE_PID" 2>/dev/null || true
+    kill -KILL "$CURRENT_TEE_PID" 2>/dev/null || true
+  fi
+  if [ -n "$CURRENT_AGENT_PID" ] && { [ "$agent_terminated" -eq 1 ] || ! process_is_running "$CURRENT_AGENT_PID"; }; then
+    wait "$CURRENT_AGENT_PID" 2>/dev/null || true
+  fi
+  if [ -n "$CURRENT_TEE_PID" ]; then
+    wait "$CURRENT_TEE_PID" 2>/dev/null || true
+  fi
+}
+
+record_signal_in_summary() {
+  local signal="$1" exit_code="$2" summary_file
+  local summary_tmp message issue_json
+  [ -n "${RUN_DIR:-}" ] || return 0
+  summary_file="$RUN_DIR/summary.json"
+  [ -f "$summary_file" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  summary_tmp="${summary_file}.tmp.$$"
+  message="corrida terminada por señal $signal durante $CURRENT_PHASE del issue #${CURRENT_ISSUE:-?}"
+  if [ -n "$CURRENT_ISSUE" ] && printf '%s' "$CURRENT_ISSUE" | grep -Eq '^[0-9]+$'; then
+    issue_json="$CURRENT_ISSUE"
+  else
+    issue_json=null
+  fi
+  if jq --arg signal "$signal" \
+      --arg phase "$CURRENT_PHASE" \
+      --arg message "$message" \
+      --argjson issue "$issue_json" \
+      --argjson exit_code "$exit_code" \
+      '.stop_reason = ("signal:" + $signal) |
+       .signal = {name: $signal, phase: $phase, issue: $issue, exit_code: $exit_code} |
+       .errors = ((.errors // []) + [$message])' \
+      "$summary_file" > "$summary_tmp" 2>/dev/null; then
+    mv -f "$summary_tmp" "$summary_file"
+  else
+    rm -f "$summary_tmp"
+  fi
+}
+
+signal_number() {
+  case "$1" in
+    HUP) printf '%s\n' 1 ;;
+    INT) printf '%s\n' 2 ;;
+    TERM) printf '%s\n' 15 ;;
+    *) printf '%s\n' 1 ;;
+  esac
+}
+
+handle_signal() {
+  local signal="$1" exit_code message
+  [ "$SIGNAL_EXITING" -eq 0 ] || return 0
+  SIGNAL_EXITING=1
+  exit_code=$((128 + $(signal_number "$signal")))
+  message="corrida terminada por señal $signal durante $CURRENT_PHASE del issue #${CURRENT_ISSUE:-?}"
+  printf '⚠️  %s\n' "$message"
+  printf '%s\n' "$message" >> "$AGENT_LOG"
+  record_signal_in_summary "$signal" "$exit_code"
+  terminate_agent_processes
+  exit "$exit_code"
+}
+
+cleanup_on_exit() {
+  [ "$SIGNAL_EXITING" -eq 1 ] || terminate_agent_processes
+  rm -f "$AGENT_LOG" "$LAST_MSG"
+  [ -n "$CURRENT_AGENT_FIFO" ] && rm -f "$CURRENT_AGENT_FIFO"
+}
+
+trap 'handle_signal TERM' TERM
+trap 'handle_signal INT' INT
+trap 'handle_signal HUP' HUP
+trap cleanup_on_exit EXIT
 
 # Seteados por los runners cuando un agente reporta un tope de uso.
 LIMIT_KIND=""
@@ -391,49 +511,118 @@ write_checkpoint() {
   echo "💾 Contexto guardado en $CHECKPOINT_FILE"
 }
 
-# Corre Codex sobre el repo. Devuelve el exit code del agente, 8 · 9 por límites
-# o 70 si falla tee.
-run_codex() {
-  local prompt="$1" limit_rc agent_rc tee_rc
-  local -a pipeline_status
-  : > "$AGENT_LOG"; : > "$LAST_MSG"
-  codex exec \
-    --model "$CODEX_MODEL" \
-    -c "model_reasoning_effort=\"$CODEX_EFFORT\"" \
-    -c 'sandbox_workspace_write.network_access=true' \
-    --sandbox "$CODEX_SANDBOX" \
-    --skip-git-repo-check \
-    -o "$LAST_MSG" \
-    "$prompt" 2>&1 | tee "$AGENT_LOG"
-  pipeline_status=("${PIPESTATUS[@]}")
-  agent_rc="${pipeline_status[0]}"
-  tee_rc="${pipeline_status[1]}"
+# Corre un agente en su propia sesión/grupo y transmite su salida a tee. Devuelve
+# el exit code del agente, 8 · 9 por límites o 70 si falla tee.
+run_agent_group() {
+  local fifo="$AGENT_LOG.fifo" agent_rc=0 tee_rc=0 agent_done=0 tee_done=0
+  local had_job_control=0 own_pgid agent_pgid attempt=0
+  local -a tee_files=("$@")
+
+  rm -f "$fifo"
+  mkfifo "$fifo" || return 70
+  CURRENT_AGENT_FIFO="$fifo"
+
+  case "$-" in *m*) had_job_control=1;; esac
+  tee "${tee_files[@]}" < "$fifo" &
+  CURRENT_TEE_PID=$!
+
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "${AGENT_COMMAND[@]}" > "$fifo" 2>&1 &
+  else
+    set -m
+    "${AGENT_COMMAND[@]}" > "$fifo" 2>&1 &
+    [ "$had_job_control" -eq 1 ] || set +m
+  fi
+  CURRENT_AGENT_PID=$!
+  own_pgid="$(process_group_for_pid "$$")"
+  CURRENT_AGENT_PGID=""
+  while [ "$attempt" -lt 100 ]; do
+    agent_pgid="$(process_group_for_pid "$CURRENT_AGENT_PID")"
+    if [ -n "$agent_pgid" ] && [ "$agent_pgid" != "$own_pgid" ]; then
+      CURRENT_AGENT_PGID="$agent_pgid"
+      break
+    fi
+    if [ -z "$agent_pgid" ] && ! process_is_running "$CURRENT_AGENT_PID"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.01
+  done
+  if [ -z "$CURRENT_AGENT_PGID" ] && ! process_is_running "$CURRENT_AGENT_PID"; then
+    CURRENT_AGENT_PGID="$CURRENT_AGENT_PID"
+  fi
+  if [ -z "$CURRENT_AGENT_PGID" ]; then
+    echo "❌ No pude aislar el grupo de procesos del agente; detengo la corrida."
+    kill -TERM "$CURRENT_AGENT_PID" 2>/dev/null || true
+    return 70
+  fi
+
+  while [ "$agent_done" -eq 0 ] || [ "$tee_done" -eq 0 ]; do
+    if [ "$agent_done" -eq 0 ] && ! process_is_running "$CURRENT_AGENT_PID"; then
+      wait "$CURRENT_AGENT_PID" 2>/dev/null
+      agent_rc=$?
+      agent_done=1
+      terminate_agent_group
+    fi
+    if [ "$tee_done" -eq 0 ] && ! process_is_running "$CURRENT_TEE_PID"; then
+      wait "$CURRENT_TEE_PID" 2>/dev/null
+      tee_rc=$?
+      tee_done=1
+      [ "$agent_done" -eq 1 ] || terminate_agent_group
+    fi
+    if [ "$agent_done" -eq 0 ] || [ "$tee_done" -eq 0 ]; then
+      sleep 0.1
+    fi
+  done
+
+  rm -f "$fifo"
+  CURRENT_AGENT_PID=""
+  CURRENT_AGENT_PGID=""
+  CURRENT_AGENT_FIFO=""
+  CURRENT_TEE_PID=""
   [ "$tee_rc" -eq 0 ] || return 70
-  classify_limit
-  limit_rc=$?
-  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
   return "$agent_rc"
 }
 
-# Corre Claude en modo headless. Devuelve el exit code del agente, 8 · 9 por
-# límites o 70 si falla tee.
-run_claude() {
-  local prompt="$1" limit_rc agent_rc tee_rc
-  local -a pipeline_status
+run_codex() {
+  local prompt="$1" limit_rc
   : > "$AGENT_LOG"; : > "$LAST_MSG"
-  claude \
-    --model "$CLAUDE_MODEL" \
-    --dangerously-skip-permissions \
-    --print \
-    "$prompt" 2>&1 | tee "$LAST_MSG" "$AGENT_LOG"
-  pipeline_status=("${PIPESTATUS[@]}")
-  agent_rc="${pipeline_status[0]}"
-  tee_rc="${pipeline_status[1]}"
-  [ "$tee_rc" -eq 0 ] || return 70
+  AGENT_COMMAND=(
+    codex exec
+    --model "$CODEX_MODEL"
+    -c "model_reasoning_effort=\"$CODEX_EFFORT\""
+    -c 'sandbox_workspace_write.network_access=true'
+    --sandbox "$CODEX_SANDBOX"
+    --skip-git-repo-check
+    -o "$LAST_MSG"
+    "$prompt"
+  )
+  run_agent_group "$AGENT_LOG"
+  limit_rc=$?
+  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
   classify_limit
   limit_rc=$?
   [ "$limit_rc" -eq 0 ] || return "$limit_rc"
-  return "$agent_rc"
+  return 0
+}
+
+run_claude() {
+  local prompt="$1" limit_rc
+  : > "$AGENT_LOG"; : > "$LAST_MSG"
+  AGENT_COMMAND=(
+    claude
+    --model "$CLAUDE_MODEL"
+    --dangerously-skip-permissions
+    --print
+    "$prompt"
+  )
+  run_agent_group "$LAST_MSG" "$AGENT_LOG"
+  limit_rc=$?
+  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
+  classify_limit
+  limit_rc=$?
+  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
+  return 0
 }
 
 # 'gh pr edit --add-label' revienta en versiones de gh que aún consultan
@@ -735,6 +924,8 @@ process_issue() {
   local rc issue_ctx commits pr round verdict comments prior_work reviewed_sha
   local infra_retries comments_before comments_after backoff merged_sha ci_ok ci_rc
 
+  CURRENT_ISSUE="$num"
+  CURRENT_PHASE="preparación"
   echo ""
   echo "════ Issue #$num ($branch) ════"
 
@@ -767,6 +958,7 @@ process_issue() {
 
   # ---- Fase 1: implementación (se salta si ya hay PR abierto) ----
   if [ -z "$pr" ]; then
+    CURRENT_PHASE="implementación"
     echo "🛠️  Codex implementa #$num..."
     local resume_note=""
     [ -n "$prior_work" ] && resume_note="
@@ -791,6 +983,9 @@ $resume_note
 ## Working instructions
 $PROMPT_IMPLEMENT"
     rc=$?
+    if [ "$rc" -ge 128 ]; then
+      echo "❌ Codex terminó por señal (rc=$rc): fallo de infraestructura del issue #$num."
+    fi
     [ "$rc" -ne 0 ] && return "$rc"
 
     # El agente debe dejar el trabajo commiteado. Preservamos el árbol para
@@ -812,11 +1007,15 @@ $PROMPT_IMPLEMENT"
   fi
 
   # ---- Fase 2: revisión, hasta MAX_ROUNDS ----
+  CURRENT_PHASE="revisión"
   round=1
   infra_retries=0
   while [ "$round" -le "$MAX_ROUNDS" ]; do
     update_branch_with_base "$branch" "$pr"
     rc=$?
+    if [ "$rc" -ge 128 ]; then
+      echo "❌ Codex terminó por señal (rc=$rc): fallo de infraestructura del issue #$num."
+    fi
     [ "$rc" -ne 0 ] && return "$rc"
 
     reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
@@ -938,6 +1137,7 @@ $PROMPT_REVIEW"
     fi
 
     # ---- Fase 3: Codex atiende los comentarios ----
+    CURRENT_PHASE="corrección"
     echo "✏️  Codex corrige PR #$pr..."
     comments="$(gh pr view "$pr" --json comments --jq '.comments[-1] | "### \(.author.login) escribió:\n\n\(.body)"' 2>/dev/null)"
     run_codex "Your pull request was reviewed and did not pass.
@@ -955,6 +1155,9 @@ $comments
 ## Working instructions
 $PROMPT_REVISE"
     rc=$?
+    if [ "$rc" -ge 128 ]; then
+      echo "❌ Codex terminó por señal (rc=$rc): fallo de infraestructura del issue #$num."
+    fi
     [ "$rc" -ne 0 ] && return "$rc"
 
     # Las correcciones también deben llegar commiteadas por Codex; preservar

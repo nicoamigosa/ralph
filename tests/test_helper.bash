@@ -7,6 +7,7 @@ TEST_REAL_DATE="$(command -v date)"
 TEST_REAL_SLEEP="$(command -v sleep)"
 TEST_REAL_MKTEMP="$(command -v mktemp)"
 TEST_REAL_UNAME="$(command -v uname)"
+TEST_REAL_PS="$(command -v ps)"
 
 # Los tests corren también dentro de una corrida real de ralph (el agente
 # ejecuta bats desde un `codex exec` hijo de once.sh) y heredarían su
@@ -44,6 +45,7 @@ setup() {
   export RALPH_TEST_REAL_SLEEP="$TEST_REAL_SLEEP"
   export RALPH_TEST_REAL_MKTEMP="$TEST_REAL_MKTEMP"
   export RALPH_TEST_REAL_UNAME="$TEST_REAL_UNAME"
+  export RALPH_TEST_REAL_PS="$TEST_REAL_PS"
   export FAKE_CI_CALL_COUNT_FILE="$TEST_ROOT/ci-calls"
   export FAKE_CI_CURRENT_RESULT_FILE="$TEST_ROOT/current-ci-result"
   export PATH="$PROJECT_ROOT/tests/fakes:$PATH"
@@ -56,6 +58,11 @@ setup() {
   export FAKE_DATE_LOG="$TEST_ROOT/date.log"
   export FAKE_MKTEMP_LOG="$TEST_ROOT/mktemp.log"
   export FAKE_API_LOG="$TEST_ROOT/api.log"
+  unset FAKE_CODEX_SIGNAL_GROUP FAKE_CODEX_SIGNAL_MARKER \
+    FAKE_CODEX_CHILD_PID_FILE FAKE_CODEX_CHILD_SECONDS FAKE_CODEX_WAIT_FILE \
+    FAKE_CODEX_PID_FILE FAKE_PS_DELAY_AGENT_PGID \
+    FAKE_PS_AGENT_PGID_SEEN_FILE FAKE_SLEEP_DISCOVERY_GATE_FILE \
+    FAKE_SLEEP_DISCOVERY_RELEASE_FILE
   : > "$GH_MUTATION_LOG"
   : > "$FAKE_API_LOG"
   : > "$FAKE_AGENT_LOG"
