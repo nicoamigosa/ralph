@@ -450,14 +450,18 @@ parse_clock_epoch() {
 
 # Si el log del agente termina con "... limit · resets 4:10am", devuelve ese
 # instante como epoch (el mensaje lo da en America/New_York).
-reset_epoch_from_log() {
-  local clock e now
-  clock="$(tail -n 40 "$AGENT_LOG" | grep -oiE '[0-9]{1,2}:[0-9]{2}[[:space:]]*(am|pm)' | head -1)"
+reset_epoch_from_text() {
+  local text="$1" clock e now
+  clock="$(printf '%s' "$text" | grep -oiE '[0-9]{1,2}:[0-9]{2}[[:space:]]*(am|pm)' | head -1)"
   [ -z "$clock" ] && return 0
   e="$(parse_clock_epoch "$clock")" || return 0
   now="$(date +%s)"
   [ "$e" -le "$now" ] && e=$((e + 86400))   # si esa hora ya pasó hoy, es mañana
   echo "$e"
+}
+
+reset_epoch_from_log() {
+  reset_epoch_from_text "$(tail -n 40 "$AGENT_LOG")"
 }
 
 # ¿La corrida murió por tope de uso del proveedor? Miramos SOLO el final del log:
@@ -466,12 +470,20 @@ reset_epoch_from_log() {
 # Devuelve: 0 si no hubo tope · 8 tope de sesión · 9 tope semanal.
 classify_limit() {
   local tail_log now
-  tail_log="$(tail -n 40 "$AGENT_LOG")"
+  if [ "$#" -gt 0 ]; then
+    tail_log="$1"
+  else
+    tail_log="$(tail -n 40 "$AGENT_LOG")"
+  fi
   printf '%s' "$tail_log" | grep -qiE \
     "you('ve| have) (hit|reached) your .*limit|usage limit|rate limit|limit[^a-z0-9]*resets" \
     || return 0
 
-  RESET_EPOCH="$(reset_epoch_from_log)"
+  if [ "$#" -gt 0 ]; then
+    RESET_EPOCH="$(reset_epoch_from_text "$tail_log")"
+  else
+    RESET_EPOCH="$(reset_epoch_from_log)"
+  fi
   now="$(date +%s)"
   # Primero por la palabra del mensaje (señal fiable); si no aparece, por la
   # distancia al reset (un tope de sesión reabre en pocas horas).
@@ -685,21 +697,23 @@ write_adapter_result() {
 }
 
 classify_adapter_failure() {
-  local text="$1"
+  local text="$1" limit_rc
   ADAPTER_STATUS="failed"
   ADAPTER_RETRY_AT="null"
   ADAPTER_LIMIT_SCOPE="unknown"
   ADAPTER_RETRYABLE=false
-  if printf '%s' "$text" | grep -Eqi \
-      'rate[ -]?limit|usage limit|quota|too many requests|(^|[^0-9])429([^0-9]|$)|limit[^a-z0-9]*(reset|reopen)|resets'; then
+
+  classify_limit "$text"
+  limit_rc=$?
+  if [ "$limit_rc" -eq 8 ] || [ "$limit_rc" -eq 9 ]; then
     ADAPTER_STATUS="rate_limited"
     ADAPTER_RETRYABLE=true
-    if printf '%s' "$text" | grep -Eqi 'week|weekly'; then
+    if [ "$limit_rc" -eq 9 ]; then
       ADAPTER_LIMIT_SCOPE="weekly"
-    elif printf '%s' "$text" | grep -Eqi 'session'; then
+    else
       ADAPTER_LIMIT_SCOPE="session"
     fi
-    ADAPTER_RETRY_AT="$(reset_epoch_from_log)"
+    ADAPTER_RETRY_AT="$RESET_EPOCH"
     [ -n "$ADAPTER_RETRY_AT" ] || ADAPTER_RETRY_AT="null"
   elif printf '%s' "$text" | grep -Eqi \
       'unauthori[sz]ed|authentication|not authenticated|login required|api key|(^|[^0-9])401([^0-9]|$)'; then
@@ -713,7 +727,7 @@ classify_adapter_failure() {
 parse_codex_result() {
   local stdout_file="$1" stderr_file="$2" last_message_file="$3" process_rc="$4"
   local line event_type event_message="" invalid=0 completed=0 item_message=""
-  local output_text last_message=""
+  local output_text stderr_tail last_message=""
   ADAPTER_STATUS="failed"
   ADAPTER_RETRY_AT="null"
   ADAPTER_LIMIT_SCOPE="unknown"
@@ -759,8 +773,12 @@ parse_codex_result() {
     ADAPTER_FINAL_MESSAGE_SET=1
   fi
 
-  output_text="$(cat "$stderr_file" "$stdout_file" 2>/dev/null || true)"
-  [ -n "$event_message" ] && output_text="$event_message\n$output_text"
+  output_text="$event_message"
+  stderr_tail="$(tail -n 40 "$stderr_file" 2>/dev/null || true)"
+  if [ -n "$stderr_tail" ]; then
+    [ -n "$output_text" ] && output_text+=$'\n'
+    output_text+="$stderr_tail"
+  fi
   if [ "$process_rc" -ne 0 ] || [ "$invalid" -ne 0 ] || [ "$completed" -ne 1 ] \
       || [ "$ADAPTER_FINAL_MESSAGE_SET" -ne 1 ]; then
     classify_adapter_failure "$output_text"
@@ -775,7 +793,7 @@ parse_codex_result() {
 
 parse_claude_result() {
   local stdout_file="$1" stderr_file="$2" process_rc="$3"
-  local result_json="" subtype="" is_error="false" output_text="" result_present=0
+  local result_json="" subtype="" is_error="false" output_text="" stderr_tail="" result_present=0
   ADAPTER_STATUS="failed"
   ADAPTER_RETRY_AT="null"
   ADAPTER_LIMIT_SCOPE="unknown"
@@ -795,10 +813,14 @@ parse_claude_result() {
     fi
     subtype="$(jq -r '.subtype // ""' <<<"$result_json")"
     is_error="$(jq -r '(.is_error // false)' <<<"$result_json")"
-    output_text="$(cat "$stderr_file" 2>/dev/null || true)"
-    output_text="$subtype $output_text $(jq -r '[.error // "", .result // ""] | map(tostring) | join(" ")' <<<"$result_json")"
+    output_text="$(jq -r '[.error // "", .result // ""] | map(tostring) | join(" ")' <<<"$result_json")"
+    stderr_tail="$(tail -n 40 "$stderr_file" 2>/dev/null || true)"
+    if [ -n "$stderr_tail" ]; then
+      [ -n "$output_text" ] && output_text+=$'\n'
+      output_text+="$stderr_tail"
+    fi
   else
-    output_text="$(cat "$stderr_file" 2>/dev/null || true)"
+    output_text="$(tail -n 40 "$stderr_file" 2>/dev/null || true)"
   fi
 
   if [ "$process_rc" -ne 0 ] || [ "$result_present" -ne 1 ] \

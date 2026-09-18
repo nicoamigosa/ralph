@@ -981,3 +981,28 @@ load test_helper
   result_file="$(find "$RUN_DIR" -name 'codex-*.result.json' -print -quit)"
   [ "$(jq -r '.status' "$result_file")" = failed ]
 }
+
+@test "codex failure ignores 429 and quota in aggregated output" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_EXITS='1|0'
+  export FAKE_CODEX_FINAL_MESSAGE='implementation complete'
+  export FAKE_CODEX_STDOUT='{"type":"thread.started","thread_id":"thread_fixture"}
+{"type":"item.completed","item":{"type":"command_execution","aggregated_output":"Tests: 429 passed; quota check complete"}}
+{"type":"item.completed","item":{"type":"agent_message","text":"implementation complete"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
+  export FAKE_DATE_FAST_FORWARD=1
+  export RUN_DIR="$TEST_ROOT/run"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"Tope"* ]]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [ "$(cat "$FAKE_CODEX_CALL_COUNT_FILE")" = 1 ]
+  result_file="$(find "$RUN_DIR" -name 'codex-*.result.json' -print -quit)"
+  [ "$(jq -r '.status' "$result_file")" = failed ]
+  [ "$(jq -r '.retryable' "$result_file")" = false ]
+  [ "$(jq -r '.exit_code' "$result_file")" = 1 ]
+}
