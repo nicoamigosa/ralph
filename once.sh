@@ -111,22 +111,36 @@ process_is_running() {
 }
 
 terminate_agent_group() {
-  local own_pgid
-  [ -n "$CURRENT_AGENT_PGID" ] || return 0
+  local own_pgid agent_pgid
   own_pgid="$(process_group_for_pid "$$")"
-  if [ "$CURRENT_AGENT_PGID" != "$own_pgid" ] && [ "$CURRENT_AGENT_PGID" != 0 ]; then
-    kill -TERM -- "-$CURRENT_AGENT_PGID" 2>/dev/null || true
-    kill -KILL -- "-$CURRENT_AGENT_PGID" 2>/dev/null || true
+  agent_pgid="$CURRENT_AGENT_PGID"
+  if [ -z "$agent_pgid" ] && [ -n "$CURRENT_AGENT_PID" ]; then
+    agent_pgid="$(process_group_for_pid "$CURRENT_AGENT_PID")"
   fi
+  if [ -n "$agent_pgid" ] && [ "$agent_pgid" != "$own_pgid" ] && [ "$agent_pgid" != 0 ]; then
+    kill -TERM -- "-$agent_pgid" 2>/dev/null || true
+    kill -KILL -- "-$agent_pgid" 2>/dev/null || true
+    return 0
+  fi
+  if [ -n "$CURRENT_AGENT_PID" ] && [ "$CURRENT_AGENT_PID" != "$$" ] \
+      && process_is_running "$CURRENT_AGENT_PID"; then
+    kill -TERM "$CURRENT_AGENT_PID" 2>/dev/null || true
+    kill -KILL "$CURRENT_AGENT_PID" 2>/dev/null || true
+    return 0
+  fi
+  return 1
 }
 
 terminate_agent_processes() {
-  terminate_agent_group
+  local agent_terminated=0
+  if terminate_agent_group; then
+    agent_terminated=1
+  fi
   if [ -n "$CURRENT_TEE_PID" ]; then
     kill -TERM "$CURRENT_TEE_PID" 2>/dev/null || true
     kill -KILL "$CURRENT_TEE_PID" 2>/dev/null || true
   fi
-  if [ -n "$CURRENT_AGENT_PID" ]; then
+  if [ -n "$CURRENT_AGENT_PID" ] && { [ "$agent_terminated" -eq 1 ] || ! process_is_running "$CURRENT_AGENT_PID"; }; then
     wait "$CURRENT_AGENT_PID" 2>/dev/null || true
   fi
   if [ -n "$CURRENT_TEE_PID" ]; then
@@ -135,8 +149,10 @@ terminate_agent_processes() {
 }
 
 record_signal_in_summary() {
-  local signal="$1" exit_code="$2" summary_file="${RUN_DIR:-$PWD}/summary.json"
+  local signal="$1" exit_code="$2" summary_file
   local summary_tmp message issue_json
+  [ -n "${RUN_DIR:-}" ] || return 0
+  summary_file="$RUN_DIR/summary.json"
   [ -f "$summary_file" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   summary_tmp="${summary_file}.tmp.$$"

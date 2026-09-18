@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${FAKE_PS_DELAY_AGENT_PGID:-0}" = "1" ] \
+    && [ "${1:-}" = "-o" ] && [ "${2:-}" = "pgid=" ] \
+    && [ "${3:-}" = "-p" ]; then
+  queried_pid="${4:-}"
+  agent_pid=""
+  if [ -n "${FAKE_CODEX_PID_FILE:-}" ] && [ -f "$FAKE_CODEX_PID_FILE" ]; then
+    agent_pid="$(tr -d '[:space:]' < "$FAKE_CODEX_PID_FILE")"
+  fi
+  if [ -n "$agent_pid" ] && [ "$queried_pid" = "$agent_pid" ] \
+      && [ ! -f "${FAKE_PS_AGENT_PGID_SEEN_FILE:-}" ]; then
+    : > "$FAKE_PS_AGENT_PGID_SEEN_FILE"
+    printf '\n'
+    exit 0
+  fi
+fi
+
+exec "$RALPH_TEST_REAL_PS" "$@"

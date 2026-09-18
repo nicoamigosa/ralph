@@ -101,9 +101,14 @@ load test_helper
   [ "$child_alive" -eq 0 ]
 }
 
-@test "TERM during implementation records the phase and preserves the checked out tree" {
+@test "TERM during agent group discovery records the phase and preserves the checked out tree" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_WAIT_FILE="$TEST_ROOT/codex-waiting"
+  export FAKE_CODEX_PID_FILE="$TEST_ROOT/codex.pid"
+  export FAKE_PS_DELAY_AGENT_PGID=1
+  export FAKE_PS_AGENT_PGID_SEEN_FILE="$TEST_ROOT/agent-pgid-seen"
+  export FAKE_SLEEP_DISCOVERY_GATE_FILE="$TEST_ROOT/discovery-sleep"
+  export FAKE_SLEEP_DISCOVERY_RELEASE_FILE="$TEST_ROOT/discovery-release"
   export RALPH_CI_POLICY=none
   before_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
 
@@ -111,12 +116,33 @@ load test_helper
     > "$TEST_ROOT/runner.log" 2>&1 &
   runner_pid=$!
   for _ in {1..50}; do
-    [ -f "$FAKE_CODEX_WAIT_FILE" ] && break
-    sleep 0.1
+    [ -f "$FAKE_SLEEP_DISCOVERY_GATE_FILE" ] && break
+    "$RALPH_TEST_REAL_SLEEP" 0.1
   done
-  [ -f "$FAKE_CODEX_WAIT_FILE" ]
+  [ -f "$FAKE_SLEEP_DISCOVERY_GATE_FILE" ]
 
   kill -TERM "$runner_pid"
+  : > "$FAKE_SLEEP_DISCOVERY_RELEASE_FILE"
+  runner_done=0
+  for _ in {1..100}; do
+    if ! kill -0 "$runner_pid" 2>/dev/null; then
+      runner_done=1
+      break
+    fi
+    "$RALPH_TEST_REAL_SLEEP" 0.05
+  done
+  if [ "$runner_done" -eq 0 ]; then
+    agent_pid="$(cat "$FAKE_CODEX_PID_FILE")"
+    agent_pgid="$("$RALPH_TEST_REAL_PS" -o pgid= -p "$agent_pid" | tr -d '[:space:]')"
+    runner_pgid="$("$RALPH_TEST_REAL_PS" -o pgid= -p "$runner_pid" | tr -d '[:space:]')"
+    if [ -n "$agent_pgid" ] && [ "$agent_pgid" != "$runner_pgid" ] && [ "$agent_pgid" != "0" ]; then
+      kill -KILL -- "-$agent_pgid" 2>/dev/null || true
+    fi
+    kill -KILL "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid" 2>/dev/null || true
+    false
+  fi
+
   if wait "$runner_pid"; then
     runner_rc=0
   else
@@ -130,10 +156,11 @@ load test_helper
   [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
 }
 
-@test "TERM records the signal in an existing summary.json" {
+@test "TERM does not modify a repo summary.json before RUN_DIR exists" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_WAIT_FILE="$TEST_ROOT/codex-waiting"
   export RALPH_CI_POLICY=none
+  unset RUN_DIR
   printf '%s\n' '{"errors":[]}' > "$TEST_REPO/summary.json"
   git -C "$TEST_REPO" switch -q main
   git -C "$TEST_REPO" add summary.json
@@ -156,8 +183,8 @@ load test_helper
   fi
 
   [ "$runner_rc" -eq 143 ]
-  jq -e '.stop_reason == "signal:TERM" and .signal.name == "TERM" and .signal.issue == 1 and .signal.phase == "implementación"' \
-    "$TEST_REPO/summary.json"
+  [ "$(cat "$TEST_REPO/summary.json")" = '{"errors":[]}' ]
+  [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
 }
 
 @test "dry run prints the selector plan without mutations or agents" {

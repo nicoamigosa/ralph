@@ -149,8 +149,8 @@ veredicto ni éxito.
 
 `once.sh` atiende `TERM`, `INT` y `HUP`. Registra la señal, la fase y el issue,
 conserva el árbol y la rama en el estado en que estaban y sale con `128 + señal`;
-no hace checkout ni reset destructivo. Si ya existe `summary.json` en el repo,
-o en `RUN_DIR`, también guarda allí el motivo y los datos de la señal.
+no hace checkout ni reset destructivo. Cuando #25 configure `RUN_DIR` y ya
+exista allí `summary.json`, también guarda allí el motivo y los datos de la señal.
 
 ## Fallos del revisor vs. rechazos
 
