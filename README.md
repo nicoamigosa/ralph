@@ -18,6 +18,11 @@ un agente que termina con error nunca puede convertirse en PASS. El veredicto se
 acepta únicamente cuando es la última línea de la salida final de Claude; un
 fallo de `tee` devuelve 70 y detiene la corrida.
 
+La revisión, los checks y el merge quedan ligados al mismo SHA: Ralph compara el
+`HEAD` local con `headRefOid` antes y después de revisar, exige un árbol limpio y
+usa `--match-head-commit` al mergear. `RALPH_MERGE_METHOD` sólo admite
+`--squash`, `--merge` o `--rebase`; cualquier otro valor detiene el preflight.
+
 ## Es agnóstico al proyecto
 
 Instalá una release etiquetada como `ralph/` en cualquier repo con remoto de

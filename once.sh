@@ -82,6 +82,11 @@ RESET_EPOCH=""
 
 fail() { echo "❌ $*" >&2; exit 1; }
 
+case "$MERGE_METHOD" in
+  --squash|--merge|--rebase) ;;
+  *) fail "RALPH_MERGE_METHOD debe ser exactamente --squash, --merge o --rebase." ;;
+esac
+
 repo_host() {
   local remote
   remote="$(git remote get-url origin 2>/dev/null || true)"
@@ -352,6 +357,23 @@ checkout_or_fail() {
   return 70
 }
 
+verify_reviewed_head() {
+  local pr="$1" expected_sha="$2" local_sha remote_sha
+  local_sha="$(git rev-parse HEAD 2>/dev/null)" || {
+    echo "❌ No pude leer HEAD local; detengo la corrida."
+    return 70
+  }
+  remote_sha="$(gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null)" || {
+    echo "❌ No pude leer headRefOid del PR #$pr; detengo la corrida."
+    return 70
+  }
+  if [ "$local_sha" != "$expected_sha" ] || [ "$remote_sha" != "$expected_sha" ]; then
+    echo "❌ head_changed: el SHA revisado ya no coincide con HEAD local o headRefOid."
+    return 70
+  fi
+  return 0
+}
+
 # Pone la rama al día con la base antes de cada revisión, para que el revisor
 # vea lo que de verdad se va a mergear. Siempre con merge, nunca rebase: Codex
 # trabaja sobre esta rama y el merge final es --squash. Si hay conflictos los
@@ -452,7 +474,7 @@ wait_for_ci() {
 process_issue() {
   local num="$1"
   local branch="${BRANCH_PREFIX}${num}"
-  local rc issue_ctx commits pr round verdict comments prior_work
+  local rc issue_ctx commits pr round verdict comments prior_work reviewed_sha
   local infra_retries comments_before comments_after backoff merged_sha ci_ok
 
   echo ""
@@ -539,6 +561,14 @@ $PROMPT_IMPLEMENT"
     rc=$?
     [ "$rc" -ne 0 ] && return "$rc"
 
+    reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
+      echo "❌ No pude capturar el SHA a revisar; detengo la corrida."
+      return 70
+    }
+    verify_reviewed_head "$pr" "$reviewed_sha"
+    rc=$?
+    [ "$rc" -ne 0 ] && return "$rc"
+
     echo "🔍 Claude revisa PR #$pr (ronda $round/$MAX_ROUNDS)..."
     comments_before="$(gh pr view "$pr" --json comments --jq '.comments|length' 2>/dev/null || echo 0)"
     run_claude "You are reviewing ONE pull request.
@@ -567,13 +597,24 @@ $PROMPT_REVIEW"
     # cae a la Fase 3 como con cualquier CHANGES_REQUESTED.
     ci_ok=0
     if [ "$verdict" = "<verdict>PASS</verdict>" ]; then
+      verify_reviewed_head "$pr" "$reviewed_sha"
+      rc=$?
+      [ "$rc" -ne 0 ] && return "$rc"
       echo "✅ PASS en la ronda $round. Espero CI de PR #$pr..."
       wait_for_ci "$pr" "$branch" && ci_ok=1
     fi
     if [ "$ci_ok" -eq 1 ]; then
+      if [ -n "$(git status --porcelain)" ]; then
+        echo "❌ El árbol cambió después de la revisión; detengo la corrida."
+        return 70
+      fi
+      verify_reviewed_head "$pr" "$reviewed_sha"
+      rc=$?
+      [ "$rc" -ne 0 ] && return "$rc"
       echo "🟢 CI verde. Mergeo PR #$pr."
       checkout_or_fail "$BASE_BRANCH" || return 70
-      if gh pr merge "$pr" "$MERGE_METHOD" --delete-branch >/dev/null 2>&1; then
+      if gh pr merge "$pr" "$MERGE_METHOD" \
+          --match-head-commit "$reviewed_sha" --delete-branch >/dev/null 2>&1; then
         git branch -D "$branch" >/dev/null 2>&1 || true
         merged_sha="$(gh pr view "$pr" --json mergeCommit --jq .mergeCommit.oid 2>/dev/null)"
         # La base local debe traer el merge: los issues dependientes heredan ese código.

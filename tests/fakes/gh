@@ -14,6 +14,16 @@ issue_list_filter=".issues | map(select(.state == \"OPEN\" and ((.labels // []) 
 pull_request_filter=".pull_requests[] | select(.number == \$number)"
 head_pull_request_filter=".pull_requests[] | select(.head == \$head)"
 
+head_ref_oid() {
+  if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ] && [ -f "${GH_MUTATION_LOG}.head-changed" ]; then
+    printf '%s\n' "head_changed"
+  elif [ -n "${FAKE_HEAD_REF_OID:-}" ]; then
+    printf '%s\n' "$FAKE_HEAD_REF_OID"
+  else
+    "$RALPH_TEST_REAL_GIT" rev-parse HEAD
+  fi
+}
+
 case "${1:-}" in
   auth)
     exit 0
@@ -82,6 +92,8 @@ case "${1:-}" in
           else
             fixture_jq --argjson number "$number" "$pull_request_filter | (.comments // []) | length"
           fi
+        elif printf '%s\n' "$*" | grep -q ' --json headRefOid'; then
+          head_ref_oid
         elif printf '%s\n' "$*" | grep -q ' --json mergeCommit'; then
           fixture_jq --argjson number "$number" "$pull_request_filter | .mergeCommit"
         else
@@ -89,6 +101,9 @@ case "${1:-}" in
         fi
         ;;
       checks)
+        if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ]; then
+          : > "${GH_MUTATION_LOG}.head-changed"
+        fi
         [ "$(fixture_jq '.checks')" = "pass" ]
         ;;
       merge|comment)

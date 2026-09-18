@@ -47,6 +47,68 @@ load test_helper
   [[ "$output" != *"🎉 #1 mergeado a main y cerrado."* ]]
 }
 
+@test "HEAD distinto de headRefOid antes de revisar detiene sin invocar Claude" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_HEAD_REF_OID=remote-head-changed
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  ! grep -Eq '^claude ' "$FAKE_AGENT_LOG"
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [[ "$output" == *"head_changed"* ]]
+}
+
+@test "cambio de HEAD después de PASS no mergea y deja estado head_changed" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_HEAD_CHANGED=1
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [[ "$output" == *"head_changed"* ]]
+}
+
+@test "mergea siempre con el SHA que pasó la revisión" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq "pr merge 101 --squash --match-head-commit $reviewed_sha --delete-branch" "$GH_MUTATION_LOG"
+}
+
+@test "RALPH_MERGE_METHOD con argumentos extra falla en preflight" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_MERGE_METHOD="--squash --admin"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [[ "$output" == *"RALPH_MERGE_METHOD"* ]]
+}
+
+@test "árbol sucio después de PASS detiene sin mergear" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_WRITE_FILE="$TEST_REPO/review-dirty.txt"
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  [ -f "$TEST_REPO/review-dirty.txt" ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [[ "$output" == *"árbol cambió después de la revisión"* ]]
+}
+
 @test "uncommitted codex work stops without an automatic commit" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
@@ -94,7 +156,7 @@ load test_helper
   runner_output="$output"
 
   [ "$status" -eq 70 ]
-  grep -Fq 'pr merge 101 --squash --delete-branch' "$GH_MUTATION_LOG"
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
   run bash -c '! grep -Fq "$1" "$2"' _ 'issue close' "$GH_MUTATION_LOG"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
@@ -175,7 +237,7 @@ load test_helper
   [[ "$output" == *"🎉 #1 mergeado a main y cerrado."* ]]
   grep -Fq 'codex ' "$FAKE_AGENT_LOG"
   grep -Fq 'claude ' "$FAKE_AGENT_LOG"
-  grep -Fq 'pr merge 101 --squash --delete-branch' "$GH_MUTATION_LOG"
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
   grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
 }
 
