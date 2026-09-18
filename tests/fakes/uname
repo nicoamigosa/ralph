@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -n "${FAKE_UNAME_SYSTEM:-}" ]; then
+  printf '%s\n' "$FAKE_UNAME_SYSTEM"
+  exit 0
+fi
+
+exec "$RALPH_TEST_REAL_UNAME" "$@"
