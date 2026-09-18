@@ -137,9 +137,9 @@ es posible, conserva el árbol si no lo es y deja el PR etiquetado para un human
 
 Cada `codex exec` y `claude` se lanza en su propia sesión/grupo de procesos.
 Cuando existe `setsid` se usa para crear la sesión; en macOS sin `setsid`, Bash
-5 usa job control (`set -m`) para obtener un grupo separado. La salida se
-transmite por `tee`, pero el grupo del agente queda aislado del grupo de
-`once.sh`: una señal dirigida al agente no termina el orquestador.
+5 usa job control (`set -m`) para obtener un grupo separado. stdout y stderr se
+transmiten por capturas separadas, pero el grupo del agente queda aislado del
+grupo de `once.sh`: una señal dirigida al agente no termina el orquestador.
 
 Al terminar un agente, Ralph termina su grupo completo, incluidos procesos
 huérfanos como servidores, watchers o tests colgados. Comprueba que el grupo no
@@ -149,8 +149,32 @@ veredicto ni éxito.
 
 `once.sh` atiende `TERM`, `INT` y `HUP`. Registra la señal, la fase y el issue,
 conserva el árbol y la rama en el estado en que estaban y sale con `128 + señal`;
-no hace checkout ni reset destructivo. Cuando #25 configure `RUN_DIR` y ya
-exista allí `summary.json`, también guarda allí el motivo y los datos de la señal.
+no hace checkout ni reset destructivo. Cuando `RUN_DIR` está configurado y ya
+existe allí `summary.json`, también guarda allí el motivo y los datos de la señal.
+
+## Adaptadores JSON de agentes
+
+Codex se ejecuta con `codex exec --json -o "$LAST_MSG"` y Claude con
+`claude --print --output-format json`. Cada ejecución conserva sus archivos
+`<agente>-<n>.stdout.jsonl|json`, `<agente>-<n>.stderr.log` y
+`<agente>-<n>.result.json` bajo `RUN_DIR`; si no se define, Ralph crea un
+directorio temporal `ralph-run-<pid>` bajo `${TMPDIR:-/tmp}`. stdout nunca se
+mezcla con stderr.
+
+El contrato interno de ambos adaptadores es:
+
+```json
+{"status":"ok|rate_limited|auth_error|config_error|failed|unknown","retry_at":null,"limit_scope":"session|weekly|unknown","retryable":false,"exit_code":0,"final_message":null}
+```
+
+`ok` exige exit code cero y una salida terminal válida: `turn.completed` para
+Codex y un objeto `type=result` con campo `result` para Claude. JSON inválido,
+truncado o sin resultado terminal es `failed`; el gate no mergea ese issue.
+
+Las salidas soportadas y sus fixtures versionados son Codex CLI **0.154.x**
+(`tests/fixtures/codex-0.154.0-*.jsonl`) y Claude Code **2.1.x**
+(`tests/fixtures/claude-2.1.277-success.json`). Una actualización de cualquiera
+de esos formatos requiere actualizar primero el fixture y el adaptador.
 
 ## Fallos del revisor vs. rechazos
 
@@ -224,6 +248,7 @@ Todo por entorno, todo opcional:
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
+| `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |
 
 Con `RALPH_CODEX_SANDBOX=workspace-write`, ralph reemplaza cualquier
 `writable_roots` configurado por el usuario en `~/.codex/config.toml` por la
