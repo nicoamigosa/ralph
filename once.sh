@@ -287,9 +287,11 @@ write_checkpoint() {
   echo "💾 Contexto guardado en $CHECKPOINT_FILE"
 }
 
-# Corre Codex sobre el repo. Devuelve 0 · 8 · 9 (ver classify_limit).
+# Corre Codex sobre el repo. Devuelve el exit code del agente, 8 · 9 por límites
+# o 70 si falla tee.
 run_codex() {
-  local prompt="$1"
+  local prompt="$1" limit_rc agent_rc tee_rc
+  local -a pipeline_status
   : > "$AGENT_LOG"; : > "$LAST_MSG"
   codex exec \
     --model "$CODEX_MODEL" \
@@ -299,19 +301,35 @@ run_codex() {
     --skip-git-repo-check \
     -o "$LAST_MSG" \
     "$prompt" 2>&1 | tee "$AGENT_LOG"
+  pipeline_status=("${PIPESTATUS[@]}")
+  agent_rc="${pipeline_status[0]}"
+  tee_rc="${pipeline_status[1]}"
+  [ "$tee_rc" -eq 0 ] || return 70
   classify_limit
+  limit_rc=$?
+  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
+  return "$agent_rc"
 }
 
-# Corre Claude en modo headless. Devuelve 0 · 8 · 9 (ver classify_limit).
+# Corre Claude en modo headless. Devuelve el exit code del agente, 8 · 9 por
+# límites o 70 si falla tee.
 run_claude() {
-  local prompt="$1"
-  : > "$AGENT_LOG"
+  local prompt="$1" limit_rc agent_rc tee_rc
+  local -a pipeline_status
+  : > "$AGENT_LOG"; : > "$LAST_MSG"
   claude \
     --model "$CLAUDE_MODEL" \
     --dangerously-skip-permissions \
     --print \
-    "$prompt" 2>&1 | tee "$AGENT_LOG"
+    "$prompt" 2>&1 | tee "$LAST_MSG" "$AGENT_LOG"
+  pipeline_status=("${PIPESTATUS[@]}")
+  agent_rc="${pipeline_status[0]}"
+  tee_rc="${pipeline_status[1]}"
+  [ "$tee_rc" -eq 0 ] || return 70
   classify_limit
+  limit_rc=$?
+  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
+  return "$agent_rc"
 }
 
 # 'gh pr edit --add-label' revienta en versiones de gh que aún consultan
@@ -499,13 +517,14 @@ $PROMPT_REVIEW"
     rc=$?
 
     # Fail-closed: sin PASS explícito y bien formado, no se mergea.
-    verdict="$(grep -oE '<verdict>(PASS|CHANGES_REQUESTED)</verdict>' "$AGENT_LOG" | tail -1)"
+    verdict="$(tail -n 1 "$LAST_MSG" | grep -xE '<verdict>(PASS|CHANGES_REQUESTED)</verdict>' || true)"
 
-    # Un veredicto bien formado prueba que la revisión terminó: descarta un
-    # falso positivo de classify_limit (el código revisado puede hablar de
-    # "rate limit" y contaminar el log).
-    [ -n "$verdict" ] && rc=0
-    [ "$rc" -ne 0 ] && return "$rc"
+    if [ "$rc" -ne 0 ]; then
+      if [ "$rc" -ne 8 ] && [ "$rc" -ne 9 ]; then
+        echo "❌ Claude terminó con rc=$rc; #$num queda abierto sin merge."
+      fi
+      return "$rc"
+    fi
     # PASS con CI en rojo no mergea: wait_for_ci deja el ítem en el PR y se
     # cae a la Fase 3 como con cualquier CHANGES_REQUESTED.
     ci_ok=0
@@ -732,6 +751,9 @@ select_issues() {
         elif [ "$rc" -eq 8 ]; then
           wait_for_reset "$num"
           continue   # reintenta el MISMO issue en la ventana nueva
+        elif [ "$rc" -eq 70 ]; then
+          echo "🛑 Fallo de infraestructura en tee. Detengo la corrida."
+          exit 70
         fi
         break
       done

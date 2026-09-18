@@ -13,6 +13,11 @@ Codex                        corrige sobre la misma rama  →  Claude vuelve a r
 `ralph-needs-human`: el loop nunca mergea por cansancio, y no vuelve a tocar ese
 PR en corridas posteriores.
 
+El exit code real de cada agente se conserva antes de pasar su salida por `tee`:
+un agente que termina con error nunca puede convertirse en PASS. El veredicto se
+acepta únicamente cuando es la última línea de la salida final de Claude; un
+fallo de `tee` devuelve 70 y detiene la corrida.
+
 ## Es agnóstico al proyecto
 
 Instalá una release etiquetada como `ralph/` en cualquier repo con remoto de
