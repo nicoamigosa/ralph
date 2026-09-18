@@ -945,6 +945,7 @@ load test_helper
     has("retryable") and has("exit_code") and has("final_message") and
     .status == "ok" and .retry_at == null and .limit_scope == "unknown" and
     .retryable == false and .exit_code == 0' "$RUN_DIR"/claude-*.result.json
+  [ "$(jq -r '.final_message' "$RUN_DIR"/codex-*.result.json)" = 'implementation complete' ]
   [ "$(jq -r '.final_message' "$RUN_DIR"/claude-*.result.json)" = '<verdict>PASS</verdict>' ]
 }
 
