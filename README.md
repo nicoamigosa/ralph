@@ -29,14 +29,22 @@ discrepan, mandan las instrucciones de agente.
 ./ralph/once.sh                                  # base = trunk del repo (main/master)
 RALPH_BASE_BRANCH=develop ./ralph/once.sh        # base explícita
 RALPH_MAX_ROUNDS=2 ./ralph/once.sh               # menos rondas, menos gasto
+RALPH_DRY_RUN=1 ./ralph/once.sh                  # plan de solo lectura
 ```
 
 La base **nunca** es la rama en la que estés parado: es el trunk del repo,
 detectado con `gh repo view` (`main` o `master`, según el repo). Ahí
 se mergea cada PR aprobado, y de ahí sale la rama del siguiente issue.
 
-Requisitos: `git`, `gh` (autenticado, scope `repo`), `codex`, `claude`, remoto
-`origin`, y **working tree limpio** — el script salta entre ramas y mergea.
+`RALPH_DRY_RUN=1` imprime el plan del selector —prioridad, host, padres,
+blockers, exclusión por revisión humana y PR existente— y termina antes de
+checkout, agentes, labels, push o merge. Sirve para inspeccionar una corrida
+sin modificar el repositorio ni GitHub.
+
+Requisitos para una corrida completa: `git`, `gh` (autenticado, scope `repo`),
+`codex`, `claude`, remoto `origin`, y **working tree limpio** — el script salta
+entre ramas y mergea. El dry-run sólo necesita las herramientas de lectura
+(`git` y `gh`).
 
 ## Cómo elige los issues
 

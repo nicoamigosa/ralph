@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_jq() {
+  jq -r "$@" "$GH_FIXTURE"
+}
+
+mutation() {
+  printf '%s\n' "$*" >> "$GH_MUTATION_LOG"
+}
+
+issue_filter=".issues[] | select(.number == \$number)"
+issue_list_filter=".issues | map(select(.state == \"OPEN\" and ((.labels // []) | index(\$label)))) | map(.number) | sort | .[]"
+pull_request_filter=".pull_requests[] | select(.number == \$number)"
+head_pull_request_filter=".pull_requests[] | select(.head == \$head)"
+
+case "${1:-}" in
+  auth)
+    exit 0
+    ;;
+  repo)
+    [ "${2:-}" = "view" ] || exit 2
+    if printf '%s\n' "$*" | grep -q 'nameWithOwner'; then
+      fixture_jq '.nameWithOwner'
+    else
+      fixture_jq '.defaultBranch'
+    fi
+    ;;
+  issue)
+    case "${2:-}" in
+      list)
+        label=""
+        for ((i = 1; i <= $#; i++)); do
+          if [ "${!i:-}" = "--label" ]; then
+            next=$((i + 1))
+            label="${!next:-}"
+          fi
+        done
+        fixture_jq --arg label "$label" "$issue_list_filter"
+        ;;
+      view)
+        number="${3:?missing issue number}"
+        if printf '%s\n' "$*" | grep -q ' --json body'; then
+          fixture_jq --argjson number "$number" "$issue_filter | .body // \"\""
+        elif printf '%s\n' "$*" | grep -q ' --json state'; then
+          fixture_jq --argjson number "$number" "$issue_filter | .state"
+        else
+          fixture_jq --argjson number "$number" "$issue_filter"
+        fi
+        ;;
+      close|comment)
+        mutation "$*"
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
+    ;;
+  pr)
+    case "${2:-}" in
+      list)
+        head=""
+        for ((i = 1; i <= $#; i++)); do
+          if [ "${!i:-}" = "--head" ]; then
+            next=$((i + 1))
+            head="${!next:-}"
+          fi
+        done
+        if [ -f "$FAKE_CODEX_PR_STATE" ]; then
+          fixture_jq --arg head "$head" "$head_pull_request_filter | .number" | head -n 1
+        else
+          fixture_jq --arg head "$head" "$head_pull_request_filter | select(.available_before_codex != false) | .number" | head -n 1
+        fi
+        ;;
+      view)
+        number="${3:?missing pull request number}"
+        if printf '%s\n' "$*" | grep -q ' --json labels'; then
+          fixture_jq --argjson number "$number" "$pull_request_filter | .labels[]?"
+        elif printf '%s\n' "$*" | grep -q ' --json comments'; then
+          if printf '%s\n' "$*" | grep -q 'comments\[-1\]'; then
+            fixture_jq --argjson number "$number" "$pull_request_filter | (.comments // [])[-1] | \"### \\(.author.login) escribió:\\n\\n\\(.body)\""
+          else
+            fixture_jq --argjson number "$number" "$pull_request_filter | (.comments // []) | length"
+          fi
+        elif printf '%s\n' "$*" | grep -q ' --json mergeCommit'; then
+          fixture_jq --argjson number "$number" "$pull_request_filter | .mergeCommit"
+        else
+          fixture_jq --argjson number "$number" "$pull_request_filter"
+        fi
+        ;;
+      checks)
+        [ "$(fixture_jq '.checks')" = "pass" ]
+        ;;
+      merge|comment)
+        mutation "$*"
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
+    ;;
+  label)
+    mutation "$*"
+    ;;
+  api)
+    mutation "$*"
+    ;;
+  *)
+    printf 'unsupported fake gh command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'claude %s\n' "$*" >> "$FAKE_AGENT_LOG"
+
+claude_result="${FAKE_CLAUDE_RESULT:-<verdict>PASS</verdict>}"
+if [ -n "${FAKE_CLAUDE_RESULTS:-}" ]; then
+  IFS='|' read -r -a claude_results <<< "$FAKE_CLAUDE_RESULTS"
+  claude_call=0
+  if [ -f "${FAKE_CLAUDE_CALL_COUNT_FILE:-}" ]; then
+    read -r claude_call < "$FAKE_CLAUDE_CALL_COUNT_FILE"
+  fi
+  claude_call=$((claude_call + 1))
+  printf '%s\n' "$claude_call" > "$FAKE_CLAUDE_CALL_COUNT_FILE"
+  claude_result_index=$((claude_call - 1))
+  if [ "$claude_result_index" -ge "${#claude_results[@]}" ]; then
+    claude_result_index=$((${#claude_results[@]} - 1))
+  fi
+  claude_result="${claude_results[$claude_result_index]}"
+fi
+
+printf '%s\n' "$claude_result"
+exit "${FAKE_CLAUDE_EXIT:-0}"

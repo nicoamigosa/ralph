@@ -1,0 +1,64 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {
+      "number": 2,
+      "title": "Parent issue",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    },
+    {
+      "number": 4,
+      "title": "Open blocker",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    },
+    {
+      "number": 5,
+      "title": "Needs a human",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    },
+    {
+      "number": 6,
+      "title": "Ready with an existing PR",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    },
+    {
+      "number": 10,
+      "title": "Blocked issue",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "## Parent\n#2\n\n## Blocked by\n- #4\n",
+      "comments": []
+    }
+  ],
+  "pull_requests": [
+    {
+      "number": 105,
+      "head": "ralph/issue-5",
+      "labels": ["ralph-needs-human"],
+      "comments": [],
+      "mergeCommit": {"oid": "0000000000000000000000000000000000000000"}
+    },
+    {
+      "number": 106,
+      "head": "ralph/issue-6",
+      "labels": [],
+      "comments": [],
+      "mergeCommit": {"oid": "0000000000000000000000000000000000000000"}
+    }
+  ],
+  "checks": "pass"
+}
