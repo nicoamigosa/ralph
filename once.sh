@@ -402,8 +402,10 @@ $PROMPT_CONFLICTS"
     if ! git merge --abort >/dev/null 2>&1; then
       echo "⚠️  No pude abortar el merge; conservo el árbol en conflicto para recuperación manual."
     fi
-    add_label "$pr" "$NEEDS_HUMAN_LABEL"
-    gh pr comment "$pr" --body "🤖 Ralph no pudo resolver los conflictos con \`$BASE_BRANCH\`: el PR queda para un humano." >/dev/null 2>&1 || true
+    if [ "$rc" -ne 8 ] && [ "$rc" -ne 9 ]; then
+      add_label "$pr" "$NEEDS_HUMAN_LABEL"
+      gh pr comment "$pr" --body "🤖 Ralph no pudo resolver los conflictos con \`$BASE_BRANCH\`: el PR queda para un humano." >/dev/null 2>&1 || true
+    fi
     return "$rc"
   fi
   if [ -n "$(git status --porcelain)" ] || ! git merge-base --is-ancestor "origin/$BASE_BRANCH" HEAD; then

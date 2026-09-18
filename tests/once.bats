@@ -116,6 +116,29 @@ load test_helper
   ! grep -Eq 'git reset( -q)? --hard' "$PROJECT_ROOT/once.sh"
 }
 
+@test "usage limit during conflict keeps the PR unlabeled for retry" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
+  export FAKE_CODEX_EXITS='8|9'
+  export FAKE_DATE_FAST_FORWARD=1
+
+  git -C "$TEST_REPO" switch -q -c ralph/issue-99
+  printf '%s\n' 'branch version' > "$TEST_REPO/conflict.txt"
+  git -C "$TEST_REPO" add conflict.txt
+  git -C "$TEST_REPO" commit -q -m 'branch conflict'
+  git -C "$TEST_REPO" switch -q main
+  printf '%s\n' 'base version' > "$TEST_REPO/conflict.txt"
+  git -C "$TEST_REPO" add conflict.txt
+  git -C "$TEST_REPO" commit -q -m 'base conflict'
+  git -C "$TEST_REPO" push -q origin HEAD:main
+  git -C "$TEST_REPO" switch -q ralph/issue-99
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'labels[]=' "$GH_MUTATION_LOG"
+  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+}
+
 @test "tee failure returns 70 and stops the run" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
