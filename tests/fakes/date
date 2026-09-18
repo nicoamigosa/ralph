@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -n "${FAKE_DATE_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_DATE_LOG"
+fi
+
+if [ "${FAKE_UNAME_SYSTEM:-}" = "Darwin" ] && [ "${1:-}" = "-r" ]; then
+  epoch="${2:?missing epoch}"
+  shift 2
+  exec "$RALPH_TEST_REAL_DATE" --date="@$epoch" "$@"
+fi
+
+if [ "${FAKE_UNAME_SYSTEM:-}" = "Darwin" ] && [ "${1:-}" = "-d" ]; then
+  printf '%s\n' 'GNU date syntax used on Darwin' >&2
+  exit 99
+fi
+
+if [ "${FAKE_DATE_FAST_FORWARD:-0}" = "1" ] && [ "${1:-}" = "+%s" ]; then
+  date_call=0
+  if [ -f "${FAKE_DATE_CALL_COUNT_FILE:-}" ]; then
+    read -r date_call < "$FAKE_DATE_CALL_COUNT_FILE"
+  fi
+  date_call=$((date_call + 1))
+  printf '%s\n' "$date_call" > "$FAKE_DATE_CALL_COUNT_FILE"
+  date_now="$($RALPH_TEST_REAL_DATE +%s)"
+  if [ "$date_call" -eq 1 ]; then
+    printf '%s\n' "$date_now"
+  elif [ "${FAKE_DATE_INCREMENTAL_FAST_FORWARD:-0}" = "1" ]; then
+    printf '%s\n' "$((date_now + date_call * 7200))"
+  else
+    printf '%s\n' "$((date_now + 7200))"
+  fi
+  exit 0
+fi
+
+exec "$RALPH_TEST_REAL_DATE" "$@"

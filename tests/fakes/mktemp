@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -n "${FAKE_MKTEMP_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_MKTEMP_LOG"
+fi
+
+if [ "${FAKE_MKTEMP_EXIT:-0}" -ne 0 ]; then
+  exit "$FAKE_MKTEMP_EXIT"
+fi
+
+exec "$RALPH_TEST_REAL_MKTEMP" "$@"

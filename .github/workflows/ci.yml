@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install test tools on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bats jq shellcheck
+
+      - name: Install Bash and test tools on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash bats-core jq shellcheck
+          echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+
+      - name: Check Bash syntax
+        run: bash -n once.sh
+
+      - name: Run ShellCheck
+        run: shellcheck once.sh
+
+      - name: Run Bats
+        run: bats tests/

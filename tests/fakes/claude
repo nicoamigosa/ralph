@@ -2,5 +2,39 @@
 set -euo pipefail
 
 printf 'claude %s\n' "$*" >> "$FAKE_AGENT_LOG"
-printf '%s\n' "${FAKE_CLAUDE_RESULT:-<verdict>PASS</verdict>}"
+
+claude_result="${FAKE_CLAUDE_RESULT:-<verdict>PASS</verdict>}"
+if [ -n "${FAKE_CLAUDE_RESULTS:-}" ]; then
+  IFS='|' read -r -a claude_results <<< "$FAKE_CLAUDE_RESULTS"
+  claude_call=0
+  if [ -f "${FAKE_CLAUDE_CALL_COUNT_FILE:-}" ]; then
+    read -r claude_call < "$FAKE_CLAUDE_CALL_COUNT_FILE"
+  fi
+  claude_call=$((claude_call + 1))
+  printf '%s\n' "$claude_call" > "$FAKE_CLAUDE_CALL_COUNT_FILE"
+  claude_result_index=$((claude_call - 1))
+  if [ "$claude_result_index" -ge "${#claude_results[@]}" ]; then
+    claude_result_index=$((${#claude_results[@]} - 1))
+  fi
+  claude_result="${claude_results[$claude_result_index]}"
+fi
+
+if [ -n "${FAKE_CLAUDE_WRITE_FILE:-}" ]; then
+  printf '%s\n' "fake claude left this work uncommitted" > "$FAKE_CLAUDE_WRITE_FILE"
+fi
+
+if [ -n "${FAKE_CLAUDE_STDOUT_FILE:-}" ]; then
+  cat "$FAKE_CLAUDE_STDOUT_FILE"
+elif [ -n "${FAKE_CLAUDE_STDOUT:-}" ]; then
+  printf '%b\n' "$FAKE_CLAUDE_STDOUT"
+elif printf '%s' "$claude_result" | grep -Eqi 'usage limit|rate limit'; then
+  jq -cn '{type: "result", subtype: "error_during_execution", is_error: true}'
+  printf '%s\n' 'usage limit' >&2
+else
+  jq -cn --arg result "$claude_result" \
+    '{type: "result", subtype: "success", is_error: false, result: $result,
+      duration_ms: 1, duration_api_ms: 1, num_turns: 1, session_id: "session_fake",
+      total_cost_usd: 0}'
+fi
+[ -n "${FAKE_CLAUDE_STDERR:-}" ] && printf '%b\n' "$FAKE_CLAUDE_STDERR" >&2
 exit "${FAKE_CLAUDE_EXIT:-0}"

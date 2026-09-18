@@ -9,6 +9,21 @@ mutation() {
   printf '%s\n' "$*" >> "$GH_MUTATION_LOG"
 }
 
+issue_filter=".issues[] | select(.number == \$number)"
+issue_list_filter=".issues | map(select(.state == \"OPEN\" and ((.labels // []) | index(\$label)))) | map(.number) | sort | .[]"
+pull_request_filter=".pull_requests[] | select(.number == \$number)"
+head_pull_request_filter=".pull_requests[] | select(.head == \$head)"
+
+head_ref_oid() {
+  if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ] && [ -f "${GH_MUTATION_LOG}.head-changed" ]; then
+    printf '%s\n' "head_changed"
+  elif [ -n "${FAKE_HEAD_REF_OID:-}" ]; then
+    printf '%s\n' "$FAKE_HEAD_REF_OID"
+  else
+    "$RALPH_TEST_REAL_GIT" rev-parse HEAD
+  fi
+}
+
 case "${1:-}" in
   auth)
     exit 0
@@ -24,16 +39,23 @@ case "${1:-}" in
   issue)
     case "${2:-}" in
       list)
-        fixture_jq '.issues | map(select(.state == "OPEN")) | map(.number) | sort | .[]'
+        label=""
+        for ((i = 1; i <= $#; i++)); do
+          if [ "${!i:-}" = "--label" ]; then
+            next=$((i + 1))
+            label="${!next:-}"
+          fi
+        done
+        fixture_jq --arg label "$label" "$issue_list_filter"
         ;;
       view)
         number="${3:?missing issue number}"
         if printf '%s\n' "$*" | grep -q ' --json body'; then
-          fixture_jq --argjson number "$number" '.issues[] | select(.number == $number) | .body // ""'
+          fixture_jq --argjson number "$number" "$issue_filter | .body // \"\""
         elif printf '%s\n' "$*" | grep -q ' --json state'; then
-          fixture_jq --argjson number "$number" '.issues[] | select(.number == $number) | .state'
+          fixture_jq --argjson number "$number" "$issue_filter | .state"
         else
-          fixture_jq --argjson number "$number" '.issues[] | select(.number == $number)'
+          fixture_jq --argjson number "$number" "$issue_filter"
         fi
         ;;
       close|comment)
@@ -55,24 +77,74 @@ case "${1:-}" in
           fi
         done
         if [ -f "$FAKE_CODEX_PR_STATE" ]; then
-          fixture_jq --arg head "$head" '.pull_requests[] | select(.head == $head) | .number' | head -n 1
+          fixture_jq --arg head "$head" "$head_pull_request_filter | .number" | head -n 1
         else
-          fixture_jq --arg head "$head" '.pull_requests[] | select(.head == $head and (.available_before_codex // true)) | .number' | head -n 1
+          fixture_jq --arg head "$head" "$head_pull_request_filter | select(.available_before_codex != false) | .number" | head -n 1
         fi
         ;;
       view)
         number="${3:?missing pull request number}"
         if printf '%s\n' "$*" | grep -q ' --json labels'; then
-          fixture_jq --argjson number "$number" '.pull_requests[] | select(.number == $number) | .labels[]?'
+          fixture_jq --argjson number "$number" "$pull_request_filter | .labels[]?"
         elif printf '%s\n' "$*" | grep -q ' --json comments'; then
-          fixture_jq --argjson number "$number" '.pull_requests[] | select(.number == $number) | (.comments // []) | length'
+          if printf '%s\n' "$*" | grep -q 'comments\[-1\]'; then
+            fixture_jq --argjson number "$number" "$pull_request_filter | (.comments // [])[-1] | \"### \\(.author.login) escribió:\\n\\n\\(.body)\""
+          else
+            fixture_jq --argjson number "$number" "$pull_request_filter | (.comments // []) | length"
+          fi
+        elif printf '%s\n' "$*" | grep -q ' --json headRefOid'; then
+          head_ref_oid
         elif printf '%s\n' "$*" | grep -q ' --json mergeCommit'; then
-          fixture_jq --argjson number "$number" '.pull_requests[] | select(.number == $number) | .mergeCommit'
+          fixture_jq --argjson number "$number" "$pull_request_filter | .mergeCommit"
         else
-          fixture_jq --argjson number "$number" '.pull_requests[] | select(.number == $number)'
+          fixture_jq --argjson number "$number" "$pull_request_filter"
         fi
         ;;
       checks)
+        checks_has_watch=0
+        checks_has_fail_fast=0
+        for checks_arg in "$@"; do
+          case "$checks_arg" in
+            --watch) checks_has_watch=1 ;;
+            --fail-fast) checks_has_fail_fast=1 ;;
+          esac
+        done
+        if [ "$checks_has_fail_fast" -eq 1 ] && [ "$checks_has_watch" -eq 0 ]; then
+          printf '%s\n' 'cannot use `--fail-fast` flag without `--watch` flag' >&2
+          exit 1
+        fi
+        if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ]; then
+          : > "${GH_MUTATION_LOG}.head-changed"
+        fi
+        if [ -n "${FAKE_CI_RESULT:-}" ]; then
+          case "$FAKE_CI_RESULT" in
+            pass) printf '%s\n' 'pass'; exit 0 ;;
+            pending) printf '%s\n' 'Checks are pending'; exit 8 ;;
+            infra) printf '%s\n' 'failed to connect to GitHub API'; exit 2 ;;
+            *) printf '%s\n' "$FAKE_CI_RESULT"; exit 1 ;;
+          esac
+        fi
+        if [ -n "${FAKE_CI_RESULTS:-}" ]; then
+          IFS='|' read -r -a ci_results <<< "$FAKE_CI_RESULTS"
+          ci_call=0
+          if [ -f "${FAKE_CI_CALL_COUNT_FILE:-}" ]; then
+            read -r ci_call < "$FAKE_CI_CALL_COUNT_FILE"
+          fi
+          ci_call=$((ci_call + 1))
+          printf '%s\n' "$ci_call" > "$FAKE_CI_CALL_COUNT_FILE"
+          ci_result_index=$((ci_call - 1))
+          if [ "$ci_result_index" -ge "${#ci_results[@]}" ]; then
+            ci_result_index=$((${#ci_results[@]} - 1))
+          fi
+          ci_result="${ci_results[$ci_result_index]}"
+          case "$ci_result" in
+            pass) exit 0 ;;
+            fail) printf '%s\n' 'Some checks failed'; exit 1 ;;
+            pending) printf '%s\n' 'Checks are pending'; exit 8 ;;
+            infra) printf '%s\n' 'failed to connect to GitHub API'; exit 2 ;;
+            *) printf '%s\n' "$ci_result"; exit 1 ;;
+          esac
+        fi
         [ "$(fixture_jq '.checks')" = "pass" ]
         ;;
       merge|comment)
@@ -83,11 +155,96 @@ case "${1:-}" in
         ;;
     esac
     ;;
+  run)
+    case "${2:-}" in
+      list)
+        printf '%s\n' "${FAKE_CI_RUN_URL:-https://github.com/nicoamigosa/ralph/actions/runs/123}"
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
+    ;;
   label)
     mutation "$*"
     ;;
   api)
-    mutation "$*"
+    api_endpoint=""
+    fake_ci_result=""
+    fake_sha="$($RALPH_TEST_REAL_GIT rev-parse HEAD)"
+    for api_arg in "$@"; do
+      case "$api_arg" in
+        repos/*) api_endpoint="$api_arg"; break ;;
+      esac
+    done
+    if [ -n "${FAKE_API_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FAKE_API_LOG"
+    fi
+    if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ]; then
+      : > "${GH_MUTATION_LOG}.head-changed"
+    fi
+    case "$api_endpoint" in
+      */check-runs)
+        if [ -n "${FAKE_CHECK_RUNS_JSON+x}" ]; then
+          printf '{"check_runs":%s}\n' "$FAKE_CHECK_RUNS_JSON"
+          exit 0
+        fi
+        if [ -n "${FAKE_CI_RESULT:-}" ]; then
+          fake_ci_result="$FAKE_CI_RESULT"
+        elif [ -n "${FAKE_CI_RESULTS:-}" ]; then
+          IFS='|' read -r -a ci_results <<< "$FAKE_CI_RESULTS"
+          ci_call=0
+          if [ -f "${FAKE_CI_CALL_COUNT_FILE:-}" ]; then
+            read -r ci_call < "$FAKE_CI_CALL_COUNT_FILE"
+          fi
+          ci_call=$((ci_call + 1))
+          printf '%s\n' "$ci_call" > "$FAKE_CI_CALL_COUNT_FILE"
+          ci_result_index=$((ci_call - 1))
+          if [ "$ci_result_index" -ge "${#ci_results[@]}" ]; then
+            ci_result_index=$((${#ci_results[@]} - 1))
+          fi
+          fake_ci_result="${ci_results[$ci_result_index]}"
+          printf '%s\n' "$fake_ci_result" > "$FAKE_CI_CURRENT_RESULT_FILE"
+        else
+          fake_ci_result=pass
+        fi
+        case "$fake_ci_result" in
+          pass)
+            printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$fake_sha"
+            ;;
+          pending)
+            printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"in_progress","conclusion":null}]}\n' "$fake_sha"
+            ;;
+          infra)
+            printf '%s\n' 'failed to connect to GitHub API' >&2
+            exit 2
+            ;;
+          'no checks reported')
+            printf '{"check_runs":[]}\n'
+            ;;
+          *)
+            printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"completed","conclusion":"failure"}]}\n' "$fake_sha"
+            ;;
+        esac
+        ;;
+      */statuses)
+        if [ -n "${FAKE_STATUSES_JSON+x}" ]; then
+          printf '%s\n' "$FAKE_STATUSES_JSON"
+          exit 0
+        fi
+        if [ -n "${FAKE_CI_RESULT:-}" ]; then
+          fake_ci_result="$FAKE_CI_RESULT"
+        elif [ -n "${FAKE_CI_RESULTS:-}" ] && [ -f "${FAKE_CI_CURRENT_RESULT_FILE:-}" ]; then
+          read -r fake_ci_result < "$FAKE_CI_CURRENT_RESULT_FILE"
+        else
+          fake_ci_result=pass
+        fi
+        printf '[]\n'
+        ;;
+      *)
+        mutation "$*"
+        ;;
+    esac
     ;;
   *)
     printf 'unsupported fake gh command: %s\n' "$*" >&2

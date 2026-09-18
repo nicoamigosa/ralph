@@ -13,6 +13,30 @@ Codex                        corrige sobre la misma rama  →  Claude vuelve a r
 `ralph-needs-human`: el loop nunca mergea por cansancio, y no vuelve a tocar ese
 PR en corridas posteriores.
 
+El exit code real de cada agente se conserva antes de pasar su salida por `tee`:
+un agente que termina con error nunca puede convertirse en PASS. El veredicto se
+acepta únicamente cuando es la última línea de la salida final de Claude; un
+fallo de `tee` devuelve 70 y detiene la corrida.
+
+La revisión, los checks y el merge quedan ligados al mismo SHA: Ralph compara el
+`HEAD` local con `headRefOid` antes y después de revisar, exige un árbol limpio y
+usa `--match-head-commit` al mergear. `RALPH_MERGE_METHOD` sólo admite
+`--squash`, `--merge` o `--rebase`; cualquier otro valor detiene el preflight.
+
+La política de CI es `required` por defecto. Si GitHub todavía no reporta checks,
+Ralph espera hasta `RALPH_CI_TIMEOUT_SECONDS` (30 minutos por defecto), deja el
+issue en estado `ci_pending` y no manda una corrección a Codex ni mergea. Un
+fallo explícito de un check sí se comenta en el PR para Codex. Para repos sin CI,
+`RALPH_CI_POLICY=none` es una excepción explícita y queda avisada en la salida.
+
+El proyecto puede declarar sus gates con
+`RALPH_REQUIRED_CHECKS_JSON='["CI / test","ShellCheck"]'`. Ralph consulta los
+`check-runs` y `statuses` del SHA exacto que revisó Claude: cada nombre declarado
+debe terminar en `success`; `skipped`, `neutral`, `cancelled`, `pending` y los
+resultados ausentes no habilitan el merge. Los checks exitosos adicionales no
+reemplazan uno obligatorio. Si no se declara la lista, todos los resultados del
+SHA deben ser exitosos y al menos uno debe existir.
+
 ## Es agnóstico al proyecto
 
 Instalá una release etiquetada como `ralph/` en cualquier repo con remoto de
@@ -29,15 +53,25 @@ discrepan, mandan las instrucciones de agente.
 ./ralph/once.sh                                  # base = trunk del repo (main/master)
 RALPH_BASE_BRANCH=develop ./ralph/once.sh        # base explícita
 RALPH_MAX_ROUNDS=2 ./ralph/once.sh               # menos rondas, menos gasto
-RALPH_DRY_RUN=1 ./ralph/once.sh                  # muestra el plan sin mutar ni ejecutar agentes
+RALPH_DRY_RUN=1 ./ralph/once.sh                  # plan de solo lectura
 ```
 
 La base **nunca** es la rama en la que estés parado: es el trunk del repo,
 detectado con `gh repo view` (`main` o `master`, según el repo). Ahí
 se mergea cada PR aprobado, y de ahí sale la rama del siguiente issue.
 
-Requisitos: `git`, `gh` (autenticado, scope `repo`), `codex`, `claude`, remoto
-`origin`, y **working tree limpio** — el script salta entre ramas y mergea.
+`RALPH_DRY_RUN=1` imprime el plan del selector —prioridad, host, padres,
+blockers, exclusión por revisión humana y PR existente— y termina antes de
+checkout, agentes, labels, push o merge. Sirve para inspeccionar una corrida
+sin modificar el repositorio ni GitHub.
+
+Requisitos para una corrida completa: Bash **5 o superior**, `git`, `gh`
+(autenticado, scope `repo`), `jq`, `codex`, `claude`, remoto `origin`, y
+**working tree limpio** — el script salta entre ramas y mergea. En macOS,
+instalá Bash con `brew install bash` y anteponé `$(brew --prefix bash)/bin` al
+`PATH`. `once.sh` usa los formatos nativos de `date` para Darwin y Linux y
+temporales bajo `${TMPDIR:-/tmp}`, sin requerir utilidades GNU adicionales. El
+dry-run sólo necesita las herramientas de lectura (`git` y `gh`).
 
 ## Cómo elige los issues
 
@@ -81,11 +115,82 @@ El formato esperado en el cuerpo del issue:
 - #28
 ```
 
+Los encabezados de estas secciones se comparan sin distinguir mayúsculas y
+la sección termina en el siguiente `## `. Cada referencia debe ocupar una
+línea completa (`#N` o `- #N`, con espacios opcionales); se tolera un `\r`
+final. En `## Blocked by`, cualquier línea no vacía fuera de ese formato
+bloquea el issue y Ralph informa explícitamente el error.
+
 ## Idempotencia
 
 Si una corrida se corta (Ctrl-C, tope de uso, caída), la siguiente **reutiliza**
 la rama y el PR existentes en vez de recrearlos, y salta lo ya mergeado. Volver
 a correr `./ralph/once.sh` siempre es seguro.
+
+Ralph nunca crea commits para tapar trabajo que Codex dejó sin commitear: conserva
+el árbol y detiene la corrida con código 70 para que el estado pueda recuperarse
+manualmente. También detiene la corrida ante fallos de `checkout`, `fetch`,
+`push` o `pull --ff-only`; un conflicto que Codex no resuelve se aborta cuando
+es posible, conserva el árbol si no lo es y deja el PR etiquetado para un humano.
+
+## Procesos
+
+Cada `codex exec` y `claude` se lanza en su propia sesión/grupo de procesos.
+Cuando existe `setsid` se usa para crear la sesión; en macOS sin `setsid`, Bash
+5 usa job control (`set -m`) para obtener un grupo separado. stdout y stderr se
+transmiten por capturas separadas, pero el grupo del agente queda aislado del
+grupo de `once.sh`: una señal dirigida al agente no termina el orquestador.
+
+Al terminar un agente, Ralph termina su grupo completo, incluidos procesos
+huérfanos como servidores, watchers o tests colgados. Comprueba que el grupo no
+sea el suyo antes de hacerlo, por lo que nunca se mata a sí mismo. Un agente que
+termina por señal (`rc >= 128`) es un fallo de infraestructura: no produce
+veredicto ni éxito.
+
+`once.sh` atiende `TERM`, `INT` y `HUP`. Registra la señal, la fase y el issue,
+conserva el árbol y la rama en el estado en que estaban y sale con `128 + señal`;
+no hace checkout ni reset destructivo. Cuando `RUN_DIR` está configurado y ya
+existe allí `summary.json`, también guarda allí el motivo y los datos de la señal.
+
+## Adaptadores JSON de agentes
+
+Codex se ejecuta con `codex exec --json -o "$LAST_MSG"` y Claude con
+`claude --print --output-format json`. Cada ejecución conserva sus archivos
+`<agente>-<n>.stdout.jsonl|json`, `<agente>-<n>.stderr.log` y
+`<agente>-<n>.result.json` bajo `RUN_DIR`; si no se define, Ralph crea un
+directorio temporal `ralph-run-<pid>` bajo `${TMPDIR:-/tmp}`. stdout nunca se
+mezcla con stderr.
+
+El contrato interno de ambos adaptadores es:
+
+```json
+{"status":"ok|rate_limited|auth_error|config_error|failed|unknown","retry_at":null,"limit_scope":"session|weekly|unknown","retryable":false,"exit_code":0,"final_message":null}
+```
+
+`ok` exige exit code cero y una salida terminal válida: `turn.completed` para
+Codex y un objeto `type=result` con campo `result` para Claude. JSON inválido,
+truncado o sin resultado terminal es `failed`; el gate no mergea ese issue.
+
+Las salidas soportadas y sus fixtures versionados son Codex CLI **0.154.x**
+(`tests/fixtures/codex-0.154.0-*.jsonl`) y Claude Code **2.1.x**
+(`tests/fixtures/claude-2.1.277-success.json`). Una actualización de cualquiera
+de esos formatos requiere actualizar primero el fixture y el adaptador.
+
+Los fixtures se capturaron de ejecuciones reales en este host. Codex CLI
+reportó la versión 0.154.0 con codex --version y Claude Code reportó la versión
+2.1.277 con claude --version.
+
+El comando exacto de captura de Codex fue:
+
+    codex exec --json -o "$capture_dir/last-message.txt" --skip-git-repo-check "Respond with exactly: real codex fixture capture. Do not modify files, run commands, or use tools."
+
+El comando exacto de captura de Claude fue:
+
+    claude --model opus --dangerously-skip-permissions --print --output-format json "Respond with exactly: <verdict>PASS</verdict>. Do not modify files, run commands, or use tools."
+
+En ambas ejecuciones stdout y stderr se redirigieron a archivos separados; los
+fixtures contienen el stdout crudo. codex-0.154.0-truncated.jsonl es el mismo
+stdout real de Codex cortado a mitad del evento turn.completed.
 
 ## Fallos del revisor vs. rechazos
 
@@ -149,14 +254,25 @@ Todo por entorno, todo opcional:
 | `RALPH_MAX_ROUNDS` | `3` |
 | `RALPH_CODEX_MODEL` | `gpt-5.6-luna` |
 | `RALPH_CODEX_EFFORT` | `xhigh` |
-| `RALPH_CODEX_SANDBOX` | `workspace-write` |
+| `RALPH_CODEX_SANDBOX` | `workspace-write` (en este modo Codex monta `.git` como sólo lectura; ralph lo habilita como `writable_root` y ejecuta una sonda de preflight; `danger-full-access` no se recomienda) |
 | `RALPH_CLAUDE_MODEL` | `opus` |
 | `RALPH_MERGE_METHOD` | `--squash` |
 | `RALPH_NEEDS_HUMAN_LABEL` | `ralph-needs-human` |
 | `RALPH_MAX_INFRA_RETRIES` | `3` |
+| `RALPH_CI_POLICY` | `required` |
+| `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
+| `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_DRY_RUN` | `0` (sólo mostrar el plan cuando vale `1`) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
+| `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |
+
+Con `RALPH_CODEX_SANDBOX=workspace-write`, ralph reemplaza cualquier
+`writable_roots` configurado por el usuario en `~/.codex/config.toml` por la
+raíz `.git` absoluta del repositorio actual. Antes del primer issue ejecuta una
+sonda sin modelo que escribe y borra un archivo allí; si `codex sandbox` no está
+disponible en la plataforma, avisa y continúa. `danger-full-access` evita esa
+restricción, pero no se recomienda porque expone todo el filesystem.
 
 ## Distribución y versión
 

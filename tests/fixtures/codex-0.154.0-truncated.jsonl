@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a0b6a9-d7ea-7de0-b2d0-3e885968eabc"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"real codex fixture capture"}}
+{"type":"turn.completed","usage":{"input_tokens":14886,"cached_input_tokens":9984

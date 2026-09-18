@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${FAKE_TEE_EXIT:-0}" -ne 0 ]; then
+  cat >/dev/null
+  exit "$FAKE_TEE_EXIT"
+fi
+
+exec "${RALPH_TEST_REAL_TEE:-/usr/bin/tee}" "$@"

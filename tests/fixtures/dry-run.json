@@ -7,6 +7,7 @@
       "number": 2,
       "title": "Parent issue",
       "state": "OPEN",
+      "labels": ["ready-for-agent"],
       "body": "No dependencies.\n",
       "comments": []
     },
@@ -14,6 +15,7 @@
       "number": 4,
       "title": "Open blocker",
       "state": "OPEN",
+      "labels": ["ready-for-agent"],
       "body": "No dependencies.\n",
       "comments": []
     },
@@ -21,6 +23,7 @@
       "number": 5,
       "title": "Needs a human",
       "state": "OPEN",
+      "labels": ["ready-for-agent"],
       "body": "No dependencies.\n",
       "comments": []
     },
@@ -28,6 +31,7 @@
       "number": 6,
       "title": "Ready with an existing PR",
       "state": "OPEN",
+      "labels": ["ready-for-agent"],
       "body": "No dependencies.\n",
       "comments": []
     },
@@ -35,6 +39,7 @@
       "number": 10,
       "title": "Blocked issue",
       "state": "OPEN",
+      "labels": ["ready-for-agent"],
       "body": "## Parent\n#2\n\n## Blocked by\n- #4\n",
       "comments": []
     }
