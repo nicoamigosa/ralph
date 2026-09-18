@@ -102,6 +102,17 @@ load test_helper
   [ "$(cat "$FAKE_CI_CALL_COUNT_FILE")" -eq 2 ]
 }
 
+@test "el poll de CI usa una invocación válida de gh pr checks" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT=pass
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+}
+
 @test "RALPH_CI_POLICY=none permite mergear sin checks con aviso explícito" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
@@ -135,10 +146,29 @@ load test_helper
   [[ "$runner_output" == *"CI en rojo"* ]]
 }
 
+@test "check fallido con texto de infraestructura sigue siendo fallo real" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT="network timeout failure"
+  export FAKE_CI_RUN_URL="https://github.com/nicoamigosa/ralph/actions/runs/789"
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export RALPH_MAX_ROUNDS=1
+
+  run_once
+  runner_output="$output"
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  grep -Fq "$FAKE_CI_RUN_URL" "$GH_MUTATION_LOG"
+  [[ "$runner_output" == *"CI en rojo"* ]]
+  [[ "$runner_output" != *"ci_pending"* ]]
+}
+
 @test "fallo de infraestructura de CI queda ci_pending sin corrección" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
-  export FAKE_CI_RESULT="failed to connect to GitHub API"
+  export FAKE_CI_RESULT=infra
   export RALPH_CI_TIMEOUT_SECONDS=0
   export FAKE_SLEEP_NOOP=1
 
@@ -148,6 +178,23 @@ load test_helper
   [ "$status" -eq 0 ]
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
   ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [[ "$runner_output" == *"ci_pending"* ]]
+}
+
+@test "exit 8 de gh pr checks queda ci_pending sin corrección" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT=pending
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+  runner_output="$output"
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
   ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
   [ "$(grep -c '^codex ' "$FAKE_AGENT_LOG")" -eq 1 ]
   [[ "$runner_output" == *"ci_pending"* ]]

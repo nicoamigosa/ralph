@@ -472,22 +472,29 @@ wait_for_ci() {
   started="$(date +%s 2>/dev/null)" || return 2
   deadline=$((started + CI_TIMEOUT_SECONDS))
   while :; do
-    out="$(gh pr checks "$pr" --fail-fast 2>&1)"
+    out="$(gh pr checks "$pr" 2>&1)"
     checks_rc=$?
     if [ "$checks_rc" -eq 0 ]; then
       return 0
     fi
-    if printf '%s' "$out" | grep -qi "no checks reported"; then
-      pending_reason="CI ausente"
-    elif [ "$checks_rc" -ne 1 ] || printf '%s' "$out" | grep -qiE \
-      'pending|queued|in progress|waiting|could not|unable|network|connect|connection|timed out|timeout|rate limit'; then
-      pending_reason="CI pendiente por infraestructura"
-    else
-      run_url="$(gh run list --branch "$branch" --limit 1 --json url --jq '.[0].url' 2>/dev/null)"
-      echo "🔴 CI en rojo en PR #$pr: ${run_url:-sin URL del run}"
-      gh pr comment "$pr" --body "1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
-      return 1
-    fi
+    case "$checks_rc" in
+      8)
+        pending_reason="CI pendiente"
+        ;;
+      1)
+        if printf '%s' "$out" | grep -qi "no checks reported"; then
+          pending_reason="CI ausente"
+        else
+          run_url="$(gh run list --branch "$branch" --limit 1 --json url --jq '.[0].url' 2>/dev/null)"
+          echo "🔴 CI en rojo en PR #$pr: ${run_url:-sin URL del run}"
+          gh pr comment "$pr" --body "1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
+          return 1
+        fi
+        ;;
+      *)
+        pending_reason="CI pendiente por infraestructura"
+        ;;
+    esac
 
     now="$(date +%s 2>/dev/null)" || return 2
     if [ "$now" -ge "$deadline" ]; then

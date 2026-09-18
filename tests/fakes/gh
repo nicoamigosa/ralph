@@ -101,13 +101,28 @@ case "${1:-}" in
         fi
         ;;
       checks)
+        checks_has_watch=0
+        checks_has_fail_fast=0
+        for checks_arg in "$@"; do
+          case "$checks_arg" in
+            --watch) checks_has_watch=1 ;;
+            --fail-fast) checks_has_fail_fast=1 ;;
+          esac
+        done
+        if [ "$checks_has_fail_fast" -eq 1 ] && [ "$checks_has_watch" -eq 0 ]; then
+          printf '%s\n' 'cannot use `--fail-fast` flag without `--watch` flag' >&2
+          exit 1
+        fi
         if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ]; then
           : > "${GH_MUTATION_LOG}.head-changed"
         fi
         if [ -n "${FAKE_CI_RESULT:-}" ]; then
-          printf '%s\n' "$FAKE_CI_RESULT"
-          [ "$FAKE_CI_RESULT" = "pass" ]
-          exit $?
+          case "$FAKE_CI_RESULT" in
+            pass) printf '%s\n' 'pass'; exit 0 ;;
+            pending) printf '%s\n' 'Checks are pending'; exit 8 ;;
+            infra) printf '%s\n' 'failed to connect to GitHub API'; exit 2 ;;
+            *) printf '%s\n' "$FAKE_CI_RESULT"; exit 1 ;;
+          esac
         fi
         if [ -n "${FAKE_CI_RESULTS:-}" ]; then
           IFS='|' read -r -a ci_results <<< "$FAKE_CI_RESULTS"
@@ -125,7 +140,8 @@ case "${1:-}" in
           case "$ci_result" in
             pass) exit 0 ;;
             fail) printf '%s\n' 'Some checks failed'; exit 1 ;;
-            pending) printf '%s\n' 'Checks are pending'; exit 1 ;;
+            pending) printf '%s\n' 'Checks are pending'; exit 8 ;;
+            infra) printf '%s\n' 'failed to connect to GitHub API'; exit 2 ;;
             *) printf '%s\n' "$ci_result"; exit 1 ;;
           esac
         fi
