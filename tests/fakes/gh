@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_jq() {
+  jq -r "$@" "$GH_FIXTURE"
+}
+
+mutation() {
+  printf '%s\n' "$*" >> "$GH_MUTATION_LOG"
+}
+
+case "${1:-}" in
+  auth)
+    exit 0
+    ;;
+  repo)
+    [ "${2:-}" = "view" ] || exit 2
+    if printf '%s\n' "$*" | grep -q 'nameWithOwner'; then
+      fixture_jq '.nameWithOwner'
+    else
+      fixture_jq '.defaultBranch'
+    fi
+    ;;
+  issue)
+    case "${2:-}" in
+      list)
+        fixture_jq '.issues | map(select(.state == "OPEN")) | map(.number) | sort | .[]'
+        ;;
+      view)
+        number="${3:?missing issue number}"
+        if printf '%s\n' "$*" | grep -q ' --json body'; then
+          fixture_jq --argjson number "$number" '.issues[] | select(.number == $number) | .body // ""'
+        elif printf '%s\n' "$*" | grep -q ' --json state'; then
+          fixture_jq --argjson number "$number" '.issues[] | select(.number == $number) | .state'
+        else
+          fixture_jq --argjson number "$number" '.issues[] | select(.number == $number)'
+        fi
+        ;;
+      close|comment)
+        mutation "$*"
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
+    ;;
+  pr)
+    case "${2:-}" in
+      list)
+        head=""
+        for ((i = 1; i <= $#; i++)); do
+          if [ "${!i:-}" = "--head" ]; then
+            next=$((i + 1))
+            head="${!next:-}"
+          fi
+        done
+        if [ -f "$FAKE_CODEX_PR_STATE" ]; then
+          fixture_jq --arg head "$head" '.pull_requests[] | select(.head == $head) | .number' | head -n 1
+        else
+          fixture_jq --arg head "$head" '.pull_requests[] | select(.head == $head and (.available_before_codex // true)) | .number' | head -n 1
+        fi
+        ;;
+      view)
+        number="${3:?missing pull request number}"
+        if printf '%s\n' "$*" | grep -q ' --json labels'; then
+          fixture_jq --argjson number "$number" '.pull_requests[] | select(.number == $number) | .labels[]?'
+        elif printf '%s\n' "$*" | grep -q ' --json comments'; then
+          fixture_jq --argjson number "$number" '.pull_requests[] | select(.number == $number) | (.comments // []) | length'
+        elif printf '%s\n' "$*" | grep -q ' --json mergeCommit'; then
+          fixture_jq --argjson number "$number" '.pull_requests[] | select(.number == $number) | .mergeCommit'
+        else
+          fixture_jq --argjson number "$number" '.pull_requests[] | select(.number == $number)'
+        fi
+        ;;
+      checks)
+        [ "$(fixture_jq '.checks')" = "pass" ]
+        ;;
+      merge|comment)
+        mutation "$*"
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
+    ;;
+  label)
+    mutation "$*"
+    ;;
+  api)
+    mutation "$*"
+    ;;
+  *)
+    printf 'unsupported fake gh command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac

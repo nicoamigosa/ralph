@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'codex %s\n' "$*" >> "$FAKE_AGENT_LOG"
+
+output_file=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-o" ]; then
+    output_file="$arg"
+    break
+  fi
+  previous="$arg"
+done
+
+if [ -n "$output_file" ]; then
+  printf '%s\n' "${FAKE_CODEX_RESULT:-fake codex completed}" > "$output_file"
+fi
+
+if [ "${FAKE_CODEX_CREATE_PR:-0}" = "1" ]; then
+  : > "$FAKE_CODEX_PR_STATE"
+fi
+
+exit "${FAKE_CODEX_EXIT:-0}"

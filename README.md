@@ -29,6 +29,7 @@ discrepan, mandan las instrucciones de agente.
 ./ralph/once.sh                                  # base = trunk del repo (main/master)
 RALPH_BASE_BRANCH=develop ./ralph/once.sh        # base explícita
 RALPH_MAX_ROUNDS=2 ./ralph/once.sh               # menos rondas, menos gasto
+RALPH_DRY_RUN=1 ./ralph/once.sh                  # muestra el plan sin mutar ni ejecutar agentes
 ```
 
 La base **nunca** es la rama en la que estés parado: es el trunk del repo,
@@ -154,6 +155,7 @@ Todo por entorno, todo opcional:
 | `RALPH_NEEDS_HUMAN_LABEL` | `ralph-needs-human` |
 | `RALPH_MAX_INFRA_RETRIES` | `3` |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
+| `RALPH_DRY_RUN` | `0` (sólo mostrar el plan cuando vale `1`) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 
 ## Distribución y versión

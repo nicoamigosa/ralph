@@ -67,6 +67,8 @@ NEEDS_HUMAN_LABEL="${RALPH_NEEDS_HUMAN_LABEL:-ralph-needs-human}"
 MAX_INFRA_RETRIES="${RALPH_MAX_INFRA_RETRIES:-3}"
 ISSUE_ORDER="${RALPH_ISSUE_ORDER:-}"
 POST_MERGE_CHECK="${RALPH_POST_MERGE_CHECK:-}"
+DRY_RUN="${RALPH_DRY_RUN:-0}"
+GITHUB_HOST="${GH_HOST:-github.com}"
 
 CHECKPOINT_FILE="$SCRIPT_DIR/last_run.md"
 AGENT_LOG="$(mktemp -t ralph-agent.XXXXXX)"
@@ -115,8 +117,10 @@ if ! git ls-remote --exit-code --heads origin "$BASE_BRANCH" >/dev/null 2>&1; th
 fi
 
 # Label con el que marcamos los PRs que agotaron las rondas.
-gh label create "$NEEDS_HUMAN_LABEL" --color B60205 \
-  --description "Ralph agotó las rondas de revisión; necesita un humano" >/dev/null 2>&1 || true
+if [ "$DRY_RUN" != "1" ]; then
+  gh label create "$NEEDS_HUMAN_LABEL" --color B60205 \
+    --description "Ralph agotó las rondas de revisión; necesita un humano" >/dev/null 2>&1 || true
+fi
 
 echo "🔧 base=$BASE_BRANCH · label=$LABEL · rondas=$MAX_ROUNDS · $CODEX_MODEL($CODEX_EFFORT) → $CLAUDE_MODEL"
 
@@ -128,15 +132,16 @@ echo "🔧 base=$BASE_BRANCH · label=$LABEL · rondas=$MAX_ROUNDS · $CODEX_MOD
 # lista es una preferencia de orden, nunca una fuente de trabajo.
 # Lee los números por stdin, uno por línea; los imprime igual.
 apply_issue_order() {
-  local all first rest n
+  local all first_lines rest n
+  local -a first_numbers=()
   all="$(cat)"
   [ -z "$ISSUE_ORDER" ] && { printf '%s\n' "$all"; return 0; }
-  first=""
   for n in $ISSUE_ORDER; do
-    printf '%s\n' "$all" | grep -qx "$n" && first="$first$n "
+    printf '%s\n' "$all" | grep -qx "$n" && first_numbers+=("$n")
   done
-  rest="$(printf '%s\n' "$all" | grep -vxF "$(printf '%s\n' $first)" || true)"
-  printf '%s\n' $first
+  first_lines="$(printf '%s\n' "${first_numbers[@]}")"
+  rest="$(printf '%s\n' "$all" | grep -vxF "$first_lines" || true)"
+  [ "${#first_numbers[@]}" -gt 0 ] && printf '%s\n' "${first_numbers[@]}"
   [ -n "$rest" ] && printf '%s\n' "$rest"
   return 0
 }
@@ -267,6 +272,64 @@ add_label() {
 
 pr_for_branch() {
   gh pr list --head "$1" --state open --json number --jq '.[0].number // empty' 2>/dev/null
+}
+
+format_refs() {
+  local refs
+  refs="$(tr '\n' ',' | sed 's/,$//')"
+  [ -n "$refs" ] && printf '%s' "$refs" || printf 'none'
+}
+
+dry_run_plan() {
+  local numbers n priority body parents blockers pr needs_human excluded blocker blocker_state
+  local -A bodies=()
+  local -A epics=()
+
+  numbers="$(gh issue list --state open --label "$LABEL" --json number \
+    --jq 'sort_by(.number) | .[].number' | apply_issue_order)"
+
+  for n in $numbers; do
+    bodies[$n]="$(gh issue view "$n" --json body --jq '.body')"
+    while read -r n; do
+      [ -n "$n" ] && epics[$n]=1
+    done < <(printf '%s' "${bodies[$n]}" | section_refs 'Parent')
+  done
+
+  echo "Ralph dry-run plan (no mutations or agents)"
+  priority=0
+  for n in $numbers; do
+    priority=$((priority + 1))
+    body="${bodies[$n]}"
+    parents="$(printf '%s' "$body" | section_refs 'Parent' | format_refs)"
+    blockers="$(printf '%s' "$body" | section_refs 'Blocked by' | format_refs)"
+    pr="$(pr_for_branch "${BRANCH_PREFIX}${n}")"
+    needs_human=no
+    if [ -n "$pr" ] && gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null \
+      | grep -qx "$NEEDS_HUMAN_LABEL"; then
+      needs_human=yes
+    fi
+
+    excluded=""
+    if [ -n "${epics[$n]:-}" ]; then
+      excluded=parent
+    elif [ "$needs_human" = yes ]; then
+      excluded=needs-human
+    else
+      while read -r blocker; do
+        [ -n "$blocker" ] || continue
+        blocker_state="$(gh issue view "$blocker" --json state --jq '.state' 2>/dev/null || printf 'OPEN')"
+        if [ "$blocker_state" != CLOSED ]; then
+          excluded="blocked-by:$blocker"
+          break
+        fi
+      done < <(printf '%s' "$body" | section_refs 'Blocked by')
+    fi
+
+    printf '#%s priority=%s host=%s parents=%s blockers=%s needs-human=%s pr=%s' \
+      "$n" "$priority" "$GITHUB_HOST" "$parents" "$blockers" "$needs_human" "${pr:-none}"
+    [ -n "$excluded" ] && printf ' excluded=%s' "$excluded"
+    printf '\n'
+  done
 }
 
 # Pone la rama al día con la base antes de cada revisión, para que el revisor
@@ -460,7 +523,7 @@ $PROMPT_REVIEW"
     if [ "$ci_ok" -eq 1 ]; then
       echo "🟢 CI verde. Mergeo PR #$pr."
       git checkout "$BASE_BRANCH" >/dev/null 2>&1
-      if gh pr merge "$pr" $MERGE_METHOD --delete-branch >/dev/null 2>&1; then
+      if gh pr merge "$pr" "$MERGE_METHOD" --delete-branch >/dev/null 2>&1; then
         git branch -D "$branch" >/dev/null 2>&1 || true
         merged_sha="$(gh pr view "$pr" --json mergeCommit --jq .mergeCommit.oid 2>/dev/null)"
         # La base local debe traer el merge: los issues dependientes heredan ese código.
@@ -550,6 +613,11 @@ $PROMPT_REVISE"
 }
 
 # ------------------------------------------------------------------- bucle --
+
+if [ "$DRY_RUN" = "1" ]; then
+  dry_run_plan
+  exit 0
+fi
 
 # Repetimos pasadas mientras haya progreso, para que los issues que se
 # desbloquean al cerrarse sus blockers se procesen en la misma corrida.
