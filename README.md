@@ -271,7 +271,6 @@ Todo por entorno, todo opcional:
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
-| `RALPH_DRY_RUN` | `0` (sólo mostrar el plan cuando vale `1`) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 | `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |
 | `RALPH_CHECKPOINT_FILE` | `$SCRIPT_DIR/last_run.md` |
