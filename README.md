@@ -29,6 +29,14 @@ issue en estado `ci_pending` y no manda una corrección a Codex ni mergea. Un
 fallo explícito de un check sí se comenta en el PR para Codex. Para repos sin CI,
 `RALPH_CI_POLICY=none` es una excepción explícita y queda avisada en la salida.
 
+El proyecto puede declarar sus gates con
+`RALPH_REQUIRED_CHECKS_JSON='["CI / test","ShellCheck"]'`. Ralph consulta los
+`check-runs` y `statuses` del SHA exacto que revisó Claude: cada nombre declarado
+debe terminar en `success`; `skipped`, `neutral`, `cancelled`, `pending` y los
+resultados ausentes no habilitan el merge. Los checks exitosos adicionales no
+reemplazan uno obligatorio. Si no se declara la lista, todos los resultados del
+SHA deben ser exitosos y al menos uno debe existir.
+
 ## Es agnóstico al proyecto
 
 Instalá una release etiquetada como `ralph/` en cualquier repo con remoto de
@@ -58,7 +66,7 @@ checkout, agentes, labels, push o merge. Sirve para inspeccionar una corrida
 sin modificar el repositorio ni GitHub.
 
 Requisitos para una corrida completa: `git`, `gh` (autenticado, scope `repo`),
-`codex`, `claude`, remoto `origin`, y **working tree limpio** — el script salta
+`jq`, `codex`, `claude`, remoto `origin`, y **working tree limpio** — el script salta
 entre ramas y mergea. El dry-run sólo necesita las herramientas de lectura
 (`git` y `gh`).
 
@@ -185,6 +193,7 @@ Todo por entorno, todo opcional:
 | `RALPH_MAX_INFRA_RETRIES` | `3` |
 | `RALPH_CI_POLICY` | `required` |
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
+| `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 

@@ -47,6 +47,153 @@ load test_helper
   [[ "$output" != *"🎉 #1 mergeado a main y cerrado."* ]]
 }
 
+@test "check obligatorio ausente en el SHA revisado no mergea" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
+  export FAKE_CHECK_RUNS_JSON='[]'
+  export FAKE_STATUSES_JSON='[]'
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+}
+
+@test "check obligatorio skipped no cuenta como éxito" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_CHECK_RUNS_JSON="[{\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"skipped\"}]"
+  export FAKE_STATUSES_JSON='[]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [[ "$output" == *"CI obligatorio en rojo"* ]]
+}
+
+@test "check obligatorio pendiente no mergea" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_CHECK_RUNS_JSON="[{\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"in_progress\",\"conclusion\":null}]"
+  export FAKE_STATUSES_JSON='[]'
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [[ "$output" == *"ci_pending"* ]]
+}
+
+@test "check obligatorio failed no mergea" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_CHECK_RUNS_JSON="[{\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"failure\"}]"
+  export FAKE_STATUSES_JSON='[]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [[ "$output" == *"CI obligatorio en rojo"* ]]
+}
+
+@test "todos los checks obligatorios exitosos permiten extras" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_CHECK_RUNS_JSON="[{\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"name\":\"check extra\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"success\"}]"
+  export FAKE_STATUSES_JSON='[]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+  grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+}
+
+@test "éxito de un check obligatorio en un SHA anterior no permite mergear" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
+  export FAKE_CHECK_RUNS_JSON='[{"name":"suite obligatoria","head_sha":"previous-commit","status":"completed","conclusion":"success"}]'
+  export FAKE_STATUSES_JSON='[]'
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  grep -Fq "commits/$reviewed_sha/check-runs" "$FAKE_API_LOG"
+  grep -Fq "commits/$reviewed_sha/statuses" "$FAKE_API_LOG"
+}
+
+@test "la consulta de checks no depende de --slurp" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_CHECK_RUNS_JSON="[{\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"success\"}]"
+  export FAKE_STATUSES_JSON='[]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  run grep -Fq -- '--slurp' "$FAKE_API_LOG"
+  [ "$status" -eq 1 ]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+}
+
+@test "modo sin lista usa el estado más reciente de cada context" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CHECK_RUNS_JSON='[]'
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_STATUSES_JSON="[{\"context\":\"suite obligatoria\",\"sha\":\"$reviewed_sha\",\"state\":\"success\"},{\"context\":\"suite obligatoria\",\"sha\":\"$reviewed_sha\",\"state\":\"pending\"}]"
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+}
+
+@test "lista obligatoria usa el estado más reciente de cada context" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
+  export FAKE_CHECK_RUNS_JSON='[]'
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_STATUSES_JSON="[{\"context\":\"suite obligatoria\",\"sha\":\"$reviewed_sha\",\"state\":\"failure\"},{\"context\":\"suite obligatoria\",\"sha\":\"$reviewed_sha\",\"state\":\"success\"}]"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [[ "$output" == *"CI obligatorio en rojo"* ]]
+}
+
 @test "CI ausente con política required queda ci_pending sin mergear" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
@@ -102,7 +249,7 @@ load test_helper
   [ "$(cat "$FAKE_CI_CALL_COUNT_FILE")" -eq 2 ]
 }
 
-@test "el poll de CI usa una invocación válida de gh pr checks" {
+@test "el poll de CI consulta los endpoints del SHA revisado" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
   export FAKE_CI_RESULT=pass
@@ -111,6 +258,9 @@ load test_helper
 
   [ "$status" -eq 0 ]
   grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  grep -Fq "commits/$reviewed_sha/check-runs" "$FAKE_API_LOG"
+  grep -Fq "commits/$reviewed_sha/statuses" "$FAKE_API_LOG"
 }
 
 @test "RALPH_CI_POLICY=none permite mergear sin checks con aviso explícito" {

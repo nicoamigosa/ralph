@@ -169,7 +169,82 @@ case "${1:-}" in
     mutation "$*"
     ;;
   api)
-    mutation "$*"
+    api_endpoint=""
+    fake_ci_result=""
+    fake_sha="$($RALPH_TEST_REAL_GIT rev-parse HEAD)"
+    for api_arg in "$@"; do
+      case "$api_arg" in
+        repos/*) api_endpoint="$api_arg"; break ;;
+      esac
+    done
+    if [ -n "${FAKE_API_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FAKE_API_LOG"
+    fi
+    if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ]; then
+      : > "${GH_MUTATION_LOG}.head-changed"
+    fi
+    case "$api_endpoint" in
+      */check-runs)
+        if [ -n "${FAKE_CHECK_RUNS_JSON+x}" ]; then
+          printf '{"check_runs":%s}\n' "$FAKE_CHECK_RUNS_JSON"
+          exit 0
+        fi
+        if [ -n "${FAKE_CI_RESULT:-}" ]; then
+          fake_ci_result="$FAKE_CI_RESULT"
+        elif [ -n "${FAKE_CI_RESULTS:-}" ]; then
+          IFS='|' read -r -a ci_results <<< "$FAKE_CI_RESULTS"
+          ci_call=0
+          if [ -f "${FAKE_CI_CALL_COUNT_FILE:-}" ]; then
+            read -r ci_call < "$FAKE_CI_CALL_COUNT_FILE"
+          fi
+          ci_call=$((ci_call + 1))
+          printf '%s\n' "$ci_call" > "$FAKE_CI_CALL_COUNT_FILE"
+          ci_result_index=$((ci_call - 1))
+          if [ "$ci_result_index" -ge "${#ci_results[@]}" ]; then
+            ci_result_index=$((${#ci_results[@]} - 1))
+          fi
+          fake_ci_result="${ci_results[$ci_result_index]}"
+          printf '%s\n' "$fake_ci_result" > "$FAKE_CI_CURRENT_RESULT_FILE"
+        else
+          fake_ci_result=pass
+        fi
+        case "$fake_ci_result" in
+          pass)
+            printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$fake_sha"
+            ;;
+          pending)
+            printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"in_progress","conclusion":null}]}\n' "$fake_sha"
+            ;;
+          infra)
+            printf '%s\n' 'failed to connect to GitHub API' >&2
+            exit 2
+            ;;
+          'no checks reported')
+            printf '{"check_runs":[]}\n'
+            ;;
+          *)
+            printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"completed","conclusion":"failure"}]}\n' "$fake_sha"
+            ;;
+        esac
+        ;;
+      */statuses)
+        if [ -n "${FAKE_STATUSES_JSON+x}" ]; then
+          printf '%s\n' "$FAKE_STATUSES_JSON"
+          exit 0
+        fi
+        if [ -n "${FAKE_CI_RESULT:-}" ]; then
+          fake_ci_result="$FAKE_CI_RESULT"
+        elif [ -n "${FAKE_CI_RESULTS:-}" ] && [ -f "${FAKE_CI_CURRENT_RESULT_FILE:-}" ]; then
+          read -r fake_ci_result < "$FAKE_CI_CURRENT_RESULT_FILE"
+        else
+          fake_ci_result=pass
+        fi
+        printf '[]\n'
+        ;;
+      *)
+        mutation "$*"
+        ;;
+    esac
     ;;
   *)
     printf 'unsupported fake gh command: %s\n' "$*" >&2
