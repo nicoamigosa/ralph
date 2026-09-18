@@ -9,7 +9,24 @@ TEST_REAL_MKTEMP="$(command -v mktemp)"
 TEST_REAL_UNAME="$(command -v uname)"
 TEST_REAL_PS="$(command -v ps)"
 
+# Los tests corren también dentro de una corrida real de ralph (el agente
+# ejecuta bats desde un `codex exec` hijo de once.sh) y heredarían su
+# configuración: RALPH_REQUIRED_CHECKS_JSON, RALPH_ISSUE_ORDER, etc. Con esos
+# valores los fixtures no cuadran y, p. ej., el poll de CI espera 30 minutos
+# reales. Cada test parte de un entorno sin RALPH_* ni FAKE_*; sólo se
+# conservan las rutas reales que los fakes necesitan.
+clear_ralph_env() {
+  local name
+  for name in $(compgen -v RALPH_) $(compgen -v FAKE_); do
+    case "$name" in
+      RALPH_TEST_REAL_*) ;;
+      *) unset "$name" ;;
+    esac
+  done
+}
+
 setup() {
+  clear_ralph_env
   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ralph-tests.XXXXXX")"
   TEST_ORIGIN="$TEST_ROOT/origin.git"
   TEST_REPO="$TEST_ROOT/repo"
