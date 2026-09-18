@@ -1014,7 +1014,7 @@ $PROMPT_IMPLEMENT"
     update_branch_with_base "$branch" "$pr"
     rc=$?
     if [ "$rc" -ge 128 ]; then
-      echo "❌ Claude terminó por señal (rc=$rc): fallo de infraestructura del issue #$num."
+      echo "❌ Codex terminó por señal (rc=$rc): fallo de infraestructura del issue #$num."
     fi
     [ "$rc" -ne 0 ] && return "$rc"
 

@@ -58,7 +58,7 @@ if [ "${FAKE_CODEX_SIGNAL_GROUP:-0}" = "1" ]; then
 fi
 
 if [ -n "${FAKE_CODEX_CHILD_PID_FILE:-}" ]; then
-  sleep "${FAKE_CODEX_CHILD_SECONDS:-30}" &
+  sleep "${FAKE_CODEX_CHILD_SECONDS:-30}" >/dev/null 2>&1 &
   printf '%s\n' "$!" > "$FAKE_CODEX_CHILD_PID_FILE"
 fi
 
