@@ -91,13 +91,23 @@ AGENT_LOG="$(mktemp "${TMPDIR:-/tmp}/ralph-agent.XXXXXX")" \
   || fail "No pude crear el temporal para el log del agente."
 LAST_MSG="$(mktemp "${TMPDIR:-/tmp}/ralph-lastmsg.XXXXXX")" \
   || fail "No pude crear el temporal para el último mensaje."
+RUN_DIR="${RUN_DIR:-${TMPDIR:-/tmp}/ralph-run-$$}"
+mkdir -p "$RUN_DIR" || fail "No pude crear el directorio de corrida '$RUN_DIR'."
+RUN_SEQUENCE=0
+AGENT_STDOUT=""
+AGENT_STDERR=""
+ADAPTER_RESULT_FILE=""
+ADAPTER_FINAL_MESSAGE=""
+ADAPTER_EXIT_CODE=0
 
 CURRENT_ISSUE=""
 CURRENT_PHASE="preflight"
 CURRENT_AGENT_PID=""
 CURRENT_AGENT_PGID=""
 CURRENT_AGENT_FIFO=""
+CURRENT_AGENT_ERR_FIFO=""
 CURRENT_TEE_PID=""
+CURRENT_TEE_ERR_PID=""
 SIGNAL_EXITING=0
 
 process_group_for_pid() {
@@ -143,11 +153,18 @@ terminate_agent_processes() {
     kill -TERM "$CURRENT_TEE_PID" 2>/dev/null || true
     kill -KILL "$CURRENT_TEE_PID" 2>/dev/null || true
   fi
+  if [ -n "$CURRENT_TEE_ERR_PID" ]; then
+    kill -TERM "$CURRENT_TEE_ERR_PID" 2>/dev/null || true
+    kill -KILL "$CURRENT_TEE_ERR_PID" 2>/dev/null || true
+  fi
   if [ -n "$CURRENT_AGENT_PID" ] && { [ "$agent_terminated" -eq 1 ] || ! process_is_running "$CURRENT_AGENT_PID"; }; then
     wait "$CURRENT_AGENT_PID" 2>/dev/null || true
   fi
   if [ -n "$CURRENT_TEE_PID" ]; then
     wait "$CURRENT_TEE_PID" 2>/dev/null || true
+  fi
+  if [ -n "$CURRENT_TEE_ERR_PID" ]; then
+    wait "$CURRENT_TEE_ERR_PID" 2>/dev/null || true
   fi
 }
 
@@ -206,6 +223,7 @@ cleanup_on_exit() {
   [ "$SIGNAL_EXITING" -eq 1 ] || terminate_agent_processes
   rm -f "$AGENT_LOG" "$LAST_MSG"
   [ -n "$CURRENT_AGENT_FIFO" ] && rm -f "$CURRENT_AGENT_FIFO"
+  [ -n "$CURRENT_AGENT_ERR_FIFO" ] && rm -f "$CURRENT_AGENT_ERR_FIFO"
 }
 
 trap 'handle_signal TERM' TERM
@@ -432,14 +450,18 @@ parse_clock_epoch() {
 
 # Si el log del agente termina con "... limit · resets 4:10am", devuelve ese
 # instante como epoch (el mensaje lo da en America/New_York).
-reset_epoch_from_log() {
-  local clock e now
-  clock="$(tail -n 40 "$AGENT_LOG" | grep -oiE '[0-9]{1,2}:[0-9]{2}[[:space:]]*(am|pm)' | head -1)"
+reset_epoch_from_text() {
+  local text="$1" clock e now
+  clock="$(printf '%s' "$text" | grep -oiE '[0-9]{1,2}:[0-9]{2}[[:space:]]*(am|pm)' | head -1)"
   [ -z "$clock" ] && return 0
   e="$(parse_clock_epoch "$clock")" || return 0
   now="$(date +%s)"
   [ "$e" -le "$now" ] && e=$((e + 86400))   # si esa hora ya pasó hoy, es mañana
   echo "$e"
+}
+
+reset_epoch_from_log() {
+  reset_epoch_from_text "$(tail -n 40 "$AGENT_LOG")"
 }
 
 # ¿La corrida murió por tope de uso del proveedor? Miramos SOLO el final del log:
@@ -448,12 +470,20 @@ reset_epoch_from_log() {
 # Devuelve: 0 si no hubo tope · 8 tope de sesión · 9 tope semanal.
 classify_limit() {
   local tail_log now
-  tail_log="$(tail -n 40 "$AGENT_LOG")"
+  if [ "$#" -gt 0 ]; then
+    tail_log="$1"
+  else
+    tail_log="$(tail -n 40 "$AGENT_LOG")"
+  fi
   printf '%s' "$tail_log" | grep -qiE \
     "you('ve| have) (hit|reached) your .*limit|usage limit|rate limit|limit[^a-z0-9]*resets" \
     || return 0
 
-  RESET_EPOCH="$(reset_epoch_from_log)"
+  if [ "$#" -gt 0 ]; then
+    RESET_EPOCH="$(reset_epoch_from_text "$tail_log")"
+  else
+    RESET_EPOCH="$(reset_epoch_from_log)"
+  fi
   now="$(date +%s)"
   # Primero por la palabra del mensaje (señal fiable); si no aparece, por la
   # distancia al reset (un tope de sesión reabre en pocas horas).
@@ -514,26 +544,31 @@ write_checkpoint() {
   echo "💾 Contexto guardado en $CHECKPOINT_FILE"
 }
 
-# Corre un agente en su propia sesión/grupo y transmite su salida a tee. Devuelve
-# el exit code del agente, 8 · 9 por límites o 70 si falla tee.
+# Corre un agente en su propia sesión/grupo y conserva stdout y stderr en
+# archivos distintos. Devuelve el exit code del agente o 70 si falla una
+# captura.
 run_agent_group() {
-  local fifo="$AGENT_LOG.fifo" agent_rc=0 tee_rc=0 agent_done=0 tee_done=0
+  local stdout_file="$1" stderr_file="$2"
+  local stdout_fifo="$stdout_file.fifo" stderr_fifo="$stderr_file.fifo"
+  local agent_rc=0 tee_rc=0 tee_err_rc=0 agent_done=0 tee_done=0 tee_err_done=0
   local had_job_control=0 own_pgid agent_pgid attempt=0
-  local -a tee_files=("$@")
 
-  rm -f "$fifo"
-  mkfifo "$fifo" || return 70
-  CURRENT_AGENT_FIFO="$fifo"
+  rm -f "$stdout_fifo" "$stderr_fifo"
+  mkfifo "$stdout_fifo" "$stderr_fifo" || return 70
+  CURRENT_AGENT_FIFO="$stdout_fifo"
+  CURRENT_AGENT_ERR_FIFO="$stderr_fifo"
 
   case "$-" in *m*) had_job_control=1;; esac
-  tee "${tee_files[@]}" < "$fifo" &
+  tee "$stdout_file" < "$stdout_fifo" &
   CURRENT_TEE_PID=$!
+  tee "$stderr_file" < "$stderr_fifo" >&2 &
+  CURRENT_TEE_ERR_PID=$!
 
   if command -v setsid >/dev/null 2>&1; then
-    setsid "${AGENT_COMMAND[@]}" > "$fifo" 2>&1 &
+    setsid "${AGENT_COMMAND[@]}" > "$stdout_fifo" 2> "$stderr_fifo" &
   else
     set -m
-    "${AGENT_COMMAND[@]}" > "$fifo" 2>&1 &
+    "${AGENT_COMMAND[@]}" > "$stdout_fifo" 2> "$stderr_fifo" &
     [ "$had_job_control" -eq 1 ] || set +m
   fi
   CURRENT_AGENT_PID=$!
@@ -560,7 +595,7 @@ run_agent_group() {
     return 70
   fi
 
-  while [ "$agent_done" -eq 0 ] || [ "$tee_done" -eq 0 ]; do
+  while [ "$agent_done" -eq 0 ] || [ "$tee_done" -eq 0 ] || [ "$tee_err_done" -eq 0 ]; do
     if [ "$agent_done" -eq 0 ] && ! process_is_running "$CURRENT_AGENT_PID"; then
       wait "$CURRENT_AGENT_PID" 2>/dev/null
       agent_rc=$?
@@ -573,17 +608,26 @@ run_agent_group() {
       tee_done=1
       [ "$agent_done" -eq 1 ] || terminate_agent_group
     fi
-    if [ "$agent_done" -eq 0 ] || [ "$tee_done" -eq 0 ]; then
+    if [ "$tee_err_done" -eq 0 ] && ! process_is_running "$CURRENT_TEE_ERR_PID"; then
+      wait "$CURRENT_TEE_ERR_PID" 2>/dev/null
+      tee_err_rc=$?
+      tee_err_done=1
+      [ "$agent_done" -eq 1 ] || terminate_agent_group
+    fi
+    if [ "$agent_done" -eq 0 ] || [ "$tee_done" -eq 0 ] || [ "$tee_err_done" -eq 0 ]; then
       sleep 0.1
     fi
   done
 
-  rm -f "$fifo"
+  rm -f "$stdout_fifo" "$stderr_fifo"
   CURRENT_AGENT_PID=""
   CURRENT_AGENT_PGID=""
   CURRENT_AGENT_FIFO=""
+  CURRENT_AGENT_ERR_FIFO=""
   CURRENT_TEE_PID=""
+  CURRENT_TEE_ERR_PID=""
   [ "$tee_rc" -eq 0 ] || return 70
+  [ "$tee_err_rc" -eq 0 ] || return 70
   return "$agent_rc"
 }
 
@@ -610,12 +654,213 @@ build_codex_sandbox_config() {
   )
 }
 
+prepare_agent_capture() {
+  local kind="$1" stdout_suffix="$2"
+  RUN_SEQUENCE=$((RUN_SEQUENCE + 1))
+  AGENT_STDOUT="$RUN_DIR/${kind}-${RUN_SEQUENCE}.${stdout_suffix}"
+  AGENT_STDERR="$RUN_DIR/${kind}-${RUN_SEQUENCE}.stderr.log"
+  ADAPTER_RESULT_FILE="$RUN_DIR/${kind}-${RUN_SEQUENCE}.result.json"
+  : > "$AGENT_STDOUT"
+  : > "$AGENT_STDERR"
+  : > "$ADAPTER_RESULT_FILE"
+}
+
+record_agent_log() {
+  : > "$AGENT_LOG"
+  cat "$AGENT_STDOUT" "$AGENT_STDERR" > "$AGENT_LOG" 2>/dev/null || true
+}
+
+write_adapter_result() {
+  local retry_at_json="${ADAPTER_RETRY_AT:-null}"
+  if [ "${ADAPTER_FINAL_MESSAGE_SET:-0}" -eq 1 ]; then
+    jq -cn \
+      --arg status "$ADAPTER_STATUS" \
+      --arg limit_scope "$ADAPTER_LIMIT_SCOPE" \
+      --arg final_message "$ADAPTER_FINAL_MESSAGE" \
+      --argjson retry_at "$retry_at_json" \
+      --argjson retryable "$ADAPTER_RETRYABLE" \
+      --argjson exit_code "$ADAPTER_EXIT_CODE" \
+      '{status: $status, retry_at: $retry_at, limit_scope: $limit_scope,
+        retryable: $retryable, exit_code: $exit_code, final_message: $final_message}' \
+      > "$ADAPTER_RESULT_FILE"
+  else
+    jq -cn \
+      --arg status "$ADAPTER_STATUS" \
+      --arg limit_scope "$ADAPTER_LIMIT_SCOPE" \
+      --argjson retry_at "$retry_at_json" \
+      --argjson retryable "$ADAPTER_RETRYABLE" \
+      --argjson exit_code "$ADAPTER_EXIT_CODE" \
+      '{status: $status, retry_at: $retry_at, limit_scope: $limit_scope,
+        retryable: $retryable, exit_code: $exit_code, final_message: null}' \
+      > "$ADAPTER_RESULT_FILE"
+  fi
+}
+
+classify_adapter_failure() {
+  local text="$1" limit_rc
+  ADAPTER_STATUS="failed"
+  ADAPTER_RETRY_AT="null"
+  ADAPTER_LIMIT_SCOPE="unknown"
+  ADAPTER_RETRYABLE=false
+
+  classify_limit "$text"
+  limit_rc=$?
+  if [ "$limit_rc" -eq 8 ] || [ "$limit_rc" -eq 9 ]; then
+    ADAPTER_STATUS="rate_limited"
+    ADAPTER_RETRYABLE=true
+    if [ "$limit_rc" -eq 9 ]; then
+      ADAPTER_LIMIT_SCOPE="weekly"
+    else
+      ADAPTER_LIMIT_SCOPE="session"
+    fi
+    ADAPTER_RETRY_AT="$RESET_EPOCH"
+    [ -n "$ADAPTER_RETRY_AT" ] || ADAPTER_RETRY_AT="null"
+  elif printf '%s' "$text" | grep -Eqi \
+      'unauthori[sz]ed|authentication|not authenticated|login required|api key|(^|[^0-9])401([^0-9]|$)'; then
+    ADAPTER_STATUS="auth_error"
+  elif printf '%s' "$text" | grep -Eqi \
+      'configuration error|invalid (configuration|config|model|sandbox|option)|unknown (model|option)|unsupported (model|sandbox|option)'; then
+    ADAPTER_STATUS="config_error"
+  fi
+}
+
+parse_codex_result() {
+  local stdout_file="$1" stderr_file="$2" last_message_file="$3" process_rc="$4"
+  local line event_type event_message="" invalid=0 completed=0 item_message=""
+  local output_text stderr_tail last_message=""
+  ADAPTER_STATUS="failed"
+  ADAPTER_RETRY_AT="null"
+  ADAPTER_LIMIT_SCOPE="unknown"
+  ADAPTER_RETRYABLE=false
+  ADAPTER_FINAL_MESSAGE=""
+  ADAPTER_FINAL_MESSAGE_SET=0
+  ADAPTER_EXIT_CODE="$process_rc"
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$line"; then
+      invalid=1
+      continue
+    fi
+    event_type="$(jq -r '.type // empty' <<<"$line")"
+    case "$event_type" in
+      turn.completed)
+        if jq -e '.usage | type == "object"' >/dev/null 2>&1 <<<"$line"; then
+          completed=1
+        else
+          invalid=1
+        fi
+        ;;
+      turn.failed|error)
+        event_message="$(jq -r '(.error.message // .message // "")' <<<"$line")"
+        ;;
+      item.completed)
+        if jq -e '.item.type == "agent_message" and (.item.text | type == "string")' \
+            >/dev/null 2>&1 <<<"$line"; then
+          item_message="$(jq -r '.item.text' <<<"$line")"
+        fi
+        ;;
+    esac
+  done < "$stdout_file"
+
+  if [ -s "$last_message_file" ]; then
+    last_message="$(cat "$last_message_file")"
+  elif [ -n "$item_message" ]; then
+    last_message="$item_message"
+  fi
+  if [ -n "$last_message" ]; then
+    ADAPTER_FINAL_MESSAGE="$last_message"
+    ADAPTER_FINAL_MESSAGE_SET=1
+  fi
+
+  output_text="$event_message"
+  stderr_tail="$(tail -n 40 "$stderr_file" 2>/dev/null || true)"
+  if [ -n "$stderr_tail" ]; then
+    [ -n "$output_text" ] && output_text+=$'\n'
+    output_text+="$stderr_tail"
+  fi
+  if [ "$process_rc" -ne 0 ] || [ "$invalid" -ne 0 ] || [ "$completed" -ne 1 ] \
+      || [ "$ADAPTER_FINAL_MESSAGE_SET" -ne 1 ]; then
+    classify_adapter_failure "$output_text"
+  else
+    ADAPTER_STATUS="ok"
+    ADAPTER_RETRYABLE=false
+    ADAPTER_LIMIT_SCOPE="unknown"
+    ADAPTER_RETRY_AT="null"
+  fi
+  write_adapter_result
+}
+
+parse_claude_result() {
+  local stdout_file="$1" stderr_file="$2" process_rc="$3"
+  local result_json="" subtype="" is_error="false" output_text="" stderr_tail="" result_present=0
+  ADAPTER_STATUS="failed"
+  ADAPTER_RETRY_AT="null"
+  ADAPTER_LIMIT_SCOPE="unknown"
+  ADAPTER_RETRYABLE=false
+  ADAPTER_FINAL_MESSAGE=""
+  ADAPTER_FINAL_MESSAGE_SET=0
+  ADAPTER_EXIT_CODE="$process_rc"
+
+  if result_json="$(jq -s -c -e \
+      'if length == 1 and (.[0] | type == "object") then .[0] else error("one JSON object required") end' \
+      "$stdout_file" 2>/dev/null)"; then
+    if jq -e '.type == "result" and (.result | type == "string" and length > 0)' \
+        >/dev/null 2>&1 <<<"$result_json"; then
+      result_present=1
+      ADAPTER_FINAL_MESSAGE="$(jq -r '.result' <<<"$result_json")"
+      ADAPTER_FINAL_MESSAGE_SET=1
+    fi
+    subtype="$(jq -r '.subtype // ""' <<<"$result_json")"
+    is_error="$(jq -r '(.is_error // false)' <<<"$result_json")"
+    output_text="$(jq -r '[.error // "", .result // ""] | map(tostring) | join(" ")' <<<"$result_json")"
+    stderr_tail="$(tail -n 40 "$stderr_file" 2>/dev/null || true)"
+    if [ -n "$stderr_tail" ]; then
+      [ -n "$output_text" ] && output_text+=$'\n'
+      output_text+="$stderr_tail"
+    fi
+  else
+    output_text="$(tail -n 40 "$stderr_file" 2>/dev/null || true)"
+  fi
+
+  if [ "$process_rc" -ne 0 ] || [ "$result_present" -ne 1 ] \
+      || [ "$subtype" != "success" ] || [ "$is_error" != "false" ]; then
+    classify_adapter_failure "$output_text"
+  else
+    ADAPTER_STATUS="ok"
+    ADAPTER_RETRYABLE=false
+    ADAPTER_LIMIT_SCOPE="unknown"
+    ADAPTER_RETRY_AT="null"
+  fi
+  write_adapter_result
+}
+
+finish_adapter() {
+  case "$ADAPTER_STATUS" in
+    ok) return 0 ;;
+    rate_limited)
+      RESET_EPOCH=""
+      [ "$ADAPTER_RETRY_AT" != "null" ] && RESET_EPOCH="$ADAPTER_RETRY_AT"
+      case "$ADAPTER_LIMIT_SCOPE" in
+        weekly) LIMIT_KIND="semanal"; return 9 ;;
+        *) LIMIT_KIND="de sesión"; return 8 ;;
+      esac
+      ;;
+    *)
+      [ "$ADAPTER_EXIT_CODE" -ne 0 ] && return "$ADAPTER_EXIT_CODE"
+      return 70
+      ;;
+  esac
+}
+
 run_codex() {
-  local prompt="$1" limit_rc
+  local prompt="$1" process_rc
   : > "$AGENT_LOG"; : > "$LAST_MSG"
+  prepare_agent_capture codex stdout.jsonl
   build_codex_sandbox_config || return $?
   AGENT_COMMAND=(
     codex exec
+    --json
     --model "$CODEX_MODEL"
     "${CODEX_SANDBOX_CONFIG_ARGS[@]}"
     --sandbox "$CODEX_SANDBOX"
@@ -623,32 +868,52 @@ run_codex() {
     -o "$LAST_MSG"
     "$prompt"
   )
-  run_agent_group "$AGENT_LOG"
-  limit_rc=$?
-  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
-  classify_limit
-  limit_rc=$?
-  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
-  return 0
+  run_agent_group "$AGENT_STDOUT" "$AGENT_STDERR"
+  process_rc=$?
+  record_agent_log
+  if [ "$process_rc" -eq 70 ]; then
+    ADAPTER_STATUS="failed"
+    ADAPTER_RETRY_AT="null"
+    ADAPTER_LIMIT_SCOPE="unknown"
+    ADAPTER_RETRYABLE=false
+    ADAPTER_FINAL_MESSAGE=""
+    ADAPTER_FINAL_MESSAGE_SET=0
+    ADAPTER_EXIT_CODE="$process_rc"
+    write_adapter_result
+    return "$process_rc"
+  fi
+  parse_codex_result "$AGENT_STDOUT" "$AGENT_STDERR" "$LAST_MSG" "$process_rc"
+  finish_adapter
 }
 
 run_claude() {
-  local prompt="$1" limit_rc
+  local prompt="$1" process_rc
   : > "$AGENT_LOG"; : > "$LAST_MSG"
+  prepare_agent_capture claude stdout.json
   AGENT_COMMAND=(
     claude
     --model "$CLAUDE_MODEL"
     --dangerously-skip-permissions
     --print
+    --output-format json
     "$prompt"
   )
-  run_agent_group "$LAST_MSG" "$AGENT_LOG"
-  limit_rc=$?
-  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
-  classify_limit
-  limit_rc=$?
-  [ "$limit_rc" -eq 0 ] || return "$limit_rc"
-  return 0
+  run_agent_group "$AGENT_STDOUT" "$AGENT_STDERR"
+  process_rc=$?
+  record_agent_log
+  if [ "$process_rc" -eq 70 ]; then
+    ADAPTER_STATUS="failed"
+    ADAPTER_RETRY_AT="null"
+    ADAPTER_LIMIT_SCOPE="unknown"
+    ADAPTER_RETRYABLE=false
+    ADAPTER_FINAL_MESSAGE=""
+    ADAPTER_FINAL_MESSAGE_SET=0
+    ADAPTER_EXIT_CODE="$process_rc"
+    write_adapter_result
+    return "$process_rc"
+  fi
+  parse_claude_result "$AGENT_STDOUT" "$AGENT_STDERR" "$process_rc"
+  finish_adapter
 }
 
 run_sandbox_preflight() {
@@ -1099,7 +1364,8 @@ $PROMPT_REVIEW"
     rc=$?
 
     # Fail-closed: sin PASS explícito y bien formado, no se mergea.
-    verdict="$(tail -n 1 "$LAST_MSG" | grep -xE '<verdict>(PASS|CHANGES_REQUESTED)</verdict>' || true)"
+    verdict="$(printf '%s\n' "$ADAPTER_FINAL_MESSAGE" | tail -n 1 | \
+      grep -xE '<verdict>(PASS|CHANGES_REQUESTED)</verdict>' || true)"
 
     if [ "$rc" -ne 0 ]; then
       if [ "$rc" -ne 8 ] && [ "$rc" -ne 9 ]; then

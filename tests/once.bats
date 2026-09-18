@@ -169,6 +169,7 @@ load test_helper
   export FAKE_DATE_FAST_FORWARD=1
   export FAKE_DATE_INCREMENTAL_FAST_FORWARD=1
   export FAKE_SLEEP_NOOP=1
+  export RUN_DIR="$TEST_ROOT/run"
   export RALPH_CI_POLICY=none
 
   run_once
@@ -176,6 +177,8 @@ load test_helper
   [ "$status" -eq 0 ]
   grep -Fq -- '-r ' "$FAKE_DATE_LOG"
   ! grep -Fq -- '-d ' "$FAKE_DATE_LOG"
+  [ "$(jq -r '.status' "$RUN_DIR"/claude-2.result.json)" = rate_limited ]
+  [ "$(jq -r '.retryable' "$RUN_DIR"/claude-2.result.json)" = true ]
 }
 
 @test "a signal inside codex's process group is an infrastructure failure, not a host death" {
@@ -887,4 +890,119 @@ load test_helper
   git --git-dir="$TEST_ORIGIN" show-ref --verify --quiet refs/heads/ralph/issue-99
   project_branches_after="$(git -C "$PROJECT_ROOT" for-each-ref --format='%(refname)' 'refs/heads/ralph/*')"
   [ "$project_branches_after" = "$project_branches_before" ]
+}
+
+@test "codex JSONL without turn.completed is failed and never merges" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_STDOUT='{"type":"thread.started","thread_id":"thread_fixture"}'
+  export FAKE_CODEX_STDERR='codex diagnostic'
+  export RUN_DIR="$TEST_ROOT/run"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [ "$(find "$RUN_DIR" -name 'codex-*.stdout.jsonl' | wc -l | tr -d '[:space:]')" -eq 1 ]
+  [ "$(find "$RUN_DIR" -name 'codex-*.stderr.log' | wc -l | tr -d '[:space:]')" -eq 1 ]
+  result_file="$(find "$RUN_DIR" -name 'codex-*.result.json' -print -quit)"
+  [ "$(jq -r '.status' "$result_file")" = failed ]
+  [ "$(cat "$RUN_DIR"/codex-*.stderr.log)" = 'codex diagnostic' ]
+}
+
+@test "codex and claude adapters preserve real JSON output and final messages" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/codex-0.154.0-success.jsonl"
+  export FAKE_CODEX_FINAL_MESSAGE='implementation complete'
+  export FAKE_CODEX_STDERR='codex diagnostic'
+  export FAKE_CLAUDE_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/claude-2.1.277-success.json"
+  export FAKE_CLAUDE_STDERR='claude diagnostic'
+  export RUN_DIR="$TEST_ROOT/run"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq -- '--json' "$FAKE_AGENT_LOG"
+  grep -Fq -- '--output-format json' "$FAKE_AGENT_LOG"
+  codex_stdout="$(find "$RUN_DIR" -name 'codex-*.stdout.jsonl' -print -quit)"
+  codex_stderr="$(find "$RUN_DIR" -name 'codex-*.stderr.log' -print -quit)"
+  claude_stdout="$(find "$RUN_DIR" -name 'claude-*.stdout.json' -print -quit)"
+  claude_stderr="$(find "$RUN_DIR" -name 'claude-*.stderr.log' -print -quit)"
+  [ -s "$codex_stdout" ] && [ -s "$codex_stderr" ]
+  [ -s "$claude_stdout" ] && [ -s "$claude_stderr" ]
+  ! grep -Fq 'codex diagnostic' "$codex_stdout"
+  ! grep -Fq 'claude diagnostic' "$claude_stdout"
+  [ "$(jq -r '.status' "$RUN_DIR"/codex-*.result.json)" = ok ]
+  [ "$(jq -r '.status' "$RUN_DIR"/claude-*.result.json)" = ok ]
+  jq -e 'has("status") and has("retry_at") and has("limit_scope") and
+    has("retryable") and has("exit_code") and has("final_message") and
+    .status == "ok" and .retry_at == null and .limit_scope == "unknown" and
+    .retryable == false and .exit_code == 0' "$RUN_DIR"/codex-*.result.json
+  jq -e 'has("status") and has("retry_at") and has("limit_scope") and
+    has("retryable") and has("exit_code") and has("final_message") and
+    .status == "ok" and .retry_at == null and .limit_scope == "unknown" and
+    .retryable == false and .exit_code == 0' "$RUN_DIR"/claude-*.result.json
+  [ "$(jq -r '.final_message' "$RUN_DIR"/codex-*.result.json)" = 'implementation complete' ]
+  [ "$(jq -r '.final_message' "$RUN_DIR"/claude-*.result.json)" = '<verdict>PASS</verdict>' ]
+}
+
+@test "claude JSON without a final result is failed and never merges" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_STDOUT='{"type":"assistant","message":{"role":"assistant","content":[]}}'
+  export FAKE_CLAUDE_STDERR='claude stopped before result'
+  export RUN_DIR="$TEST_ROOT/run"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  result_file="$(find "$RUN_DIR" -name 'claude-*.result.json' -print -quit)"
+  [ "$(jq -r '.status' "$result_file")" = failed ]
+  [ "$(jq -r '.final_message' "$result_file")" = null ]
+}
+
+@test "truncated codex JSONL is failed and never merges" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/codex-0.154.0-truncated.jsonl"
+  export FAKE_CODEX_FINAL_MESSAGE='implementation complete'
+  export RUN_DIR="$TEST_ROOT/run"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  result_file="$(find "$RUN_DIR" -name 'codex-*.result.json' -print -quit)"
+  [ "$(jq -r '.status' "$result_file")" = failed ]
+}
+
+@test "codex failure ignores 429 and quota in aggregated output" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_EXITS='1|0'
+  export FAKE_CODEX_FINAL_MESSAGE='implementation complete'
+  export FAKE_CODEX_STDOUT='{"type":"thread.started","thread_id":"thread_fixture"}
+{"type":"item.completed","item":{"type":"command_execution","aggregated_output":"Tests: 429 passed; quota check complete"}}
+{"type":"item.completed","item":{"type":"agent_message","text":"implementation complete"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
+  export FAKE_DATE_FAST_FORWARD=1
+  export RUN_DIR="$TEST_ROOT/run"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"Tope"* ]]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [ "$(cat "$FAKE_CODEX_CALL_COUNT_FILE")" = 1 ]
+  result_file="$(find "$RUN_DIR" -name 'codex-*.result.json' -print -quit)"
+  [ "$(jq -r '.status' "$result_file")" = failed ]
+  [ "$(jq -r '.retryable' "$result_file")" = false ]
+  [ "$(jq -r '.exit_code' "$result_file")" = 1 ]
 }
