@@ -233,10 +233,60 @@ EOF
   return 0
 }
 
-# Extrae los #N que aparecen bajo una sección markdown (ej. 'Parent', 'Blocked by').
+# Extrae referencias documentadas bajo una sección markdown.
 # Lee el body por stdin, imprime los números (sin '#'), uno por línea.
 section_refs() {
-  sed -n "/^## *$1/I,/^## /p" | grep -oE '#[0-9]+' | tr -d '#' || true
+  awk -v wanted="$1" '
+    function trim_right(value) {
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      if (line ~ /^##[[:space:]]/) {
+        heading = line
+        sub(/^##[[:space:]]*/, "", heading)
+        active = (tolower(trim_right(heading)) == tolower(wanted))
+        next
+      }
+      if (active && line ~ /^[[:space:]]*-?[[:space:]]*#[0-9]+[[:space:]]*$/) {
+        reference = line
+        sub(/^[[:space:]]*-?[[:space:]]*#/, "", reference)
+        sub(/[[:space:]]+$/, "", reference)
+        print reference
+      }
+    }
+  '
+}
+
+# Valida que cada línea no vacía de ## Blocked by sea una referencia completa.
+# Imprime las líneas inválidas y devuelve un estado distinto de cero.
+validate_blocked_by() {
+  awk '
+    function is_reference(value) {
+      return value ~ /^[[:space:]]*-?[[:space:]]*#[0-9]+[[:space:]]*$/
+    }
+    function trim_right(value) {
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      if (line ~ /^##[[:space:]]/) {
+        heading = line
+        sub(/^##[[:space:]]*/, "", heading)
+        active = (tolower(trim_right(heading)) == "blocked by")
+        next
+      }
+      if (active && line !~ /^[[:space:]]*$/ && !is_reference(line)) {
+        print line
+        invalid = 1
+      }
+    }
+    END { exit invalid ? 1 : 0 }
+  '
 }
 
 format_epoch() {
@@ -962,7 +1012,7 @@ print_plan_issue() {
 select_issues() {
   local mode="$1"
   local attempted=" " progress=1 numbers n num priority parents blockers open_blockers
-  local epics p b state pr needs_human exclusion rc
+  local epics p b state pr needs_human exclusion rc blocked_by_error
 
   while [ "$progress" -eq 1 ]; do
     progress=0
@@ -988,6 +1038,7 @@ select_issues() {
       priority=$((priority + 1))
       parents="$(printf '%s' "${BODY[$num]}" | section_refs 'Parent')"
       blockers="$(printf '%s' "${BODY[$num]}" | section_refs 'Blocked by')"
+      blocked_by_error="$(printf '%s' "${BODY[$num]}" | validate_blocked_by)"
       open_blockers=""
       for b in $blockers; do
         [ -n "${CLOSED_BLOCKER[$b]:-}" ] && continue
@@ -1003,6 +1054,15 @@ select_issues() {
       pr="$(pr_for_branch "${BRANCH_PREFIX}${num}")"
       needs_human=no
       pr_needs_human "$pr" && needs_human=yes
+
+      if [ -n "$blocked_by_error" ]; then
+        echo "🚫 #$num bloqueado: formato inválido en ## Blocked by: $blocked_by_error"
+        if [ "$mode" = "plan" ]; then
+          print_plan_issue "$num" "$priority" "$parents" "$blockers" \
+            "$needs_human" "$pr" "invalid-blocked-by"
+        fi
+        continue
+      fi
 
       if [ "$mode" = "plan" ]; then
         exclusion=""
