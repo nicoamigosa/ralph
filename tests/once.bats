@@ -19,6 +19,47 @@ load test_helper
   [ ! -s "$FAKE_AGENT_LOG" ]
 }
 
+@test "claude PASS with a nonzero exit never merges the issue" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT='<verdict>PASS</verdict>'
+  export FAKE_CLAUDE_EXIT=42
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [[ "$output" == *"Claude terminó con rc=42"* ]]
+  [[ "$output" != *"🎉 #1 mergeado a main y cerrado."* ]]
+}
+
+@test "quoted PASS before final CHANGES_REQUESTED never merges the issue" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT=$'The review body quotes <verdict>PASS</verdict> as an example.\n<verdict>CHANGES_REQUESTED</verdict>'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  [[ "$output" != *"🎉 #1 mergeado a main y cerrado."* ]]
+}
+
+@test "tee failure returns 70 and stops the run" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_TEE_EXIT=1
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  ! grep -Eq '^claude ' "$FAKE_AGENT_LOG"
+}
+
 @test "happy path implements reviews merges and closes the issue" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
