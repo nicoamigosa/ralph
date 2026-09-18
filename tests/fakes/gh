@@ -186,7 +186,7 @@ case "${1:-}" in
     case "$api_endpoint" in
       */check-runs)
         if [ -n "${FAKE_CHECK_RUNS_JSON+x}" ]; then
-          printf '[{"check_runs":%s}]\n' "$FAKE_CHECK_RUNS_JSON"
+          printf '{"check_runs":%s}\n' "$FAKE_CHECK_RUNS_JSON"
           exit 0
         fi
         if [ -n "${FAKE_CI_RESULT:-}" ]; then
@@ -210,26 +210,26 @@ case "${1:-}" in
         fi
         case "$fake_ci_result" in
           pass)
-            printf '[{"check_runs":[{"name":"CI","head_sha":"%s","status":"completed","conclusion":"success"}]}]\n' "$fake_sha"
+            printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$fake_sha"
             ;;
           pending)
-            printf '[{"check_runs":[{"name":"CI","head_sha":"%s","status":"in_progress","conclusion":null}]}]\n' "$fake_sha"
+            printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"in_progress","conclusion":null}]}\n' "$fake_sha"
             ;;
           infra)
             printf '%s\n' 'failed to connect to GitHub API' >&2
             exit 2
             ;;
           'no checks reported')
-            printf '[{"check_runs":[]}]\n'
+            printf '{"check_runs":[]}\n'
             ;;
           *)
-            printf '[{"check_runs":[{"name":"CI","head_sha":"%s","status":"completed","conclusion":"failure"}]}]\n' "$fake_sha"
+            printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"completed","conclusion":"failure"}]}\n' "$fake_sha"
             ;;
         esac
         ;;
       */statuses)
         if [ -n "${FAKE_STATUSES_JSON+x}" ]; then
-          printf '[%s]\n' "$FAKE_STATUSES_JSON"
+          printf '%s\n' "$FAKE_STATUSES_JSON"
           exit 0
         fi
         if [ -n "${FAKE_CI_RESULT:-}" ]; then
@@ -239,7 +239,7 @@ case "${1:-}" in
         else
           fake_ci_result=pass
         fi
-        printf '[[]]\n'
+        printf '[]\n'
         ;;
       *)
         mutation "$*"

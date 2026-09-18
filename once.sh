@@ -480,12 +480,21 @@ check_required_checks() {
 
   REQUIRED_CHECKS_STATE="infrastructure"
   REQUIRED_CHECKS_FAILURES=""
-  check_runs_pages="$(gh api --paginate --slurp \
-    "repos/$REPO_SLUG/commits/$reviewed_sha/check-runs" 2>/dev/null)" || return 2
-  statuses_pages="$(gh api --paginate --slurp \
-    "repos/$REPO_SLUG/commits/$reviewed_sha/statuses" 2>/dev/null)" || return 2
-  check_runs="$(jq -c '[.[] | .check_runs[]?]' <<<"$check_runs_pages" 2>/dev/null)" || return 2
-  statuses="$(jq -c '[.[][]?]' <<<"$statuses_pages" 2>/dev/null)" || return 2
+  check_runs_pages="$(gh api --paginate \
+    "repos/$REPO_SLUG/commits/$reviewed_sha/check-runs" 2>/dev/null | \
+    jq -s -c '[.[] | .check_runs[]?]' 2>/dev/null)" || return 2
+  statuses_pages="$(gh api --paginate \
+    "repos/$REPO_SLUG/commits/$reviewed_sha/statuses" 2>/dev/null | \
+    jq -s -c '
+      [.[][]?] |
+      reduce .[] as $status
+        ([];
+         if any(.[]; .context == $status.context) then .
+         else . + [$status]
+         end)
+    ' 2>/dev/null)" || return 2
+  check_runs="$check_runs_pages"
+  statuses="$statuses_pages"
   results_json="$(jq -cn --argjson check_runs "$check_runs" --argjson statuses "$statuses" \
     '{check_runs: $check_runs, statuses: $statuses}' 2>/dev/null)" || return 2
 
