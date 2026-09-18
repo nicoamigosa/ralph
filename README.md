@@ -65,10 +65,13 @@ blockers, exclusión por revisión humana y PR existente— y termina antes de
 checkout, agentes, labels, push o merge. Sirve para inspeccionar una corrida
 sin modificar el repositorio ni GitHub.
 
-Requisitos para una corrida completa: `git`, `gh` (autenticado, scope `repo`),
-`jq`, `codex`, `claude`, remoto `origin`, y **working tree limpio** — el script salta
-entre ramas y mergea. El dry-run sólo necesita las herramientas de lectura
-(`git` y `gh`).
+Requisitos para una corrida completa: Bash **5 o superior**, `git`, `gh`
+(autenticado, scope `repo`), `jq`, `codex`, `claude`, remoto `origin`, y
+**working tree limpio** — el script salta entre ramas y mergea. En macOS,
+instalá Bash con `brew install bash` y anteponé `$(brew --prefix bash)/bin` al
+`PATH`. `once.sh` usa los formatos nativos de `date` para Darwin y Linux y
+temporales bajo `${TMPDIR:-/tmp}`, sin requerir utilidades GNU adicionales. El
+dry-run sólo necesita las herramientas de lectura (`git` y `gh`).
 
 ## Cómo elige los issues
 

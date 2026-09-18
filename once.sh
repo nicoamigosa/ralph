@@ -1,4 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+if (( BASH_VERSINFO[0] < 5 )); then
+  printf '%s\n' "Ralph requiere Bash >= 5. Instalá con 'brew install bash' y anteponé \"\$(brew --prefix bash)/bin\" al PATH." >&2
+  exit 2
+fi
+
+fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
+
 #
 # Ralph loop — resuelve issues de GitHub sin supervisión, con dos agentes:
 #
@@ -76,8 +84,10 @@ REQUIRED_CHECKS_JSON="${RALPH_REQUIRED_CHECKS_JSON:-}"
 DRY_RUN="${RALPH_DRY_RUN:-0}"
 
 CHECKPOINT_FILE="$SCRIPT_DIR/last_run.md"
-AGENT_LOG="$(mktemp -t ralph-agent.XXXXXX)"
-LAST_MSG="$(mktemp -t ralph-lastmsg.XXXXXX)"
+AGENT_LOG="$(mktemp "${TMPDIR:-/tmp}/ralph-agent.XXXXXX")" \
+  || fail "No pude crear el temporal para el log del agente."
+LAST_MSG="$(mktemp "${TMPDIR:-/tmp}/ralph-lastmsg.XXXXXX")" \
+  || fail "No pude crear el temporal para el último mensaje."
 trap 'rm -f "$AGENT_LOG" "$LAST_MSG"' EXIT
 
 # Seteados por los runners cuando un agente reporta un tope de uso.
@@ -85,8 +95,6 @@ LIMIT_KIND=""
 RESET_EPOCH=""
 
 # ---------------------------------------------------------------- preflight --
-
-fail() { echo "❌ $*" >&2; exit 1; }
 
 case "$MERGE_METHOD" in
   --squash|--merge|--rebase) ;;
@@ -231,13 +239,31 @@ section_refs() {
   sed -n "/^## *$1/I,/^## /p" | grep -oE '#[0-9]+' | tr -d '#' || true
 }
 
+format_epoch() {
+  local epoch="$1" format="${2:-+%Y-%m-%d %H:%M %Z}"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    date -r "$epoch" "$format"
+  else
+    date -d "@$epoch" "$format"
+  fi
+}
+
+parse_clock_epoch() {
+  local clock="$1"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    TZ='America/New_York' date -j -f '%I:%M%p' "$clock" +%s 2>/dev/null
+  else
+    TZ='America/New_York' date --date="$clock" +%s 2>/dev/null
+  fi
+}
+
 # Si el log del agente termina con "... limit · resets 4:10am", devuelve ese
 # instante como epoch (el mensaje lo da en America/New_York).
 reset_epoch_from_log() {
   local clock e now
   clock="$(tail -n 40 "$AGENT_LOG" | grep -oiE '[0-9]{1,2}:[0-9]{2}[[:space:]]*(am|pm)' | head -1)"
   [ -z "$clock" ] && return 0
-  e="$(TZ='America/New_York' date -d "$clock" +%s 2>/dev/null)" || return 0
+  e="$(parse_clock_epoch "$clock")" || return 0
   now="$(date +%s)"
   [ "$e" -le "$now" ] && e=$((e + 86400))   # si esa hora ya pasó hoy, es mañana
   echo "$e"
@@ -278,7 +304,7 @@ wait_for_reset() {
   else
     target=$((now + 3600))
   fi
-  echo "⏳ Tope $LIMIT_KIND. Reintento de #$issue ~$(date -d "@$target" '+%H:%M') (en $(((target - now) / 60)) min)..."
+  echo "⏳ Tope $LIMIT_KIND. Reintento de #$issue ~$(format_epoch "$target" '+%H:%M') (en $(((target - now) / 60)) min)..."
   while :; do
     remaining=$((target - $(date +%s)))
     [ "$remaining" -le 0 ] && break
@@ -294,7 +320,7 @@ write_checkpoint() {
     echo "# Ralph — checkpoint $(date '+%Y-%m-%d %H:%M %Z')"
     echo
     echo "**Parada:** $reason"
-    [ -n "$RESET_EPOCH" ] && echo "**Reset estimado:** $(date -d "@$RESET_EPOCH" '+%Y-%m-%d %H:%M %Z')"
+    [ -n "$RESET_EPOCH" ] && echo "**Reset estimado:** $(format_epoch "$RESET_EPOCH" '+%Y-%m-%d %H:%M %Z')"
     echo "**Branch base:** \`$BASE_BRANCH\`"
     echo
     echo "## Issues \`$LABEL\` aún abiertos"

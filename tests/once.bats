@@ -2,6 +2,72 @@
 
 load test_helper
 
+@test "once.sh uses env bash so PATH can select Bash 5 on macOS" {
+  run head -n 1 "$PROJECT_ROOT/once.sh"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = "#!/usr/bin/env bash" ]
+}
+
+@test "Bash version guard runs before any preflight and explains the Homebrew fix" {
+  version_line="$(grep -n 'BASH_VERSINFO' "$PROJECT_ROOT/once.sh" | head -n 1 | cut -d: -f1)"
+  set_line="$(grep -n '^set -' "$PROJECT_ROOT/once.sh" | head -n 1 | cut -d: -f1)"
+  script_dir_line="$(grep -n '^SCRIPT_DIR=' "$PROJECT_ROOT/once.sh" | head -n 1 | cut -d: -f1)"
+  first_lines="$(sed -n "1,${set_line}p" "$PROJECT_ROOT/once.sh")"
+
+  [ -n "$version_line" ]
+  [ "$version_line" -lt "$set_line" ]
+  [ "$version_line" -lt "$script_dir_line" ]
+  [[ "$first_lines" == *"brew install bash"* ]]
+  [[ "$first_lines" == *"PATH"* ]]
+  [[ "$first_lines" == *"exit 2"* ]]
+}
+
+@test "mktemp failure stops through fail with a clear message" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_MKTEMP_EXIT=1
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No pude crear el temporal"* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+}
+
+@test "mktemp uses a TMPDIR path template supported by BSD and GNU implementations" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  export TMPDIR="$TEST_ROOT/custom-tmp"
+  mkdir -p "$TMPDIR"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -Ec "^$TMPDIR/ralph-[^.]+\.XXXXXX$" "$FAKE_MKTEMP_LOG")" -eq 2 ]
+}
+
+@test "date -d is confined to the portable epoch formatter" {
+  [ "$(grep -Ec 'date -d' "$PROJECT_ROOT/once.sh")" -eq 1 ]
+}
+
+@test "epoch formatting uses BSD date -r on Darwin" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULTS='usage limit|<verdict>PASS</verdict>'
+  export FAKE_UNAME_SYSTEM=Darwin
+  export FAKE_DATE_FAST_FORWARD=1
+  export FAKE_DATE_INCREMENTAL_FAST_FORWARD=1
+  export FAKE_SLEEP_NOOP=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq -- '-r ' "$FAKE_DATE_LOG"
+  ! grep -Fq -- '-d ' "$FAKE_DATE_LOG"
+}
+
 @test "dry run prints the selector plan without mutations or agents" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
   export RALPH_DRY_RUN=1
