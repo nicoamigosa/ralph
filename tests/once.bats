@@ -352,6 +352,53 @@ load test_helper
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
 }
 
+@test "fallo al leer el body del issue detiene antes de crear rama o invocar agentes" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_ISSUE_VIEW_FAIL_NUM=1
+  export FAKE_ISSUE_VIEW_FAIL_FIELD=body
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  ! git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  [[ "$output" == *"No pude leer el body del issue #1"* ]]
+}
+
+@test "ralph-needs-human en el issue omite el issue sin rama ni agentes" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/needs-human-issue.json"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  [[ "$output" == *"#1 marcado con ralph-needs-human"* ]]
+}
+
+@test "issue que pierde ready-for-agent antes del agente no invoca Codex" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_ISSUE_LABELS_SEQUENCE='ready-for-agent|__empty__'
+  export FAKE_ISSUE_LABELS_CALL_COUNT_FILE="$TEST_ROOT/issue-label-calls"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  [[ "$output" == *"#1 ya no tiene el label 'ready-for-agent'"* ]]
+}
+
+@test "ralph-needs-human en el PR omite el issue sin invocar agentes" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/needs-human-pr.json"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  [[ "$output" == *"PR #101 espera revisión humana"* ]]
+}
+
 @test "claude PASS with a nonzero exit never merges the issue" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1

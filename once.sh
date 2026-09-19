@@ -103,6 +103,7 @@ ADAPTER_RESULT_FILE=""
 ADAPTER_FINAL_MESSAGE=""
 ADAPTER_EXIT_CODE=0
 ADAPTER_ERROR=""
+ADAPTER_STATUS=""
 
 CURRENT_ISSUE=""
 CURRENT_PHASE="preflight"
@@ -1030,7 +1031,12 @@ add_label() {
 }
 
 pr_for_branch() {
-  gh pr list --head "$1" --state open --json number --jq '.[0].number // empty' 2>/dev/null
+  local pr
+  if ! pr="$(gh pr list --head "$1" --state open --json number --jq '.[0].number // empty' 2>/dev/null)"; then
+    printf '❌ No pude leer el PR de la rama %s; detengo la corrida.\n' "$1" >&2
+    return 70
+  fi
+  printf '%s' "$pr"
 }
 
 checkout_or_fail() {
@@ -1342,17 +1348,28 @@ process_issue() {
   fi
 
   pr="$(pr_for_branch "$branch")"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
 
   # Un PR ya marcado para humano no se vuelve a tocar: agotó sus rondas.
-  if [ -n "$pr" ] && gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null \
-       | grep -qx "$NEEDS_HUMAN_LABEL"; then
-    echo "🙋 PR #$pr espera revisión humana; no lo toco."
-    checkout_or_fail "$BASE_BRANCH" || return 70
-    return 0
+  if [ -n "$pr" ]; then
+    pr_needs_human "$pr"
+    rc=$?
+    [ "$rc" -eq 70 ] && return "$rc"
+    if [ "$rc" -eq 0 ]; then
+      echo "🙋 PR #$pr espera revisión humana; no lo toco."
+      checkout_or_fail "$BASE_BRANCH" || return 70
+      return 0
+    fi
   fi
 
   # Contexto mínimo: SOLO este issue (cuerpo + comentarios) y los últimos commits.
   issue_ctx="$(gh issue view "$num" --json number,title,body,comments)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "❌ No pude leer el contexto del issue #$num; detengo la corrida."
+    return 70
+  fi
   commits="$(git log -n 5 --format='%H%n%ad%n%B---' --date=short "$BASE_BRANCH" 2>/dev/null || echo 'No commits found')"
 
   # ---- Fase 1: implementación (se salta si ya hay PR abierto) ----
@@ -1368,6 +1385,13 @@ your branch — review them, keep what is good, and continue from there:
 
 $prior_work
 "
+    validate_issue_for_agent "$num" "$pr"
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      checkout_or_fail "$BASE_BRANCH" || return 70
+      return 0
+    fi
+    [ "$rc" -eq 0 ] || return "$rc"
     run_codex "You are resolving ONE GitHub issue in an isolated branch.
 
 Branch (already checked out, stay on it): $branch
@@ -1427,6 +1451,13 @@ $PROMPT_IMPLEMENT"
 
     echo "🔍 Claude revisa PR #$pr (ronda $round/$MAX_ROUNDS)..."
     comments_before="$(gh pr view "$pr" --json comments --jq '.comments|length' 2>/dev/null || echo 0)"
+    validate_issue_for_agent "$num" "$pr"
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      checkout_or_fail "$BASE_BRANCH" || return 70
+      return 0
+    fi
+    [ "$rc" -eq 0 ] || return "$rc"
     run_claude "You are reviewing ONE pull request.
 
 Pull request: #$pr   (inspect it with: gh pr view $pr, gh pr diff $pr)
@@ -1540,6 +1571,13 @@ $PROMPT_REVIEW"
     CURRENT_PHASE="corrección"
     echo "✏️  Codex corrige PR #$pr..."
     comments="$(gh pr view "$pr" --json comments --jq '.comments[-1] | "### \(.author.login) escribió:\n\n\(.body)"' 2>/dev/null)"
+    validate_issue_for_agent "$num" "$pr"
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      checkout_or_fail "$BASE_BRANCH" || return 70
+      return 0
+    fi
+    [ "$rc" -eq 0 ] || return "$rc"
     run_codex "Your pull request was reviewed and did not pass.
 
 Pull request: #$pr
@@ -1592,11 +1630,116 @@ EOF
   [ -n "$result" ] && printf '%s' "$result" || printf '%s' "none"
 }
 
+read_issue_body() {
+  local num="$1" body
+  if ! body="$(gh issue view "$num" --json body --jq '.body // ""' 2>/dev/null)"; then
+    printf '❌ No pude leer el body del issue #%s; detengo la corrida.\n' "$num" >&2
+    return 70
+  fi
+  printf '%s' "$body"
+}
+
+read_issue_state() {
+  local num="$1" state
+  if ! state="$(gh issue view "$num" --json state --jq '.state // empty' 2>/dev/null)"; then
+    printf '❌ No pude leer el estado del issue #%s; detengo la corrida.\n' "$num" >&2
+    return 70
+  fi
+  printf '%s' "$state"
+}
+
+read_issue_labels() {
+  local num="$1" labels
+  if ! labels="$(gh issue view "$num" --json labels --jq '.labels[]? | if type == "object" then .name else . end' 2>/dev/null)"; then
+    printf '❌ No pude leer los labels del issue #%s; detengo la corrida.\n' "$num" >&2
+    return 70
+  fi
+  printf '%s' "$labels"
+}
+
+read_issue_data() {
+  local num="$1" rc
+  ISSUE_BODY="$(read_issue_body "$num")"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  ISSUE_STATE="$(read_issue_state "$num")"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  ISSUE_LABELS="$(read_issue_labels "$num")"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  case "$ISSUE_STATE" in
+    OPEN|CLOSED) return 0 ;;
+    *)
+      printf '❌ El issue #%s devolvió un estado inválido; detengo la corrida.\n' "$num" >&2
+      return 70
+      ;;
+  esac
+}
+
+issue_has_label() {
+  local labels="$1" wanted="$2" label
+  while IFS= read -r label; do
+    [ "$label" = "$wanted" ] && return 0
+  done <<<"$labels"
+  return 1
+}
+
 pr_needs_human() {
   local pr="$1" labels
   [ -z "$pr" ] && return 1
-  labels="$(gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null || true)"
+  if ! labels="$(gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null)"; then
+    printf '❌ No pude leer los labels del PR #%s; detengo la corrida.\n' "$pr" >&2
+    return 70
+  fi
   printf '%s\n' "$labels" | grep -Fqx "$NEEDS_HUMAN_LABEL"
+}
+
+validate_issue_for_agent() {
+  local num="$1" pr="${2:-}" blockers blocked_by_error b state rc
+
+  read_issue_data "$num"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  if [ "$ISSUE_STATE" != "OPEN" ]; then
+    echo "⏭️  #$num ya no está abierto; no invoco agentes."
+    return 1
+  fi
+  if ! issue_has_label "$ISSUE_LABELS" "$LABEL"; then
+    echo "⏭️  #$num ya no tiene el label '$LABEL'; no invoco agentes."
+    return 1
+  fi
+  if issue_has_label "$ISSUE_LABELS" "$NEEDS_HUMAN_LABEL"; then
+    echo "🙋 #$num marcado con $NEEDS_HUMAN_LABEL; no invoco agentes."
+    return 1
+  fi
+
+  blockers="$(printf '%s' "$ISSUE_BODY" | section_refs 'Blocked by')"
+  blocked_by_error="$(printf '%s' "$ISSUE_BODY" | validate_blocked_by)"
+  if [ -n "$blocked_by_error" ]; then
+    echo "🚫 #$num bloqueado: formato inválido en ## Blocked by: $blocked_by_error"
+    return 1
+  fi
+  for b in $blockers; do
+    state="$(read_issue_state "$b")"
+    rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    if [ "$state" != "CLOSED" ]; then
+      echo "⏭️  #$num bloqueado por dependencias abiertas, no invoco agentes."
+      return 1
+    fi
+  done
+
+  if [ -n "$pr" ]; then
+    pr_needs_human "$pr"
+    rc=$?
+    [ "$rc" -eq 70 ] && return "$rc"
+    if [ "$rc" -eq 0 ]; then
+      echo "🙋 PR #$pr espera revisión humana; no invoco agentes."
+      return 1
+    fi
+  fi
+  return 0
 }
 
 print_plan_issue() {
@@ -1614,23 +1757,34 @@ print_plan_issue() {
 # de pasadas para que un blocker cerrado durante la corrida desbloquee a otro.
 select_issues() {
   local mode="$1"
-  local attempted=" " progress=1 numbers n num priority parents blockers open_blockers
+  local attempted=" " progress=1 numbers issue_list n num priority parents blockers open_blockers
   local epics p b state pr needs_human exclusion rc blocked_by_error
 
   while [ "$progress" -eq 1 ]; do
     progress=0
-    numbers="$(gh issue list --state open --label "$LABEL" --json number \
-      --jq 'sort_by(.number) | .[].number' | apply_issue_order)"
+    if ! issue_list="$(gh issue list --state open --label "$LABEL" --json number \
+      --jq 'sort_by(.number) | .[].number')"; then
+      echo "❌ No pude listar los issues candidatos; detengo la corrida."
+      return 70
+    fi
+    numbers="$(printf '%s\n' "$issue_list" | apply_issue_order)"
     [ -z "$numbers" ] && break
 
-    # Cachear bodies de la pasada (una llamada por issue) para detectar épicos y blockers.
-    unset BODY; declare -A BODY
+    # Cachear body, estado y labels de la pasada para detectar épicos y
+    # validar candidatos antes de crear ramas.
+    unset BODY ISSUE_STATE_BY_ISSUE ISSUE_LABELS_BY_ISSUE
+    declare -A BODY ISSUE_STATE_BY_ISSUE ISSUE_LABELS_BY_ISSUE
     # Blockers ya confirmados cerrados. Sólo cacheamos CLOSED: es un estado final,
     # mientras que OPEN puede dejar de serlo dentro de esta misma pasada.
     unset CLOSED_BLOCKER; declare -A CLOSED_BLOCKER
     epics=" "
     for n in $numbers; do
-      BODY[$n]="$(gh issue view "$n" --json body --jq '.body')"
+      read_issue_data "$n"
+      rc=$?
+      [ "$rc" -eq 0 ] || return "$rc"
+      BODY[$n]="$ISSUE_BODY"
+      ISSUE_STATE_BY_ISSUE[$n]="$ISSUE_STATE"
+      ISSUE_LABELS_BY_ISSUE[$n]="$ISSUE_LABELS"
       for p in $(printf '%s' "${BODY[$n]}" | section_refs 'Parent'); do
         epics="$epics$p "
       done
@@ -1645,7 +1799,9 @@ select_issues() {
       open_blockers=""
       for b in $blockers; do
         [ -n "${CLOSED_BLOCKER[$b]:-}" ] && continue
-        state="$(gh issue view "$b" --json state --jq '.state' 2>/dev/null || echo OPEN)"
+        state="$(read_issue_state "$b")"
+        rc=$?
+        [ "$rc" -eq 0 ] || return "$rc"
         if [ "$state" = "CLOSED" ]; then
           CLOSED_BLOCKER[$b]=1
         else
@@ -1655,8 +1811,16 @@ select_issues() {
       done
 
       pr="$(pr_for_branch "${BRANCH_PREFIX}${num}")"
+      rc=$?
+      [ "$rc" -eq 0 ] || return "$rc"
       needs_human=no
-      pr_needs_human "$pr" && needs_human=yes
+      issue_has_label "${ISSUE_LABELS_BY_ISSUE[$num]}" "$NEEDS_HUMAN_LABEL" && needs_human=yes
+      if [ -n "$pr" ]; then
+        pr_needs_human "$pr"
+        rc=$?
+        [ "$rc" -eq 70 ] && return "$rc"
+        [ "$rc" -eq 0 ] && needs_human=yes
+      fi
 
       if [ -n "$blocked_by_error" ]; then
         echo "🚫 #$num bloqueado: formato inválido en ## Blocked by: $blocked_by_error"
@@ -1685,6 +1849,19 @@ select_issues() {
       case "$attempted" in *" $num "*) continue;; esac
       # Es un épico/padre (lo referencia otro issue): no se implementa.
       case "$epics" in *" $num "*) echo "↪️  #$num es épico/padre, lo omito."; continue;; esac
+
+      if [ "${ISSUE_STATE_BY_ISSUE[$num]}" != "OPEN" ]; then
+        echo "⏭️  #$num ya no está abierto; lo omito."
+        continue
+      fi
+      if ! issue_has_label "${ISSUE_LABELS_BY_ISSUE[$num]}" "$LABEL"; then
+        echo "⏭️  #$num ya no tiene el label '$LABEL'; lo omito."
+        continue
+      fi
+      if issue_has_label "${ISSUE_LABELS_BY_ISSUE[$num]}" "$NEEDS_HUMAN_LABEL"; then
+        echo "🙋 #$num marcado con $NEEDS_HUMAN_LABEL; no lo toco."
+        continue
+      fi
 
       # ¿Tiene blockers todavía abiertos? Si sí, lo dejamos para la próxima pasada.
       # El listado de la pasada no sirve para decidir esto: la API de GitHub es
@@ -1771,5 +1948,7 @@ if [ "$DRY_RUN" = "1" ]; then
 else
   run_sandbox_preflight || exit $?
   select_issues run
+  rc=$?
+  [ "$rc" -eq 0 ] || exit "$rc"
   echo "🏁 No quedan issues '$LABEL' listos para procesar."
 fi
