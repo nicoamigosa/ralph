@@ -14,6 +14,32 @@ issue_list_filter=".issues | map(select(.state == \"OPEN\" and ((.labels // []) 
 pull_request_filter=".pull_requests[] | select(.number == \$number)"
 head_pull_request_filter=".pull_requests[] | select(.head == \$head)"
 
+merge_state() {
+  local query_count=0 state_index state merge_oid
+  if [ -n "${FAKE_MERGE_QUERY_COUNT_FILE:-}" ] && [ -f "$FAKE_MERGE_QUERY_COUNT_FILE" ]; then
+    read -r query_count < "$FAKE_MERGE_QUERY_COUNT_FILE"
+  fi
+  query_count=$((query_count + 1))
+  if [ -n "${FAKE_MERGE_QUERY_COUNT_FILE:-}" ]; then
+    printf '%s\n' "$query_count" > "$FAKE_MERGE_QUERY_COUNT_FILE"
+  fi
+  if [ -n "${FAKE_MERGE_STATES:-}" ]; then
+    IFS='|' read -r -a merge_states <<< "$FAKE_MERGE_STATES"
+    state_index=$((query_count - 1))
+    if [ "$state_index" -ge "${#merge_states[@]}" ]; then
+      state_index=$((${#merge_states[@]} - 1))
+    fi
+    state="${merge_states[$state_index]}"
+  else
+    state=MERGED
+  fi
+  merge_oid="${FAKE_MERGE_COMMIT_OID:-1111111111111111111111111111111111111111}"
+  if [ -n "${GH_MUTATION_LOG:-}" ]; then
+    printf 'pr state %s %s\n' "$state" "$merge_oid" >> "$GH_MUTATION_LOG"
+  fi
+  printf '%s\t%s\n' "$state" "$merge_oid"
+}
+
 head_ref_oid() {
   if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ] && [ -f "${GH_MUTATION_LOG}.head-changed" ]; then
     printf '%s\n' "head_changed"
@@ -124,6 +150,8 @@ case "${1:-}" in
           fi
         elif printf '%s\n' "$*" | grep -q ' --json headRefOid'; then
           head_ref_oid
+        elif printf '%s\n' "$*" | grep -q ' --json state,mergeCommit'; then
+          merge_state
         elif printf '%s\n' "$*" | grep -q ' --json mergeCommit'; then
           fixture_jq --argjson number "$number" "$pull_request_filter | .mergeCommit"
         else
@@ -199,6 +227,18 @@ case "${1:-}" in
     mutation "$*"
     ;;
   api)
+    if [ "${2:-}" = "user" ]; then
+      if [ "${FAKE_MERGE_USER_EXIT:-0}" -ne 0 ]; then
+        printf '%s\n' 'unable to resolve the authenticated user' >&2
+        exit "$FAKE_MERGE_USER_EXIT"
+      fi
+      if [ -n "${FAKE_MERGE_USER_JSON:-}" ]; then
+        printf '%s\n' "$FAKE_MERGE_USER_JSON"
+      else
+        printf '%s\n' '{"login":"ralph-bot","id":1}'
+      fi
+      exit 0
+    fi
     api_endpoint=""
     fake_ci_result=""
     fake_sha="$($RALPH_TEST_REAL_GIT rev-parse HEAD)"
@@ -214,6 +254,24 @@ case "${1:-}" in
       : > "${GH_MUTATION_LOG}.head-changed"
     fi
     case "$api_endpoint" in
+      */pulls/*/reviews)
+        printf '%s\n' "${FAKE_REVIEWS_JSON:-[]}"
+        ;;
+      */rulesets\?*)
+        if [ -n "${FAKE_RULESETS_FILE:-}" ]; then
+          jq -c '.list // []' "$FAKE_RULESETS_FILE"
+        else
+          printf '%s\n' "${FAKE_RULESETS_JSON:-[]}"
+        fi
+        ;;
+      */rulesets/*)
+        ruleset_id="${api_endpoint##*/}"
+        if [ -n "${FAKE_RULESETS_FILE:-}" ]; then
+          jq -c --arg id "$ruleset_id" '.details[$id] // empty' "$FAKE_RULESETS_FILE"
+        else
+          exit 1
+        fi
+        ;;
       */check-runs)
         if [ -n "${FAKE_CHECK_RUNS_JSON+x}" ]; then
           printf '{"check_runs":%s}\n' "$FAKE_CHECK_RUNS_JSON"
@@ -270,6 +328,14 @@ case "${1:-}" in
           fake_ci_result=pass
         fi
         printf '[]\n'
+        ;;
+      */git/refs/heads/*)
+        if [ "${FAKE_REMOTE_DELETE_422:-0}" = "1" ] &&
+           [ "${2:-}" = "--method" ] && [ "${3:-}" = "DELETE" ]; then
+          printf '%s\n' 'gh: Reference does not exist (HTTP 422)' >&2
+          exit 1
+        fi
+        mutation "$*"
         ;;
       *)
         mutation "$*"

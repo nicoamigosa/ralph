@@ -1,0 +1,37 @@
+{
+  "list": [
+    {
+      "id": 19,
+      "name": "ralph-default-branch",
+      "target": "branch",
+      "source_type": "Repository",
+      "source": "nicoamigosa/ralph",
+      "enforcement": "active",
+      "node_id": "RRS_19",
+      "_links": {},
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "details": {
+    "19": {
+      "id": 19,
+      "name": "ralph-default-branch",
+      "target": "branch",
+      "source_type": "Repository",
+      "source": "nicoamigosa/ralph",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "include": ["~DEFAULT_BRANCH"],
+          "exclude": []
+        }
+      },
+      "rules": [{
+        "type": "required_status_checks",
+        "parameters": {"required_status_checks": [{"context": "CI"}]}
+      }],
+      "bypass_actors": []
+    }
+  }
+}

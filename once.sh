@@ -52,12 +52,18 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #                           configurado; danger-full-access no se recomienda)
 #   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus)
 #   RALPH_MERGE_METHOD   método de merge del PR          (default: --squash)
+#   RALPH_MERGE_TIMEOUT_SECONDS espera confirmación       (default: 600)
+#   RALPH_MERGE_PENDING_POLICY ante merge encolado         (default: stop)
 #   RALPH_MAX_INFRA_RETRIES  reintentos ante caída del revisor (default: 3)
 #   RALPH_MAX_LIMIT_RETRIES  reintentos ante un tope del proveedor (default: 3)
 #   RALPH_DEADLINE_EPOCH     deadline global opcional, como epoch UTC
 #   RALPH_CI_POLICY          required o none explícito       (default: required)
 #   RALPH_CI_TIMEOUT_SECONDS espera de CI requerido         (default: 1800)
 #   RALPH_REQUIRED_CHECKS_JSON lista JSON de checks obligatorios (default: vacío)
+#   RALPH_REQUIRE_PROTECTION exige un ruleset activo en la base, sin bypass
+#                            para la identidad que mergea (default: 1)
+#   RALPH_MERGE_IDENTITY   login de la identidad que mergea (default: usuario de gh)
+#   RALPH_REVIEW_IDENTITY  login de una identidad revisora distinta (opcional)
 #   RALPH_POST_MERGE_CHECK   script que certifica producción tras cada merge;
 #                            recibe el SHA mergeado, ≠0 para toda la corrida
 #                            (default: vacío = desactivado)
@@ -69,7 +75,8 @@ LABEL="${RALPH_LABEL:-ready-for-agent}"
 # La base es el trunk del repo (main/master según el remoto), nunca la rama en
 # la que estés parado: ralph mergea acá y los issues dependientes heredan ese
 # código. Detectarla mantiene el script agnóstico al proyecto.
-BASE_BRANCH="${RALPH_BASE_BRANCH:-$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)}"
+DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"
+BASE_BRANCH="${RALPH_BASE_BRANCH:-$DEFAULT_BRANCH}"
 BASE_BRANCH="${BASE_BRANCH:-main}"
 BRANCH_PREFIX="${RALPH_BRANCH_PREFIX:-ralph/issue-}"
 MAX_ROUNDS="${RALPH_MAX_ROUNDS:-3}"
@@ -78,6 +85,8 @@ CODEX_EFFORT="${RALPH_CODEX_EFFORT:-xhigh}"
 CODEX_SANDBOX="${RALPH_CODEX_SANDBOX:-workspace-write}"
 CLAUDE_MODEL="${RALPH_CLAUDE_MODEL:-opus}"
 MERGE_METHOD="${RALPH_MERGE_METHOD:---squash}"
+MERGE_TIMEOUT_SECONDS="${RALPH_MERGE_TIMEOUT_SECONDS:-600}"
+MERGE_PENDING_POLICY="${RALPH_MERGE_PENDING_POLICY:-stop}"
 NEEDS_HUMAN_LABEL="${RALPH_NEEDS_HUMAN_LABEL:-ralph-needs-human}"
 MAX_INFRA_RETRIES="${RALPH_MAX_INFRA_RETRIES:-3}"
 MAX_LIMIT_RETRIES="${RALPH_MAX_LIMIT_RETRIES:-3}"
@@ -87,6 +96,9 @@ POST_MERGE_CHECK="${RALPH_POST_MERGE_CHECK:-}"
 CI_POLICY="${RALPH_CI_POLICY:-required}"
 CI_TIMEOUT_SECONDS="${RALPH_CI_TIMEOUT_SECONDS:-1800}"
 REQUIRED_CHECKS_JSON="${RALPH_REQUIRED_CHECKS_JSON:-}"
+REQUIRE_PROTECTION="${RALPH_REQUIRE_PROTECTION:-1}"
+MERGE_IDENTITY="${RALPH_MERGE_IDENTITY:-}"
+REVIEW_IDENTITY="${RALPH_REVIEW_IDENTITY:-}"
 DRY_RUN="${RALPH_DRY_RUN:-0}"
 
 CHECKPOINT_FILE="${RALPH_CHECKPOINT_FILE:-$SCRIPT_DIR/last_run.md}"
@@ -103,6 +115,10 @@ ADAPTER_RESULT_FILE=""
 ADAPTER_FINAL_MESSAGE=""
 ADAPTER_EXIT_CODE=0
 ADAPTER_ERROR=""
+PROTECTION_STATUS="not_checked"
+PROTECTION_FAILURES=""
+PROTECTION_RULESET_IDS=""
+MERGED_SHA=""
 ADAPTER_STATUS=""
 
 CURRENT_ISSUE=""
@@ -254,9 +270,22 @@ case "$MERGE_METHOD" in
   *) fail "RALPH_MERGE_METHOD debe ser exactamente --squash, --merge o --rebase." ;;
 esac
 
+case "$MERGE_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) fail "RALPH_MERGE_TIMEOUT_SECONDS debe ser un entero no negativo." ;;
+esac
+
+case "$MERGE_PENDING_POLICY" in
+  stop|continue) ;;
+  *) fail "RALPH_MERGE_PENDING_POLICY debe ser exactamente stop o continue." ;;
+esac
+
 case "$CI_POLICY" in
   required|none) ;;
   *) fail "RALPH_CI_POLICY debe ser exactamente required o none." ;;
+esac
+case "$REQUIRE_PROTECTION" in
+  0|1) ;;
+  *) fail "RALPH_REQUIRE_PROTECTION debe ser exactamente 0 o 1." ;;
 esac
 case "$CI_TIMEOUT_SECONDS" in
   ''|*[!0-9]*) fail "RALPH_CI_TIMEOUT_SECONDS debe ser un entero no negativo." ;;
@@ -324,6 +353,220 @@ gh auth status >/dev/null 2>&1 || fail "gh no está autenticado (corré 'gh auth
 REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
 [ -n "$REPO_SLUG" ] || fail "No pude resolver el repo de GitHub."
 REPO_HOST="$(repo_host)"
+
+write_protection_summary() {
+  local status="$1" failure required_checks protection_required_json=true summary_tmp
+  failure=""
+  [ "$#" -gt 1 ] && failure="$2"
+  required_checks="$REQUIRED_CHECKS_JSON"
+  [ -n "$required_checks" ] || required_checks='[]'
+  [ "$REQUIRE_PROTECTION" = "0" ] && protection_required_json=false
+  [ "$DRY_RUN" = "1" ] && return 0
+  summary_tmp="$RUN_DIR/summary.json.tmp.$$"
+  if jq -cn \
+      --arg status "$status" \
+      --arg base_branch "$BASE_BRANCH" \
+      --arg merge_identity "$MERGE_IDENTITY" \
+      --arg review_identity "$REVIEW_IDENTITY" \
+      --arg failure "$failure" \
+      --argjson required "$protection_required_json" \
+      --argjson required_checks "$required_checks" \
+      '{
+        protection: {
+          required: $required,
+          status: $status,
+          base_branch: $base_branch,
+          merge_identity: $merge_identity,
+          review_identity: $review_identity,
+          required_checks: $required_checks,
+          warning: (if $status == "disabled" then "RALPH_REQUIRE_PROTECTION=0" else null end)
+        },
+        errors: (if $failure == "" then [] else [$failure] end)
+      }' >"$summary_tmp" 2>/dev/null; then
+    mv -f "$summary_tmp" "$RUN_DIR/summary.json"
+  else
+    rm -f "$summary_tmp"
+  fi
+}
+
+ref_name_matches_pattern() {
+  local ref_name="$1" pattern="$2"
+  case "$pattern" in
+    "~ALL") return 0 ;;
+    "~DEFAULT_BRANCH")
+      [ -n "$DEFAULT_BRANCH" ] && [ "$BASE_BRANCH" = "$DEFAULT_BRANCH" ]
+      return
+      ;;
+    *)
+      # shellcheck disable=SC2254
+      case "$ref_name" in
+        $pattern) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+}
+
+ruleset_covers_branch() {
+  local ruleset="$1" ref_name="refs/heads/$BASE_BRANCH" pattern
+  local include_count include_match=0
+
+  include_count="$(jq -r '(.conditions.ref_name.include // []) | length' <<<"$ruleset")" || return 1
+  [ "$include_count" -gt 0 ] || return 1
+  while IFS= read -r pattern; do
+    if ref_name_matches_pattern "$ref_name" "$pattern"; then
+      include_match=1
+      break
+    fi
+  done < <(jq -r '.conditions.ref_name.include[]? // empty' <<<"$ruleset")
+  [ "$include_match" -eq 1 ] || return 1
+
+  while IFS= read -r pattern; do
+    if ref_name_matches_pattern "$ref_name" "$pattern"; then
+      return 1
+    fi
+  done < <(jq -r '.conditions.ref_name.exclude[]? // empty' <<<"$ruleset")
+  return 0
+}
+
+check_base_protection() {
+  local identity_json="" rulesets active_rulesets required_checks missing_checks
+  local ruleset_detail ruleset_details identity_id
+  local review_rule=0 review_check=0
+  local branch="$BASE_BRANCH"
+  PROTECTION_FAILURES=""
+  PROTECTION_RULESET_IDS=""
+
+  if [ "$REQUIRE_PROTECTION" = "0" ]; then
+    PROTECTION_STATUS="disabled"
+    write_protection_summary "$PROTECTION_STATUS" ""
+    echo "⚠️  Protección de la base desactivada explícitamente (RALPH_REQUIRE_PROTECTION=0); sólo permitido para el sandbox de pruebas." >&2
+    return 0
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    PROTECTION_STATUS="dry_run"
+    return 0
+  fi
+
+  identity_json="$(gh api user 2>/dev/null | jq -c . 2>/dev/null)" || identity_json=""
+  if [ -z "$MERGE_IDENTITY" ]; then
+    MERGE_IDENTITY="$(jq -r '.login // empty' <<<"$identity_json" 2>/dev/null)"
+  fi
+  if [ -z "$MERGE_IDENTITY" ]; then
+    PROTECTION_FAILURES="no pude resolver la identidad que mergea (gh api user o RALPH_MERGE_IDENTITY)"
+  fi
+  identity_id="$(jq -r '.id // empty' <<<"$identity_json" 2>/dev/null)"
+
+  rulesets="$(gh api --paginate \
+    "repos/$REPO_SLUG/rulesets?includes_parents=true" 2>/dev/null | \
+    jq -s -c 'if length == 1 and (.[0] | type) == "array" then .[0] else add end' 2>/dev/null)" || rulesets=""
+  if [ -z "$rulesets" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$rulesets"; then
+    PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }no pude consultar los rulesets de la base '$branch'"
+    write_protection_summary failed "$PROTECTION_FAILURES"
+    echo "❌ Preflight de protección falló para '$branch': $PROTECTION_FAILURES. Faltan un ruleset activo y required status checks; no se mergea." >&2
+    return 1
+  fi
+
+  if ! jq -e '[.[] | select(.id == null)] | length == 0' >/dev/null 2>&1 <<<"$rulesets"; then
+    PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }el listado de rulesets no incluye identificadores completos"
+  fi
+  ruleset_details='[]'
+  while IFS= read -r ruleset_id; do
+    [ -n "$ruleset_id" ] || continue
+    ruleset_detail="$(gh api --paginate \
+      "repos/$REPO_SLUG/rulesets/$ruleset_id" 2>/dev/null | jq -c . 2>/dev/null)" || ruleset_detail=""
+    if [ -z "$ruleset_detail" ] || ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$ruleset_detail"; then
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }no pude consultar el detalle del ruleset '$ruleset_id'"
+      continue
+    fi
+    ruleset_details="$(jq -c --argjson detail "$ruleset_detail" '. + [$detail]' <<<"$ruleset_details")" || {
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }no pude procesar el detalle del ruleset '$ruleset_id'"
+    }
+  done < <(jq -r '.[].id // empty' <<<"$rulesets")
+
+  active_rulesets='[]'
+  while IFS= read -r ruleset_detail; do
+    [ -n "$ruleset_detail" ] || continue
+    if [ "$(jq -r '.enforcement // "active"' <<<"$ruleset_detail")" = "active" ] \
+      && [ "$(jq -r '.target // "branch"' <<<"$ruleset_detail")" = "branch" ] \
+      && ruleset_covers_branch "$ruleset_detail"; then
+      active_rulesets="$(jq -c --argjson detail "$ruleset_detail" '. + [$detail]' <<<"$active_rulesets")" || {
+        PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }no pude procesar los rulesets activos"
+      }
+    fi
+  done < <(jq -c '.[]' <<<"$ruleset_details")
+
+  if [ "$(jq 'length' <<<"$active_rulesets")" -eq 0 ]; then
+    PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }ruleset activo que cubra '$branch'"
+  else
+    PROTECTION_RULESET_IDS="$(jq -r 'map(.id // .name // empty) | join(",")' <<<"$active_rulesets")"
+    if jq -e 'any(.[]; ((.bypass_actors? // null) | type != "array"))' \
+        <<<"$active_rulesets" >/dev/null; then
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }el ruleset activo no expone bypass_actors como array; dato insuficiente para verificar ausencia de bypass"
+    fi
+  fi
+
+  required_checks="$(jq -c '[.[] |
+    .rules[]? | select(.type == "required_status_checks") |
+    (.parameters.required_status_checks // [])[]? |
+    (.context // .name // empty)] | unique' <<<"$active_rulesets")"
+  if [ -z "$REQUIRED_CHECKS_JSON" ]; then
+    [ "$(jq 'length' <<<"$required_checks")" -gt 0 ] ||
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }al menos un required status check"
+  else
+    missing_checks="$(jq -nr --argjson configured "$REQUIRED_CHECKS_JSON" --argjson covered "$required_checks" \
+      '$configured - $covered | join(", ")')"
+    [ -z "$missing_checks" ] ||
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }required status checks faltantes: $missing_checks"
+  fi
+
+  if [ -n "$REVIEW_IDENTITY" ] && [ "$REVIEW_IDENTITY" != "$MERGE_IDENTITY" ]; then
+    if jq -e 'any(.[]; any(.rules[]?;
+        .type == "pull_request" and
+        ((.parameters.required_approving_review_count // 0) > 0)))' \
+        <<<"$active_rulesets" >/dev/null; then
+      review_rule=1
+    fi
+    if jq -e 'index("ralph-review") != null' <<<"$required_checks" >/dev/null; then
+      review_check=1
+    fi
+    if [ "$review_rule" -eq 0 ] && [ "$review_check" -eq 0 ]; then
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }identidad revisora distinta requiere una aprobación obligatoria o el required status check ralph-review"
+    fi
+  fi
+
+  if [ -n "$MERGE_IDENTITY" ] && [ "$(jq 'length' <<<"$active_rulesets")" -gt 0 ]; then
+    if jq -e --arg id "$identity_id" '
+        any(.[]; any(.bypass_actors[]?;
+          ((.bypass_mode // "always") != "never") and
+          ((.actor_type // "") == "User") and
+          ($id != "" and ((.actor_id // "") | tostring) == $id)))' \
+        <<<"$active_rulesets" >/dev/null; then
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }la identidad de merge '$MERGE_IDENTITY' tiene bypass"
+    fi
+    if jq -e --arg id "$identity_id" '
+        any(.[]; any(.bypass_actors[]?;
+          ((.bypass_mode // "always") != "never") and
+          (((.actor_type // "") != "User") or
+            ($id == "" or .actor_id == null))))' \
+        <<<"$active_rulesets" >/dev/null; then
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }hay un bypass_actor que no se puede demostrar como un usuario distinto de la identidad de merge"
+    fi
+  fi
+
+  if [ -n "$PROTECTION_FAILURES" ]; then
+    PROTECTION_STATUS="failed"
+    write_protection_summary "$PROTECTION_STATUS" "$PROTECTION_FAILURES"
+    echo "❌ Preflight de protección falló para '$branch': $PROTECTION_FAILURES. Faltan un ruleset activo, required status checks cubiertos y ausencia de bypass; no se mergea." >&2
+    return 1
+  fi
+  PROTECTION_STATUS="verified"
+  write_protection_summary "$PROTECTION_STATUS" ""
+  echo "🛡️  Protección verificada para '$branch' (rulesets: $PROTECTION_RULESET_IDS; identidad de merge: $MERGE_IDENTITY)."
+  return 0
+}
+
+check_base_protection || exit $?
 
 # El working tree debe estar limpio: vamos a saltar entre branches y mergear.
 if [ "$DRY_RUN" != "1" ] && [ -n "$(git status --porcelain)" ]; then
@@ -1254,6 +1497,43 @@ check_required_checks() {
   return 0
 }
 
+verify_distinct_review() {
+  local pr="$1" reviewed_sha="$2" reviews check_runs statuses
+  if [ -z "$REVIEW_IDENTITY" ] || [ "$REVIEW_IDENTITY" = "$MERGE_IDENTITY" ]; then
+    return 0
+  fi
+
+  reviews="$(gh api --paginate "repos/$REPO_SLUG/pulls/$pr/reviews" 2>/dev/null | \
+    jq -s -c 'add' 2>/dev/null)" || return 2
+  if jq -e --arg identity "$REVIEW_IDENTITY" --arg sha "$reviewed_sha" '
+      ([.[] | select((.user.login // "") == $identity and
+        (.commit_id // "") == $sha)] | last) as $review |
+        (($review.state // "") | ascii_upcase) == "APPROVED"' <<<"$reviews" >/dev/null; then
+    return 0
+  fi
+
+  check_runs="$(gh api --paginate \
+    "repos/$REPO_SLUG/commits/$reviewed_sha/check-runs" 2>/dev/null | \
+    jq -s -c '[.[] | .check_runs[]?]' 2>/dev/null)" || return 2
+  statuses="$(gh api --paginate \
+    "repos/$REPO_SLUG/commits/$reviewed_sha/statuses" 2>/dev/null | \
+    jq -s -c 'add' 2>/dev/null)" || return 2
+  if jq -e --arg identity "$REVIEW_IDENTITY" --arg sha "$reviewed_sha" '
+      any(.[]; .name == "ralph-review" and .head_sha == $sha and
+        (.status // "") == "completed" and (.conclusion // "") == "success" and
+        ((.creator.login // .app.slug // .app.name // .author.login // "") == $identity))' \
+      <<<"$check_runs" >/dev/null ||
+      jq -e --arg identity "$REVIEW_IDENTITY" --arg sha "$reviewed_sha" '
+      any(.[]; .context == "ralph-review" and .sha == $sha and
+        ((.state // "") | ascii_downcase) == "success" and
+        ((.creator.login // "") == $identity))' <<<"$statuses" >/dev/null; then
+    return 0
+  fi
+
+  echo "❌ La identidad revisora '$REVIEW_IDENTITY' no aprobó el SHA $reviewed_sha ni emitió un check ralph-review válido; no se mergea." >&2
+  return 1
+}
+
 # CI verde es condición de merge además del PASS. Devuelve 0 si los checks
 # pasan, 1 si hay un fallo real (tras dejar en el PR el ítem que Codex debe
 # corregir), y 2 si la ausencia o el estado de CI sigue pendiente.
@@ -1318,6 +1598,39 @@ wait_for_ci() {
   done
 }
 
+# gh pr merge puede aceptar un merge encolado sin que el PR esté mergeado aún.
+# Sólo un estado MERGED con un OID SHA válido habilita borrar la rama y avanzar.
+# Devuelve 0 confirmado · 2 merge_pending · 70 fallo de infraestructura.
+wait_for_merge() {
+  local pr="$1" started now deadline remaining merge_result merge_state merge_oid
+
+  MERGED_SHA=""
+  started="$(date +%s 2>/dev/null)" || return 70
+  deadline=$((started + MERGE_TIMEOUT_SECONDS))
+  while :; do
+    merge_result="$(gh pr view "$pr" --json state,mergeCommit \
+      --jq '.state + "\t" + (.mergeCommit.oid // "")' 2>/dev/null)" || {
+      echo "❌ No pude consultar el estado de merge del PR #$pr; detengo la corrida."
+      return 70
+    }
+    merge_state="${merge_result%%$'\t'*}"
+    merge_oid="${merge_result#*$'\t'}"
+    if [ "$merge_state" = "MERGED" ] &&
+       printf '%s\n' "$merge_oid" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+      MERGED_SHA="$merge_oid"
+      return 0
+    fi
+
+    now="$(date +%s 2>/dev/null)" || return 70
+    if [ "$now" -ge "$deadline" ]; then
+      echo "⚠️  PR #$pr sigue sin merge confirmado; estado merge_pending, sin borrar rama ni cerrar issue."
+      return 2
+    fi
+    remaining=$((deadline - now))
+    sleep $(( remaining > 30 ? 30 : remaining ))
+  done
+}
+
 # ------------------------------------------------------------ ciclo por issue --
 
 # Procesa UN issue: implementación por Codex, revisión por Claude, hasta
@@ -1327,7 +1640,8 @@ process_issue() {
   local num="$1"
   local branch="${BRANCH_PREFIX}${num}"
   local rc issue_ctx commits pr round verdict comments prior_work reviewed_sha
-  local infra_retries comments_before comments_after backoff merged_sha ci_ok ci_rc
+  local infra_retries comments_before comments_after backoff merged_sha ci_ok ci_rc review_rc
+  local remote_delete_error
 
   CURRENT_ISSUE="$num"
   CURRENT_PHASE="preparación"
@@ -1488,6 +1802,15 @@ $PROMPT_REVIEW"
       verify_reviewed_head "$pr" "$reviewed_sha"
       rc=$?
       [ "$rc" -ne 0 ] && return "$rc"
+      verify_distinct_review "$pr" "$reviewed_sha"
+      review_rc=$?
+      if [ "$review_rc" -eq 2 ]; then
+        echo "❌ No pude verificar la identidad revisora para el SHA $reviewed_sha; detengo la corrida."
+        return 70
+      elif [ "$review_rc" -ne 0 ]; then
+        checkout_or_fail "$BASE_BRANCH" || return 70
+        return 0
+      fi
       echo "✅ PASS en la ronda $round. Espero CI de PR #$pr..."
       wait_for_ci "$pr" "$branch" "$reviewed_sha"
       ci_rc=$?
@@ -1509,9 +1832,36 @@ $PROMPT_REVIEW"
       echo "🟢 CI verde. Mergeo PR #$pr."
       checkout_or_fail "$BASE_BRANCH" || return 70
       if gh pr merge "$pr" "$MERGE_METHOD" \
-          --match-head-commit "$reviewed_sha" --delete-branch >/dev/null 2>&1; then
-        git branch -D "$branch" >/dev/null 2>&1 || true
-        merged_sha="$(gh pr view "$pr" --json mergeCommit --jq .mergeCommit.oid 2>/dev/null)"
+          --match-head-commit "$reviewed_sha" >/dev/null 2>&1; then
+        wait_for_merge "$pr"
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+          if [ "$MERGE_PENDING_POLICY" = "stop" ]; then
+            checkout_or_fail "$BASE_BRANCH" || return 70
+            write_checkpoint "merge_pending para el PR #$pr; la corrida se detiene sin borrar la rama ni cerrar el issue."
+            exit 0
+          fi
+          checkout_or_fail "$BASE_BRANCH" || return 70
+          return 0
+        elif [ "$rc" -ne 0 ]; then
+          return "$rc"
+        fi
+        merged_sha="$MERGED_SHA"
+        remote_delete_error=""
+        if ! remote_delete_error="$(gh api --method DELETE \
+            "repos/$REPO_SLUG/git/refs/heads/$branch" 2>&1)"; then
+          case "$remote_delete_error" in
+            *"Reference does not exist"*"HTTP 422"*) : ;;
+            *)
+              echo "❌ No pude borrar la rama remota '$branch' después de confirmar el merge; detengo la corrida."
+              return 70
+              ;;
+          esac
+        fi
+        if ! git branch -D "$branch" >/dev/null 2>&1; then
+          echo "❌ No pude borrar la rama local '$branch' después de confirmar el merge; detengo la corrida."
+          return 70
+        fi
         # La base local debe traer el merge: los issues dependientes heredan ese código.
         if ! git pull --ff-only origin "$BASE_BRANCH" >/dev/null 2>&1; then
           echo "❌ No pude actualizar '$BASE_BRANCH' local con --ff-only; conservo el estado y detengo la corrida."

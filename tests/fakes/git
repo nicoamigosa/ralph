@@ -14,4 +14,8 @@ case "${FAKE_GIT_FAIL:-}" in
     ;;
 esac
 
+if [ "${1:-}" = "branch" ] && [ "${2:-}" = "-D" ] && [ -n "${GH_MUTATION_LOG:-}" ]; then
+  printf 'git %s\n' "$*" >> "$GH_MUTATION_LOG"
+fi
+
 exec "$RALPH_TEST_REAL_GIT" "$@"
