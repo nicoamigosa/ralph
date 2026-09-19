@@ -97,14 +97,23 @@ dry-run sólo necesita las herramientas de lectura (`git` y `gh`).
 ## Cómo elige los issues
 
 1. Issues abiertos con el label `ready-for-agent`, **por número ascendente**.
-2. Excluye los **épicos**: cualquier issue referenciado por otro bajo `## Parent`.
-3. Respeta dependencias: salta los que tienen blockers abiertos bajo
+2. Antes de crear una rama, vuelve a leer y validar el body, el estado y los
+   labels de cada candidato. Un `gh issue view` fallido detiene la pasada
+   (nunca se interpreta como un body sin dependencias). Un issue con
+   `ralph-needs-human` se omite, igual que un PR que tenga ese label.
+3. Excluye los **épicos**: cualquier issue referenciado por otro bajo `## Parent`.
+4. Respeta dependencias: salta los que tienen blockers abiertos bajo
    `## Blocked by`. El estado de cada blocker se consulta **en el momento de
    evaluarlo**, no del listado cacheado al inicio de la pasada: la API de GitHub
    es eventualmente consistente y justo tras cerrar un issue todavía lo devuelve
    abierto, bloqueando de mentira a sus dependientes. Consultarlo en vivo además
    los desbloquea dentro de la misma pasada (por eso el merge a la base ocurre
    antes de seguir: los dependientes heredan el código).
+
+Antes de invocar a cada agente, Ralph repite la validación de estado, labels y
+blockers. Si el issue pierde `ready-for-agent`, se cierra, se bloquea o recibe
+`ralph-needs-human` mientras la corrida está en curso, no se invoca ningún
+agente y la rama queda preservada para la siguiente pasada.
 
 ## Orden de prioridad
 

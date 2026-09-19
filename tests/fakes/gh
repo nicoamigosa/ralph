@@ -76,10 +76,40 @@ case "${1:-}" in
         ;;
       view)
         number="${3:?missing issue number}"
+        issue_view_field=""
+        for issue_view_arg in "$@"; do
+          case "$issue_view_arg" in
+            body|state|labels) issue_view_field="$issue_view_arg"; break ;;
+          esac
+        done
+        if [ "${FAKE_ISSUE_VIEW_FAIL_NUM:-}" = "$number" ] \
+            && { [ -z "${FAKE_ISSUE_VIEW_FAIL_FIELD:-}" ] \
+              || [ "${FAKE_ISSUE_VIEW_FAIL_FIELD:-}" = "$issue_view_field" ]; }; then
+          printf '%s\n' "fake issue view failure for #$number ($issue_view_field)" >&2
+          exit 1
+        fi
         if printf '%s\n' "$*" | grep -q ' --json body'; then
           fixture_jq --argjson number "$number" "$issue_filter | .body // \"\""
         elif printf '%s\n' "$*" | grep -q ' --json state'; then
           fixture_jq --argjson number "$number" "$issue_filter | .state"
+        elif printf '%s\n' "$*" | grep -q ' --json labels'; then
+          if [ -n "${FAKE_ISSUE_LABELS_SEQUENCE:-}" ]; then
+            issue_labels_call=0
+            if [ -f "${FAKE_ISSUE_LABELS_CALL_COUNT_FILE:-}" ]; then
+              read -r issue_labels_call < "$FAKE_ISSUE_LABELS_CALL_COUNT_FILE"
+            fi
+            issue_labels_call=$((issue_labels_call + 1))
+            printf '%s\n' "$issue_labels_call" > "$FAKE_ISSUE_LABELS_CALL_COUNT_FILE"
+            IFS='|' read -r -a issue_labels_sequence <<< "$FAKE_ISSUE_LABELS_SEQUENCE"
+            issue_labels_index=$((issue_labels_call - 1))
+            if [ "$issue_labels_index" -ge "${#issue_labels_sequence[@]}" ]; then
+              issue_labels_index=$((${#issue_labels_sequence[@]} - 1))
+            fi
+            issue_labels_value="${issue_labels_sequence[$issue_labels_index]}"
+            [ "$issue_labels_value" = '__empty__' ] || printf '%s\n' "$issue_labels_value"
+          else
+            fixture_jq --argjson number "$number" "$issue_filter | (.labels // [])[] | if type == \"object\" then .name else . end"
+          fi
         else
           fixture_jq --argjson number "$number" "$issue_filter"
         fi

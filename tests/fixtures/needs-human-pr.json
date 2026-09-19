@@ -1,0 +1,26 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {
+      "number": 1,
+      "title": "Existing human review",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    }
+  ],
+  "pull_requests": [
+    {
+      "number": 101,
+      "head": "ralph/issue-1",
+      "available_before_codex": true,
+      "labels": ["ralph-needs-human"],
+      "comments": [],
+      "mergeCommit": {"oid": "1111111111111111111111111111111111111111"}
+    }
+  ],
+  "checks": "pass"
+}
