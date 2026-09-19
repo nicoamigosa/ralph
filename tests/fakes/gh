@@ -11,6 +11,7 @@ mutation() {
 
 issue_filter=".issues[] | select(.number == \$number)"
 issue_list_filter='.issues | map(select(($state == "all" or .state == ($state | ascii_upcase)) and ($label == "" or ((.labels // []) | index($label))))) | map(.number) | sort | .[]'
+issue_list_with_body_filter='.issues | map(select(($state == "all" or .state == ($state | ascii_upcase)) and ($label == "" or ((.labels // []) | index($label))))) | sort_by(.number) | .[] | @json'
 pull_request_filter=".pull_requests[] | select(.number == \$number)"
 head_pull_request_filter=".pull_requests[] | select(.head == \$head)"
 
@@ -55,11 +56,16 @@ case "${1:-}" in
               ;;
           esac
         done
-        fixture_jq --arg label "$label" --arg state "$state" "$issue_list_filter" | head -n "$issue_limit"
+        if printf '%s\n' "$*" | grep -q -- '--json number,body'; then
+          fixture_jq --arg label "$label" --arg state "$state" "$issue_list_with_body_filter" | head -n "$issue_limit"
+        else
+          fixture_jq --arg label "$label" --arg state "$state" "$issue_list_filter" | head -n "$issue_limit"
+        fi
         ;;
       view)
         number="${3:?missing issue number}"
         if printf '%s\n' "$*" | grep -q ' --json body'; then
+          [ "${FAKE_REJECT_BODY_VIEW:-0}" = "1" ] && exit 1
           fixture_jq --argjson number "$number" "$issue_filter | .body // \"\""
         elif printf '%s\n' "$*" | grep -q ' --json state'; then
           if [ "${FAKE_STATE_SEQUENCE_ISSUE:-}" = "$number" ] && [ -n "${FAKE_STATE_SEQUENCE:-}" ]; then

@@ -1584,6 +1584,15 @@ $PROMPT_REVISE"
 
 # --------------------------------------------------------------- selector --
 
+populate_issue_bodies() {
+  local issue_json issue_number
+  while IFS= read -r issue_json; do
+    [ -n "$issue_json" ] || continue
+    issue_number="$(jq -r '.number' <<<"$issue_json")"
+    BODY[$issue_number]="$(jq -r '.body // ""' <<<"$issue_json")"
+  done <<<"${1:-}"
+}
+
 refs_csv() {
   local refs="${1:-}" ref result=""
   while IFS= read -r ref; do
@@ -1618,34 +1627,36 @@ print_plan_issue() {
 # de pasadas para que un blocker cerrado durante la corrida desbloquee a otro.
 select_issues() {
   local mode="$1"
-  local attempted=" " progress=1 numbers all_numbers n num priority parents blockers open_blockers
-  local epics p b state pr needs_human exclusion rc blocked_by_error body
+  local attempted=" " progress=1 numbers n num priority parents blockers open_blockers
+  local epics p b state pr needs_human exclusion rc blocked_by_error
+  local candidate_issues all_issues
 
   while [ "$progress" -eq 1 ]; do
     progress=0
-    if ! numbers="$(gh issue list --state open --label "$LABEL" --limit "$ISSUE_QUERY_LIMIT" --json number \
-      --jq 'sort_by(.number) | .[].number' | apply_issue_order)"; then
+    if ! candidate_issues="$(gh issue list --state open --label "$LABEL" \
+      --limit "$ISSUE_QUERY_LIMIT" --json number,body \
+      --jq 'sort_by(.number) | .[] | @json')"; then
       fail "No pude listar los issues candidatos."
     fi
+    numbers="$(printf '%s\n' "$candidate_issues" | jq -r '.number' | apply_issue_order)"
     [ -z "$numbers" ] && break
 
     # Cachear cuerpos de todos los issues, no sólo de los candidatos: un hijo
     # cerrado o sin label sigue haciendo épico a su padre.
     unset BODY; declare -A BODY
-    if ! all_numbers="$(gh issue list --state all --limit "$ISSUE_QUERY_LIMIT" --json number \
-      --jq 'sort_by(.number) | .[].number')"; then
+    populate_issue_bodies "$candidate_issues"
+    if ! all_issues="$(gh issue list --state all --limit "$ISSUE_QUERY_LIMIT" \
+      --json number,body --jq 'sort_by(.number) | .[] | @json')"; then
       fail "No pude listar todos los issues para detectar padres."
     fi
+    populate_issue_bodies "$all_issues"
     epics=" "
-    for n in $all_numbers; do
-      if ! body="$(gh issue view "$n" --json body --jq '.body')"; then
-        fail "No pude leer el cuerpo del issue #$n para detectar padres."
-      fi
-      BODY[$n]="$body"
+    while IFS= read -r n; do
+      [ -n "$n" ] || continue
       for p in $(printf '%s' "${BODY[$n]}" | section_refs 'Parent'); do
         epics="$epics$p "
       done
-    done
+    done < <(printf '%s\n' "$all_issues" | jq -r '.number')
 
     priority=0
     for num in $numbers; do

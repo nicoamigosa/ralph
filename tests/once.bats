@@ -329,6 +329,17 @@ load test_helper
   [[ "$output" == *"#45 priority=45 host=github.com parents=none blockers=none needs-human=no pr=none"* ]]
 }
 
+@test "issue bodies come from listings, not per-issue views" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/complete-selection.json"
+  export RALPH_DRY_RUN=1
+  export FAKE_REJECT_BODY_VIEW=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -Ec '^#[0-9]+ priority=')" -eq 45 ]
+}
+
 @test "a blocker reopened during the pass blocks later candidates again" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/blocker-reopened.json"
   export RALPH_DRY_RUN=1
