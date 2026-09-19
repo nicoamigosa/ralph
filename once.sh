@@ -423,17 +423,6 @@ if [ "$DRY_RUN" != "1" ] && [ -n "$(git status --porcelain)" ]; then
 fi
 
 PROMPT_IMPLEMENT="$(load_prompt prompt_implement)"
-PROMPT_IMPLEMENT+=$'\n\n## Close policy passed by Ralph\n\n'
-case "$CLOSE_POLICY" in
-  verified)
-    PROMPT_IMPLEMENT+="RALPH_CLOSE_POLICY=verified
-The PR body MUST declare \`Closes #<issue number>\` so Ralph can close the issue after a verified merge."
-    ;;
-  never)
-    PROMPT_IMPLEMENT+="RALPH_CLOSE_POLICY=never
-The PR body and every commit message MUST declare \`Part of #<issue number>\` and MUST NOT contain the autoclose keywords \`Closes\`, \`Fixes\`, or \`Resolves\`."
-    ;;
-esac
 PROMPT_REVIEW="$(load_prompt prompt_review)"
 PROMPT_REVISE="$(load_prompt prompt_revise)"
 PROMPT_CONFLICTS="$(load_prompt prompt_conflicts)"
@@ -1425,7 +1414,6 @@ process_issue() {
   local num="$1"
   local branch="${BRANCH_PREFIX}${num}"
   local rc issue_ctx commits pr round verdict comments prior_work reviewed_sha
-  local pr_body
   local infra_retries comments_before comments_after backoff merged_sha ci_ok ci_rc
 
   CURRENT_ISSUE="$num"
@@ -1601,15 +1589,9 @@ $PROMPT_REVIEW"
             exit 1
           fi
         fi
-        if [ "$CLOSE_POLICY" = "verified" ] &&
-            pr_body="$(gh pr view "$pr" --json body --jq .body 2>/dev/null)" &&
-            printf '%s\n' "$pr_body" | grep -Eiq "(^|[^[:alnum:]])closes[[:space:]]+#[[:space:]]*$num([^[:alnum:]]|$)"; then
-          gh issue close "$num" --comment "Resuelto por PR #$pr (revisado y aprobado por el revisor de ralph)." >/dev/null 2>&1 || true
-          echo "🎉 #$num mergeado a $BASE_BRANCH y cerrado."
-        else
-          gh issue comment "$num" --body "🤖 PR #$pr mergeado como $merged_sha; el issue queda abierto (política de cierre: $CLOSE_POLICY)." >/dev/null 2>&1 || true
-          echo "🎉 #$num mergeado a $BASE_BRANCH y abierto."
-        fi
+        # 'Closes #N' sólo autocierra si la base es la rama por defecto: cerramos nosotros.
+        gh issue close "$num" --comment "Resuelto por PR #$pr (revisado y aprobado por el revisor de ralph)." >/dev/null 2>&1 || true
+        echo "🎉 #$num mergeado a $BASE_BRANCH y cerrado."
       else
         echo "⚠️  El merge de PR #$pr falló (¿conflictos, o checks pendientes?). Queda abierto."
         add_label "$pr" "$NEEDS_HUMAN_LABEL"

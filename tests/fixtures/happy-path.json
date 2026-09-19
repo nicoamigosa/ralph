@@ -16,7 +16,6 @@
     {
       "number": 101,
       "head": "ralph/issue-1",
-      "body": "Closes #1",
       "available_before_codex": false,
       "labels": [],
       "comments": [],

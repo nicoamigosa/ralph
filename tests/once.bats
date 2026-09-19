@@ -1011,32 +1011,6 @@ load test_helper
   grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
 }
 
-@test "verified policy leaves a Part of issue open after merge" {
-  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
-  export FAKE_CODEX_CREATE_PR=1
-  export FAKE_PR_BODY='Part of #1'
-
-  run_once
-
-  [ "$status" -eq 0 ]
-  ! grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
-  grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
-}
-
-@test "never policy keeps the issue open and is included in the implementation prompt" {
-  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
-  export FAKE_CODEX_CREATE_PR=1
-  export FAKE_PR_BODY='Closes #1'
-  export RALPH_CLOSE_POLICY=never
-
-  run_once
-
-  [ "$status" -eq 0 ]
-  ! grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
-  grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
-  grep -Fq 'RALPH_CLOSE_POLICY=never' "$FAKE_AGENT_LOG"
-}
-
 @test "review corrections push only to the isolated test remote" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
   export FAKE_CLAUDE_RESULTS='<verdict>CHANGES_REQUESTED</verdict>|<verdict>PASS</verdict>'

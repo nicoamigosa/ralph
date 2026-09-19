@@ -321,11 +321,8 @@ ninguno fija ni verifica la versión que se ejecuta.
   identidad de revisión/merge distinta del implementador y un ruleset sin
   bypass en la base; mientras no exista, el ruleset sólo puede exigir status
   checks.
-- **El cierre depende de la política.** Con `RALPH_CLOSE_POLICY=verified`, el
-  script cierra sólo después de PASS, merge confirmado y un `Closes #N` en el
-  cuerpo del PR. Un `Part of #N`, o cualquier falta de esa declaración, deja
-  el issue abierto y comenta el merge. Con `RALPH_CLOSE_POLICY=never`, nunca
-  usa `gh issue close`, aunque el PR contenga `Closes #N`.
+- **El issue lo cierra el script, no el agente.** `Closes #N` sólo autocierra
+  cuando el PR va contra la rama por defecto; acá la base es configurable.
 - **Codex corre con `network_access=true`** dentro del sandbox `workspace-write`,
   que es lo mínimo que necesita para `git push` y `gh pr create`.
 - **La rama se pone al día con la base antes de cada revisión**, con `git merge`
