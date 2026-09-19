@@ -1,43 +1,36 @@
 {
   "list": [
     {
-      "id": 12,
-      "name": "ralph-main",
+      "id": 18,
+      "name": "ralph-excluded-main",
       "target": "branch",
       "source_type": "Repository",
       "source": "nicoamigosa/ralph",
       "enforcement": "active",
-      "node_id": "RRS_12",
+      "node_id": "RRS_18",
       "_links": {},
       "created_at": "2026-09-01T00:00:00Z",
       "updated_at": "2026-09-01T00:00:00Z"
     }
   ],
   "details": {
-    "12": {
-      "id": 12,
-      "name": "ralph-main",
+    "18": {
+      "id": 18,
+      "name": "ralph-excluded-main",
       "target": "branch",
       "source_type": "Repository",
       "source": "nicoamigosa/ralph",
       "enforcement": "active",
       "conditions": {
         "ref_name": {
-          "include": ["refs/heads/main"],
-          "exclude": []
+          "include": ["refs/heads/*"],
+          "exclude": ["refs/heads/main"]
         }
       },
-      "rules": [
-        {
-          "type": "required_status_checks",
-          "parameters": {
-            "required_status_checks": [
-              {"context": "CI / test"},
-              {"context": "ShellCheck"}
-            ]
-          }
-        }
-      ],
+      "rules": [{
+        "type": "required_status_checks",
+        "parameters": {"required_status_checks": [{"context": "CI"}]}
+      }],
       "bypass_actors": []
     }
   }

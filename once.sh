@@ -373,8 +373,48 @@ write_protection_summary() {
   fi
 }
 
+ref_name_matches_pattern() {
+  local ref_name="$1" pattern="$2"
+  case "$pattern" in
+    "~ALL"|"~DEFAULT_BRANCH") return 0 ;;
+    *)
+      # shellcheck disable=SC2254
+      case "$ref_name" in
+        $pattern) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+}
+
+ruleset_covers_branch() {
+  local ruleset="$1" ref_name="refs/heads/$BASE_BRANCH" pattern
+  local include_count include_match=0
+
+  include_count="$(jq -r '(.conditions.ref_name.include // []) | length' <<<"$ruleset")" || return 1
+  if [ "$include_count" -eq 0 ]; then
+    include_match=1
+  else
+    while IFS= read -r pattern; do
+      if ref_name_matches_pattern "$ref_name" "$pattern"; then
+        include_match=1
+        break
+      fi
+    done < <(jq -r '.conditions.ref_name.include[]? // empty' <<<"$ruleset")
+  fi
+  [ "$include_match" -eq 1 ] || return 1
+
+  while IFS= read -r pattern; do
+    if ref_name_matches_pattern "$ref_name" "$pattern"; then
+      return 1
+    fi
+  done < <(jq -r '.conditions.ref_name.exclude[]? // empty' <<<"$ruleset")
+  return 0
+}
+
 check_base_protection() {
   local identity_json="" rulesets active_rulesets required_checks missing_checks
+  local ruleset_detail ruleset_details identity_id
   local review_rule=0 review_check=0
   local branch="$BASE_BRANCH"
   PROTECTION_FAILURES=""
@@ -398,6 +438,7 @@ check_base_protection() {
   if [ -z "$MERGE_IDENTITY" ]; then
     PROTECTION_FAILURES="no pude resolver la identidad que mergea (gh api user o RALPH_MERGE_IDENTITY)"
   fi
+  identity_id="$(jq -r '.id // empty' <<<"$identity_json" 2>/dev/null)"
 
   rulesets="$(gh api --paginate \
     "repos/$REPO_SLUG/rulesets?includes_parents=true" 2>/dev/null | \
@@ -409,11 +450,35 @@ check_base_protection() {
     return 1
   fi
 
-  active_rulesets="$(jq -c --arg branch "$branch" '[.[] |
-    select((.enforcement // "active") == "active") |
-    select((.target // "branch") == "branch") |
-    select((.conditions.ref_name.include // []) | length == 0 or
-      any(.[]; . == ("refs/heads/" + $branch) or . == "~DEFAULT_BRANCH"))]' <<<"$rulesets")" || active_rulesets="[]"
+  if ! jq -e '[.[] | select(.id == null)] | length == 0' >/dev/null 2>&1 <<<"$rulesets"; then
+    PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }el listado de rulesets no incluye identificadores completos"
+  fi
+  ruleset_details='[]'
+  while IFS= read -r ruleset_id; do
+    [ -n "$ruleset_id" ] || continue
+    ruleset_detail="$(gh api --paginate \
+      "repos/$REPO_SLUG/rulesets/$ruleset_id" 2>/dev/null | jq -c . 2>/dev/null)" || ruleset_detail=""
+    if [ -z "$ruleset_detail" ] || ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$ruleset_detail"; then
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }no pude consultar el detalle del ruleset '$ruleset_id'"
+      continue
+    fi
+    ruleset_details="$(jq -c --argjson detail "$ruleset_detail" '. + [$detail]' <<<"$ruleset_details")" || {
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }no pude procesar el detalle del ruleset '$ruleset_id'"
+    }
+  done < <(jq -r '.[].id // empty' <<<"$rulesets")
+
+  active_rulesets='[]'
+  while IFS= read -r ruleset_detail; do
+    [ -n "$ruleset_detail" ] || continue
+    if [ "$(jq -r '.enforcement // "active"' <<<"$ruleset_detail")" = "active" ] \
+      && [ "$(jq -r '.target // "branch"' <<<"$ruleset_detail")" = "branch" ] \
+      && ruleset_covers_branch "$ruleset_detail"; then
+      active_rulesets="$(jq -c --argjson detail "$ruleset_detail" '. + [$detail]' <<<"$active_rulesets")" || {
+        PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }no pude procesar los rulesets activos"
+      }
+    fi
+  done < <(jq -c '.[]' <<<"$ruleset_details")
+
   if [ "$(jq 'length' <<<"$active_rulesets")" -eq 0 ]; then
     PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }ruleset activo que cubra '$branch'"
   else
@@ -449,12 +514,24 @@ check_base_protection() {
     fi
   fi
 
-  if [ -n "$MERGE_IDENTITY" ] && [ -n "$identity_json" ] && [ -n "$PROTECTION_RULESET_IDS" ]; then
-    if jq -e --arg login "$MERGE_IDENTITY" --arg id "$(jq -r '.id // empty' <<<"$identity_json")" '
+  if [ -n "$MERGE_IDENTITY" ] && [ "$(jq 'length' <<<"$active_rulesets")" -gt 0 ]; then
+    if jq -e --arg login "$MERGE_IDENTITY" --arg id "$identity_id" '
         any(.[]; any(.bypass_actors[]?;
-          ((.actor_name // "") == $login or ((.actor_id // "") | tostring) == $id) and
-          ((.bypass_mode // "always") != "never")))' <<<"$active_rulesets" >/dev/null; then
+          ((.bypass_mode // "always") != "never") and
+          ((.actor_type // "") == "User") and
+          ((.actor_name // "") == $login or
+            ($id != "" and ((.actor_id // "") | tostring) == $id))))' \
+        <<<"$active_rulesets" >/dev/null; then
       PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }la identidad de merge '$MERGE_IDENTITY' tiene bypass"
+    fi
+    if jq -e --arg id "$identity_id" '
+        any(.[]; any(.bypass_actors[]?;
+          ((.bypass_mode // "always") != "never") and
+          (((.actor_type // "") != "User") or
+            (((.actor_name // "") == "") and
+              ($id == "" or .actor_id == null)))))' \
+        <<<"$active_rulesets" >/dev/null; then
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }hay un bypass_actor que no se puede demostrar como un usuario distinto de la identidad de merge"
     fi
   fi
 

@@ -170,6 +170,10 @@ case "${1:-}" in
     ;;
   api)
     if [ "${2:-}" = "user" ]; then
+      if [ "${FAKE_MERGE_USER_EXIT:-0}" -ne 0 ]; then
+        printf '%s\n' 'unable to resolve the authenticated user' >&2
+        exit "$FAKE_MERGE_USER_EXIT"
+      fi
       if [ -n "${FAKE_MERGE_USER_JSON:-}" ]; then
         printf '%s\n' "$FAKE_MERGE_USER_JSON"
       else
@@ -195,11 +199,19 @@ case "${1:-}" in
       */pulls/*/reviews)
         printf '%s\n' "${FAKE_REVIEWS_JSON:-[]}"
         ;;
-      */rulesets*)
+      */rulesets\?*)
         if [ -n "${FAKE_RULESETS_FILE:-}" ]; then
-          cat "$FAKE_RULESETS_FILE"
+          jq -c '.list // []' "$FAKE_RULESETS_FILE"
         else
           printf '%s\n' "${FAKE_RULESETS_JSON:-[]}"
+        fi
+        ;;
+      */rulesets/*)
+        ruleset_id="${api_endpoint##*/}"
+        if [ -n "${FAKE_RULESETS_FILE:-}" ]; then
+          jq -c --arg id "$ruleset_id" '.details[$id] // empty' "$FAKE_RULESETS_FILE"
+        else
+          exit 1
         fi
         ;;
       */check-runs)

@@ -1,22 +1,22 @@
 {
   "list": [
     {
-      "id": 13,
-      "name": "ralph-main-bypass",
+      "id": 19,
+      "name": "ralph-main-role-bypass",
       "target": "branch",
       "source_type": "Repository",
       "source": "nicoamigosa/ralph",
       "enforcement": "active",
-      "node_id": "RRS_13",
+      "node_id": "RRS_19",
       "_links": {},
       "created_at": "2026-09-01T00:00:00Z",
       "updated_at": "2026-09-01T00:00:00Z"
     }
   ],
   "details": {
-    "13": {
-      "id": 13,
-      "name": "ralph-main-bypass",
+    "19": {
+      "id": 19,
+      "name": "ralph-main-role-bypass",
       "target": "branch",
       "source_type": "Repository",
       "source": "nicoamigosa/ralph",
@@ -27,21 +27,14 @@
           "exclude": []
         }
       },
-      "rules": [
-        {
-          "type": "required_status_checks",
-          "parameters": {
-            "required_status_checks": [{"context": "CI"}]
-          }
-        }
-      ],
+      "rules": [{
+        "type": "required_status_checks",
+        "parameters": {"required_status_checks": [{"context": "CI"}]}
+      }],
       "bypass_actors": [
-        {
-          "actor_id": 1,
-          "actor_name": "ralph-bot",
-          "actor_type": "User",
-          "bypass_mode": "always"
-        }
+        {"actor_type": "RepositoryRole", "actor_name": "admin", "bypass_mode": "always"},
+        {"actor_type": "OrganizationAdmin", "bypass_mode": "always"},
+        {"actor_type": "Team", "actor_name": "maintainers", "actor_id": 2, "bypass_mode": "always"}
       ]
     }
   }
