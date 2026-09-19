@@ -21,7 +21,7 @@
       "comments": [
         {
           "id": 7001,
-          "author": {"login": "ralph"},
+          "author": {"login": "ralph-bot"},
           "body": "1. Corregir el checkpoint remoto.\n<verdict>CHANGES_REQUESTED</verdict>\n\n<!-- ralph-state -->\n{\"schema\":1,\"pr\":199,\"issue\":99,\"phase\":\"corrección\",\"round\":1,\"reviewed_sha\":\"STATE_SHA\",\"status\":\"correction_pending\",\"merge_status\":\"open\",\"review_body\":\"1. Corregir el checkpoint remoto.\\n<verdict>CHANGES_REQUESTED</verdict>\",\"comment_id\":7001}"
         },
         {

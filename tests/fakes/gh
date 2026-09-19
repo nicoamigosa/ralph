@@ -11,6 +11,7 @@ mutation() {
 
 pr_comment() {
   local number="${3:?missing pull request number}" body="" previous=""
+  local comment_author="${FAKE_COMMENT_AUTHOR:-ralph-bot}"
   local state_file="${FAKE_GH_STATE_FILE:-}" comment_id state_tmp
   local arg
   for arg in "$@"; do
@@ -24,8 +25,8 @@ pr_comment() {
   if [ -n "$state_file" ]; then
     comment_id="$(jq -r '.next_id // 9001' "$state_file")"
     state_tmp="${state_file}.tmp"
-    jq --argjson pr "$number" --argjson id "$comment_id" --arg body "$body" \
-      '.comments += [{pr: $pr, id: $id, author: {login: "ralph"}, body: $body}] |
+    jq --argjson pr "$number" --argjson id "$comment_id" --arg author "$comment_author" --arg body "$body" \
+      '.comments += [{pr: $pr, id: $id, author: {login: $author}, body: $body}] |
        .next_id = ($id + 1)' "$state_file" > "$state_tmp"
     mv -f "$state_tmp" "$state_file"
   else

@@ -1362,8 +1362,21 @@ publish_pr_state() {
   PR_STATE_COMMENT_ID="$comment_id"
 }
 
+resolve_merge_identity() {
+  local identity_json=""
+  [ -n "$MERGE_IDENTITY" ] && return 0
+
+  identity_json="$(gh api user 2>/dev/null | jq -c . 2>/dev/null)" || identity_json=""
+  MERGE_IDENTITY="$(jq -r '.login // empty' <<<"$identity_json" 2>/dev/null)"
+  [ -n "$MERGE_IDENTITY" ] || {
+    echo "❌ No pude resolver la identidad que mergea (gh api user o RALPH_MERGE_IDENTITY)." >&2
+    return 70
+  }
+}
+
 load_pr_state() {
   local pr="$1" comments_json state_json
+  resolve_merge_identity || return $?
   PR_STATE_FOUND=0
   PR_STATE_PHASE=""
   PR_STATE_ROUND=0
@@ -1377,8 +1390,9 @@ load_pr_state() {
     echo "❌ No pude reconstruir el estado remoto del PR #$pr." >&2
     return 70
   }
-  state_json="$(jq -c '
-    [.[] | select((.body // "") | contains("<!-- ralph-state -->"))
+  state_json="$(jq -c --arg identity "$MERGE_IDENTITY" '
+    [.[] | select((.author.login // "") == $identity)
+     | select((.body // "") | contains("<!-- ralph-state -->"))
      | try ((.body | split("<!-- ralph-state -->")[1]) | fromjson) catch empty]
     | last // empty
   ' <<<"$comments_json")" || {
