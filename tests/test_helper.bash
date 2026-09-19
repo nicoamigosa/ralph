@@ -60,6 +60,7 @@ setup() {
   export FAKE_SLEEP_LOG="$TEST_ROOT/sleep.log"
   export FAKE_MKTEMP_LOG="$TEST_ROOT/mktemp.log"
   export FAKE_API_LOG="$TEST_ROOT/api.log"
+  export FAKE_GH_STATE_FILE="$TEST_ROOT/gh-state.json"
   unset FAKE_CODEX_SIGNAL_GROUP FAKE_CODEX_SIGNAL_MARKER \
     FAKE_CODEX_CHILD_PID_FILE FAKE_CODEX_CHILD_SECONDS FAKE_CODEX_WAIT_FILE \
     FAKE_CODEX_PID_FILE FAKE_PS_DELAY_AGENT_PGID \
@@ -67,6 +68,7 @@ setup() {
     FAKE_SLEEP_DISCOVERY_RELEASE_FILE
   : > "$GH_MUTATION_LOG"
   : > "$FAKE_API_LOG"
+  printf '%s\n' '{"next_id":9001,"comments":[]}' > "$FAKE_GH_STATE_FILE"
   : > "$FAKE_AGENT_LOG"
   : > "$FAKE_MKTEMP_LOG"
   : > "$FAKE_DATE_LOG"

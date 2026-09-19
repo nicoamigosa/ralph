@@ -9,10 +9,48 @@ mutation() {
   printf '%s\n' "$*" >> "$GH_MUTATION_LOG"
 }
 
+pr_comment() {
+  local number="${3:?missing pull request number}" body="" previous=""
+  local state_file="${FAKE_GH_STATE_FILE:-}" comment_id state_tmp
+  local arg
+  for arg in "$@"; do
+    if [ "$previous" = "--body" ]; then
+      body="$arg"
+      break
+    fi
+    previous="$arg"
+  done
+  mutation "$*"
+  if [ -n "$state_file" ]; then
+    comment_id="$(jq -r '.next_id // 9001' "$state_file")"
+    state_tmp="${state_file}.tmp"
+    jq --argjson pr "$number" --argjson id "$comment_id" --arg body "$body" \
+      '.comments += [{pr: $pr, id: $id, author: {login: "ralph"}, body: $body}] |
+       .next_id = ($id + 1)' "$state_file" > "$state_tmp"
+    mv -f "$state_tmp" "$state_file"
+  else
+    comment_id=9001
+  fi
+  printf 'https://github.com/nicoamigosa/ralph/pull/%s#issuecomment-%s\n' "$number" "$comment_id"
+}
+
 issue_filter=".issues[] | select(.number == \$number)"
 issue_list_filter=".issues | map(select(.state == \"OPEN\" and ((.labels // []) | index(\$label)))) | map(.number) | sort | .[]"
 pull_request_filter=".pull_requests[] | select(.number == \$number)"
 head_pull_request_filter=".pull_requests[] | select(.head == \$head)"
+
+pull_request_json() {
+  local number="$1" state_file="${FAKE_GH_STATE_FILE:-}"
+  if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+    jq -c --argjson number "$number" --slurpfile state "$state_file" \
+      '.pull_requests[] | select(.number == $number) |
+       .comments = ((.comments // []) + (($state[0].comments // []) |
+         map(select(.pr == $number) | {id, author, body})))' "$GH_FIXTURE"
+  else
+    jq -c --argjson number "$number" \
+      '.pull_requests[] | select(.number == $number)' "$GH_FIXTURE"
+  fi
+}
 
 head_ref_oid() {
   if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ] && [ -f "${GH_MUTATION_LOG}.head-changed" ]; then
@@ -87,10 +125,13 @@ case "${1:-}" in
         if printf '%s\n' "$*" | grep -q ' --json labels'; then
           fixture_jq --argjson number "$number" "$pull_request_filter | .labels[]?"
         elif printf '%s\n' "$*" | grep -q ' --json comments'; then
+          comments_json="$(pull_request_json "$number")"
           if printf '%s\n' "$*" | grep -q 'comments\[-1\]'; then
-            fixture_jq --argjson number "$number" "$pull_request_filter | (.comments // [])[-1] | \"### \\(.author.login) escribió:\\n\\n\\(.body)\""
+            jq -r '(.comments // [])[-1] | "### \(.author.login) escribió:\n\n\(.body)"' <<<"$comments_json"
+          elif printf '%s\n' "$*" | grep -q 'comments|length'; then
+            jq -r '(.comments // []) | length' <<<"$comments_json"
           else
-            fixture_jq --argjson number "$number" "$pull_request_filter | (.comments // []) | length"
+            jq -c '(.comments // [])' <<<"$comments_json"
           fi
         elif printf '%s\n' "$*" | grep -q ' --json headRefOid'; then
           head_ref_oid
@@ -147,8 +188,11 @@ case "${1:-}" in
         fi
         [ "$(fixture_jq '.checks')" = "pass" ]
         ;;
-      merge|comment)
+      merge)
         mutation "$*"
+        ;;
+      comment)
+        pr_comment "$@"
         ;;
       *)
         exit 2

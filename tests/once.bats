@@ -875,6 +875,124 @@ load test_helper
   grep -Fq 'claude ' "$FAKE_AGENT_LOG"
   grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
   grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  jq -e '
+    [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last |
+      .pr == 101 and .merge_status == "merged" and .status == "merged"
+  ' "$FAKE_GH_STATE_FILE"
+}
+
+@test "orchestrator publishes the exact reviewer body with persistent state" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT=$'1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>'
+  export RALPH_CI_POLICY=none
+  export RALPH_MAX_INFRA_RETRIES=0
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr comment 101 --body 1. Revisar el estado remoto.' "$GH_MUTATION_LOG"
+  grep -Fq '<!-- ralph-state -->' "$GH_MUTATION_LOG"
+  jq -e '
+    ([.comments[] |
+      select(.body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>") |
+      .id] | last) as $review_id |
+    ([.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last) as $state |
+    $state.pr == 101 and $state.round == 3 and $state.comment_id == $review_id and
+    $state.review_body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>"
+  ' "$FAKE_GH_STATE_FILE"
+}
+
+@test "correction receives the saved review body, not a later foreign comment" {
+  state_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  sed "s/STATE_SHA/$state_sha/" \
+    "$PROJECT_ROOT/tests/fixtures/persistent-review.json" > "$TEST_ROOT/persistent-review.json"
+  export GH_FIXTURE="$TEST_ROOT/persistent-review.json"
+  export FAKE_CLAUDE_RESULT='<verdict>PASS</verdict>'
+  export FAKE_CODEX_COMMIT_FILE="$TEST_REPO/review-fix.txt"
+  export RALPH_CI_POLICY=none
+  git -C "$TEST_REPO" push -q origin HEAD:refs/heads/ralph/issue-99
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq '1. Corregir el checkpoint remoto.' "$FAKE_AGENT_LOG"
+  run bash -c '! grep -Fq "$1" "$2"' _ 'Comentario ajeno posterior' "$FAKE_AGENT_LOG"
+  [ "$status" -eq 0 ]
+}
+
+@test "restart after round two resumes the same PR at round three" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
+  export FAKE_CLAUDE_RESULTS='<verdict>CHANGES_REQUESTED</verdict>|<verdict>CHANGES_REQUESTED</verdict>'
+  export RALPH_CI_POLICY=none
+  export RALPH_MAX_ROUNDS=2
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  round_two_sha="$(jq -r '
+    [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last | .reviewed_sha
+  ' "$FAKE_GH_STATE_FILE")"
+  [ -n "$round_two_sha" ]
+  export FAKE_CLAUDE_RESULT='<verdict>PASS</verdict>'
+  unset FAKE_CLAUDE_RESULTS
+  export RALPH_MAX_ROUNDS=3
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"🔍 Claude revisa PR #199 (ronda 3/3)"* ]]
+  [[ "$output" != *"🔍 Claude revisa PR #199 (ronda 1/3)"* ]]
+  jq -e --arg sha "$round_two_sha" '
+    [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last |
+      .round == 3 and .reviewed_sha == $sha
+  ' "$FAKE_GH_STATE_FILE"
+}
+
+@test "limit during review preserves phase and round in the remote checkpoint" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT='__rate_limit__'
+  export RALPH_CI_POLICY=none
+  export RALPH_MAX_LIMIT_RETRIES=0
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last |
+      .phase == "revisión" and .round == 1 and .status == "reviewing"
+  ' "$FAKE_GH_STATE_FILE"
+}
+
+@test "CI timeout preserves the passed review for the next run" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT='no checks reported'
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last |
+      .phase == "revisión" and .round == 1 and .status == "pass" and
+      .merge_status == "open"
+  ' "$FAKE_GH_STATE_FILE"
+
+  export RALPH_CI_POLICY=none
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
 }
 
 @test "review corrections push only to the isolated test remote" {
