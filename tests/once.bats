@@ -317,6 +317,103 @@ load test_helper
   [ ! -s "$FAKE_AGENT_LOG" ]
 }
 
+@test "host config overrides project config" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_DRY_RUN=1
+  export RALPH_HOST_CONFIG="$TEST_ROOT/host.env"
+  mkdir -p "$TEST_REPO/.ralph"
+  printf '%s\n' 'RALPH_MAX_ROUNDS=2' > "$TEST_REPO/.ralph/config.env"
+  printf '%s\n' 'RALPH_MAX_ROUNDS=4' > "$RALPH_HOST_CONFIG"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rondas=4"* ]]
+}
+
+@test "configuration is resolved from the repository root when launched below it" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_DRY_RUN=1
+  export RALPH_HOST_CONFIG="$TEST_ROOT/host.env"
+  mkdir -p "$TEST_REPO/.ralph" "$TEST_REPO/nested/workdir"
+  : > "$RALPH_HOST_CONFIG"
+  printf '%s\n' 'RALPH_MAX_ROUNDS=4' > "$TEST_REPO/.ralph/config.env"
+
+  run bash -c 'cd "$1/nested/workdir" && bash "$2/once.sh"' _ "$TEST_REPO" "$PROJECT_ROOT"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rondas=4"* ]]
+}
+
+@test "explicit environment overrides host and project config" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_DRY_RUN=1
+  export RALPH_HOST_CONFIG="$TEST_ROOT/host.env"
+  export RALPH_MAX_ROUNDS=1
+  mkdir -p "$TEST_REPO/.ralph"
+  printf '%s\n' 'RALPH_MAX_ROUNDS=2' > "$TEST_REPO/.ralph/config.env"
+  printf '%s\n' 'RALPH_MAX_ROUNDS=3' > "$RALPH_HOST_CONFIG"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rondas=1"* ]]
+}
+
+@test "invalid CI policy from project config fails in preflight" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_DRY_RUN=1
+  export RALPH_HOST_CONFIG="$TEST_ROOT/host.env"
+  mkdir -p "$TEST_REPO/.ralph"
+  : > "$RALPH_HOST_CONFIG"
+  printf '%s\n' 'RALPH_CI_POLICY=maybe' > "$TEST_REPO/.ralph/config.env"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RALPH_CI_POLICY debe ser exactamente required o none"* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "local review prompt is appended to the common prompt" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  mkdir -p "$TEST_REPO/.ralph"
+  printf '%s\n' 'RALPH_MAX_ROUNDS=1' > "$TEST_REPO/.ralph/config.env"
+  printf '%s\n' 'Review this project-specific requirement.' > "$TEST_REPO/.ralph/prompt_review.local.md"
+  git -C "$TEST_REPO" add .ralph
+  git -C "$TEST_REPO" commit -q -m 'test local prompt'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq '# Role' "$FAKE_AGENT_LOG"
+  grep -Fq '# Project-specific requirements' "$FAKE_AGENT_LOG"
+  grep -Fq 'Review this project-specific requirement.' "$FAKE_AGENT_LOG"
+}
+
+@test "review prompt is captured before implementation can change the local file" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_COMMIT_FILE="$TEST_REPO/.ralph/prompt_review.local.md"
+  export FAKE_CLAUDE_RESULT='<verdict>CHANGES_REQUESTED</verdict>'
+  export RALPH_MAX_ROUNDS=1
+  export RALPH_CI_POLICY=none
+  git -C "$TEST_REPO" switch -q main
+  mkdir -p "$TEST_REPO/.ralph"
+  printf '%s\n' 'Base review requirement.' > "$TEST_REPO/.ralph/prompt_review.local.md"
+  git -C "$TEST_REPO" add .ralph
+  git -C "$TEST_REPO" commit -q -m 'test base prompt'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'Base review requirement.' "$FAKE_AGENT_LOG"
+  [ "$(git -C "$TEST_REPO" show 'ralph/issue-1:.ralph/prompt_review.local.md')" = 'fake codex committed this correction' ]
+}
+
 @test "section references stop at the next heading" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/section-refs.json"
   export RALPH_DRY_RUN=1
@@ -731,6 +828,43 @@ load test_helper
   [[ "$output" == *"RALPH_MERGE_METHOD"* ]]
 }
 
+@test "invalid close policy fails in preflight" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_CLOSE_POLICY=maybe
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RALPH_CLOSE_POLICY debe ser exactamente verified o never"* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "invalid numeric configuration fails in preflight" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_MAX_ROUNDS=not-a-number
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RALPH_MAX_ROUNDS debe ser un entero no negativo"* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "checkpoint path must not point to a directory" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/checkpoint-dir"
+  mkdir -p "$RALPH_CHECKPOINT_FILE"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RALPH_CHECKPOINT_FILE"* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
 @test "árbol sucio después de PASS detiene sin mergear" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
@@ -875,6 +1009,32 @@ load test_helper
   grep -Fq 'claude ' "$FAKE_AGENT_LOG"
   grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
   grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+}
+
+@test "verified policy leaves a Part of issue open after merge" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_PR_BODY='Part of #1'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
+}
+
+@test "never policy keeps the issue open and is included in the implementation prompt" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_PR_BODY='Closes #1'
+  export RALPH_CLOSE_POLICY=never
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
+  grep -Fq 'RALPH_CLOSE_POLICY=never' "$FAKE_AGENT_LOG"
 }
 
 @test "review corrections push only to the isolated test remote" {
