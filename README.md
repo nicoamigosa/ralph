@@ -273,16 +273,23 @@ en el proyecto. Lo que varía vive fuera de ella:
 | Host | `~/.config/ralph/host.env` | Capacidad Linux/macOS, rutas (PATH de Homebrew, `gtimeout`), límites locales |
 | Credenciales | Login / keychain / entorno protegido | Autenticación de `gh`, `codex`, `claude`; nunca en config versionada |
 
-Precedencia: entorno explícito > host > proyecto > defaults. Los `.env` son
-código shell de confianza (se hacen `source`), no datos parseados.
+Al iniciar, Ralph resuelve la raíz con `git rev-parse --show-toplevel`, cambia
+allí su directorio de trabajo y carga `.ralph/config.env`. Después carga
+`${RALPH_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env}` si
+existe. La precedencia es entorno explícito > host > proyecto > defaults; para
+garantizarla, las variables `RALPH_*` que ya estaban en el entorno se capturan
+antes de hacer `source` y se restauran al terminar la carga. Los `.env` son
+código shell de confianza (se hacen `source`), no datos parseados: sólo deben
+contener código que el operador haya auditado.
 
-> Estado: la carga de `.ralph/` y `host.env` y la composición de prompts
-> locales están planificadas (issues del repo `nicoamigosa/ralph`); hoy todo
-> se configura por entorno.
+Los prompts comunes se leen desde `ralph/` antes de cambiar a la rama de un
+issue. `load_prompt <name>` añade, si existe, `.ralph/<name>.local.md` bajo
+`# Project-specific requirements`; allí viven las restricciones propias del
+proyecto sin modificar los prompts distribuidos.
 
 ## Configuración
 
-Todo por entorno, todo opcional:
+Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
 
 | Variable | Default |
 |---|---|
@@ -304,7 +311,7 @@ Todo por entorno, todo opcional:
 | `RALPH_CI_POLICY` | `required` |
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
-| `RALPH_CLOSE_POLICY` | `verified` (`never` deja los issues abiertos) |
+| `RALPH_CLOSE_POLICY` | `verified` (valores admitidos: `verified` \| `never`) |
 | `RALPH_REQUIRE_PROTECTION` | `1` |
 | `RALPH_MERGE_IDENTITY` | vacío (login de `gh api user`) |
 | `RALPH_REVIEW_IDENTITY` | vacío (sin identidad revisora separada) |
@@ -312,6 +319,7 @@ Todo por entorno, todo opcional:
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 | `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |
 | `RALPH_CHECKPOINT_FILE` | `$SCRIPT_DIR/last_run.md` |
+| `RALPH_HOST_CONFIG` | `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env` |
 
 Con `RALPH_CODEX_SANDBOX=workspace-write`, ralph reemplaza cualquier
 `writable_roots` configurado por el usuario en `~/.codex/config.toml` por la

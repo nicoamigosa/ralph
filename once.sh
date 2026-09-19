@@ -40,7 +40,8 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 # estructuradas del proveedor, reintentan el mismo issue como máximo
 # RALPH_MAX_LIMIT_RETRIES veces y nunca fabrican una hora de reset.
 #
-# Config por entorno (todo opcional):
+# Config por entorno, proyecto y host (todo opcional; precedencia:
+# entorno explícito > host > proyecto > defaults):
 #   RALPH_LABEL          label que marca issues AFK      (default: ready-for-agent)
 #   RALPH_BASE_BRANCH    branch base                     (default: trunk del repo)
 #   RALPH_BRANCH_PREFIX  prefijo de branches por issue   (default: ralph/issue-)
@@ -69,10 +70,60 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #                            recibe el SHA mergeado, ≠0 para toda la corrida
 #                            (default: vacío = desactivado)
 #   RALPH_CLOSE_POLICY       verified o never (default: verified)
+#   RALPH_HOST_CONFIG        archivo del host (default:
+#                            ${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env)
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" \
+  || fail "No pude resolver el directorio de once.sh."
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" \
+  || fail "No pude resolver la raíz del repositorio git."
+cd "$REPO_ROOT" || fail "No pude cambiar a la raíz del repositorio '$REPO_ROOT'."
+
+declare -A EXPLICIT_RALPH_ENV=()
+declare -a EXPLICIT_RALPH_NAMES=()
+EXPLICIT_HOST_CONFIG=0
+while IFS= read -r env_name; do
+  case "$env_name" in
+    RALPH_*)
+      EXPLICIT_RALPH_NAMES+=("$env_name")
+      EXPLICIT_RALPH_ENV["$env_name"]="${!env_name}"
+      [ "$env_name" = RALPH_HOST_CONFIG ] && EXPLICIT_HOST_CONFIG=1
+      ;;
+  esac
+done < <(compgen -e)
+
+restore_explicit_ralph_env() {
+  local env_name
+  for env_name in "${EXPLICIT_RALPH_NAMES[@]}"; do
+    printf -v "$env_name" '%s' "${EXPLICIT_RALPH_ENV[$env_name]}"
+    declare -gx "$env_name"
+  done
+}
+
+load_env_file() {
+  local env_file="$1" required="${2:-0}"
+  if [ -e "$env_file" ] && [ ! -f "$env_file" ]; then
+    fail "La configuración '$env_file' debe ser un archivo regular."
+  fi
+  if [ -f "$env_file" ]; then
+    # Los archivos .env son código shell de confianza, no datos parseados.
+    # shellcheck disable=SC1090
+    if ! source "$env_file"; then
+      fail "No pude cargar la configuración '$env_file'."
+    fi
+  elif [ "$required" -eq 1 ]; then
+    fail "No existe la configuración requerida '$env_file'."
+  fi
+}
+
+load_env_file "$REPO_ROOT/.ralph/config.env"
+restore_explicit_ralph_env
+HOST_CONFIG_PATH="${RALPH_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env}"
+load_env_file "$HOST_CONFIG_PATH" "$EXPLICIT_HOST_CONFIG"
+restore_explicit_ralph_env
+
 LABEL="${RALPH_LABEL:-ready-for-agent}"
 # Este es el tamaño de página de la consulta, no un límite de ejecución: cada
 # candidato devuelto sigue siendo considerado por el selector. Se explicita
@@ -109,6 +160,34 @@ DRY_RUN="${RALPH_DRY_RUN:-0}"
 CLOSE_POLICY="${RALPH_CLOSE_POLICY:-verified}"
 
 CHECKPOINT_FILE="${RALPH_CHECKPOINT_FILE:-$SCRIPT_DIR/last_run.md}"
+
+validate_non_negative_integer() {
+  local variable_name="$1" value="$2"
+  case "$value" in
+    ''|*[!0-9]*) fail "$variable_name debe ser un entero no negativo." ;;
+  esac
+}
+
+validate_file_path() {
+  local variable_name="$1" path="$2" parent
+  [ -n "$path" ] || fail "$variable_name no puede estar vacío."
+  if [ -e "$path" ] && [ ! -f "$path" ]; then
+    fail "$variable_name='$path' debe apuntar a un archivo regular."
+  fi
+  parent="$(dirname "$path")"
+  [ -d "$parent" ] || fail "$variable_name='$path' apunta a un directorio inexistente."
+}
+
+validate_non_negative_integer RALPH_MAX_ROUNDS "$MAX_ROUNDS"
+validate_non_negative_integer RALPH_MAX_INFRA_RETRIES "$MAX_INFRA_RETRIES"
+validate_non_negative_integer RALPH_MAX_LIMIT_RETRIES "$MAX_LIMIT_RETRIES"
+validate_non_negative_integer RALPH_CI_TIMEOUT_SECONDS "$CI_TIMEOUT_SECONDS"
+case "$DEADLINE_EPOCH" in
+  '') ;;
+  *) validate_non_negative_integer RALPH_DEADLINE_EPOCH "$DEADLINE_EPOCH" ;;
+esac
+validate_file_path RALPH_CHECKPOINT_FILE "$CHECKPOINT_FILE"
+
 AGENT_LOG="$(mktemp "${TMPDIR:-/tmp}/ralph-agent.XXXXXX")" \
   || fail "No pude crear el temporal para el log del agente."
 LAST_MSG="$(mktemp "${TMPDIR:-/tmp}/ralph-lastmsg.XXXXXX")" \
@@ -321,6 +400,25 @@ case "$DEADLINE_EPOCH" in
   *[!0-9]*) fail "RALPH_DEADLINE_EPOCH debe ser un epoch entero no negativo." ;;
   *) ;;
 esac
+
+load_prompt() {
+  local name="$1" common_prompt local_prompt
+  case "$name" in
+    prompt_implement|prompt_review|prompt_revise|prompt_conflicts) ;;
+    *) fail "Prompt desconocido '$name'." ;;
+  esac
+  common_prompt="$SCRIPT_DIR/$name.md"
+  local_prompt="$REPO_ROOT/.ralph/$name.local.md"
+  [ -f "$common_prompt" ] || fail "Falta $common_prompt."
+  if [ -e "$local_prompt" ] && [ ! -f "$local_prompt" ]; then
+    fail "El prompt local '$local_prompt' debe ser un archivo regular."
+  fi
+  cat "$common_prompt"
+  if [ -f "$local_prompt" ]; then
+    printf '\n\n# Project-specific requirements\n\n'
+    cat "$local_prompt"
+  fi
+}
 
 repo_host() {
   local remote
@@ -596,12 +694,12 @@ if [ "$DRY_RUN" != "1" ] && [ -n "$(git status --porcelain)" ]; then
   fail "Working tree sucio. Commiteá o stasheá antes de correr ralph."
 fi
 
-PROMPT_IMPLEMENT="$(cat "$SCRIPT_DIR/prompt_implement.md")"
+PROMPT_IMPLEMENT="$(load_prompt prompt_implement)"
 PROMPT_IMPLEMENT+=$'\n\n## Close policy passed by Ralph\n\n'
 PROMPT_IMPLEMENT+="$CLOSE_POLICY_INSTRUCTIONS"
-PROMPT_REVIEW="$(cat "$SCRIPT_DIR/prompt_review.md")"
-PROMPT_REVISE="$(cat "$SCRIPT_DIR/prompt_revise.md")"
-PROMPT_CONFLICTS="$(cat "$SCRIPT_DIR/prompt_conflicts.md")"
+PROMPT_REVIEW="$(load_prompt prompt_review)"
+PROMPT_REVISE="$(load_prompt prompt_revise)"
+PROMPT_CONFLICTS="$(load_prompt prompt_conflicts)"
 
 # Un PR necesita que su base exista en el remoto.
 if ! git ls-remote --exit-code --heads origin "$BASE_BRANCH" >/dev/null 2>&1; then
