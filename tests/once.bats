@@ -145,6 +145,19 @@ load test_helper
   [[ "$output" == *"required status checks"* ]]
 }
 
+@test "preflight fails when an active ruleset has no branch targets" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_REQUIRED_CHECKS_JSON='["CI"]'
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-no-targets.json"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ruleset activo que cubra 'main'"* ]]
+  ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
+}
+
 @test "preflight passes when the ruleset covers every required status check" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export RALPH_REQUIRE_PROTECTION=1

@@ -412,16 +412,13 @@ ruleset_covers_branch() {
   local include_count include_match=0
 
   include_count="$(jq -r '(.conditions.ref_name.include // []) | length' <<<"$ruleset")" || return 1
-  if [ "$include_count" -eq 0 ]; then
-    include_match=1
-  else
-    while IFS= read -r pattern; do
-      if ref_name_matches_pattern "$ref_name" "$pattern"; then
-        include_match=1
-        break
-      fi
-    done < <(jq -r '.conditions.ref_name.include[]? // empty' <<<"$ruleset")
-  fi
+  [ "$include_count" -gt 0 ] || return 1
+  while IFS= read -r pattern; do
+    if ref_name_matches_pattern "$ref_name" "$pattern"; then
+      include_match=1
+      break
+    fi
+  done < <(jq -r '.conditions.ref_name.include[]? // empty' <<<"$ruleset")
   [ "$include_match" -eq 1 ] || return 1
 
   while IFS= read -r pattern; do
