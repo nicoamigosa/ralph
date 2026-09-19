@@ -277,7 +277,7 @@ Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
 | `RALPH_CI_POLICY` | `required` |
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
-| `RALPH_CLOSE_POLICY` | `verified` (`never` deja los issues abiertos) |
+| `RALPH_CLOSE_POLICY` | `verified` (valores admitidos: `verified` \| `never`) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 | `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |

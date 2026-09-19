@@ -1011,6 +1011,20 @@ load test_helper
   grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
 }
 
+@test "operator host config does not affect the suite" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  operator_xdg="$TEST_ROOT/operator-xdg"
+  mkdir -p "$operator_xdg/ralph"
+  printf '%s\n' 'RALPH_MAX_ROUNDS=not-a-number' > "$operator_xdg/ralph/host.env"
+  export XDG_CONFIG_HOME="$operator_xdg"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✅ PASS en la ronda 1"* ]]
+}
+
 @test "review corrections push only to the isolated test remote" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
   export FAKE_CLAUDE_RESULTS='<verdict>CHANGES_REQUESTED</verdict>|<verdict>PASS</verdict>'
