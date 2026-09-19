@@ -214,6 +214,35 @@ load test_helper
   [ "$child_alive" -eq 0 ]
 }
 
+@test "a running loop owns the update lock and releases it on exit" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_WAIT_FILE="$TEST_ROOT/codex-waiting"
+  export RALPH_CI_POLICY=none
+
+  bash -c 'cd "$1" && exec bash "$2/once.sh"' _ "$TEST_REPO" "$PROJECT_ROOT" \
+    > "$TEST_ROOT/runner.log" 2>&1 &
+  runner_pid=$!
+  lock_seen=0
+  for _ in {1..50}; do
+    if [ -e "$TEST_REPO/.ralph/lock" ]; then
+      lock_seen=1
+      break
+    fi
+    "$RALPH_TEST_REAL_SLEEP" 0.1
+  done
+
+  kill -TERM "$runner_pid" 2>/dev/null || true
+  if wait "$runner_pid"; then
+    runner_rc=0
+  else
+    runner_rc=$?
+  fi
+
+  [ "$lock_seen" -eq 1 ]
+  [ "$runner_rc" -eq 143 ]
+  [ ! -e "$TEST_REPO/.ralph/lock" ]
+}
+
 @test "TERM during agent group discovery records the phase and preserves the checked out tree" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_WAIT_FILE="$TEST_ROOT/codex-waiting"

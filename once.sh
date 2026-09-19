@@ -65,6 +65,10 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+PROJECT_ROOT="${PROJECT_ROOT:-$SCRIPT_DIR}"
+LOCK_PATH="${RALPH_LOCK_PATH:-$PROJECT_ROOT/.ralph/lock}"
+LOCK_ACQUIRED=0
 LABEL="${RALPH_LABEL:-ready-for-agent}"
 # La base es el trunk del repo (main/master según el remoto), nunca la rama en
 # la que estés parado: ralph mergea acá y los issues dependientes heredan ese
@@ -225,6 +229,11 @@ handle_signal() {
 
 cleanup_on_exit() {
   [ "$SIGNAL_EXITING" -eq 1 ] || terminate_agent_processes
+  if [ "${LOCK_ACQUIRED:-0}" -eq 1 ]; then
+    rm -f "$LOCK_PATH/pid"
+    rmdir "$LOCK_PATH" 2>/dev/null || true
+    LOCK_ACQUIRED=0
+  fi
   rm -f "$AGENT_LOG" "$LAST_MSG"
   [ -n "$CURRENT_AGENT_FIFO" ] && rm -f "$CURRENT_AGENT_FIFO"
   [ -n "$CURRENT_AGENT_ERR_FIFO" ] && rm -f "$CURRENT_AGENT_ERR_FIFO"
@@ -234,6 +243,25 @@ trap 'handle_signal TERM' TERM
 trap 'handle_signal INT' INT
 trap 'handle_signal HUP' HUP
 trap cleanup_on_exit EXIT
+
+acquire_run_lock() {
+  local lock_parent
+  [ ! -e "$LOCK_PATH" ] || fail "Ya hay una corrida de ralph en curso (lock: $LOCK_PATH)."
+  lock_parent="$(dirname "$LOCK_PATH")"
+  mkdir -p "$lock_parent" || fail "No pude preparar el directorio del lock '$lock_parent'."
+  if ! mkdir "$LOCK_PATH" 2>/dev/null; then
+    fail "Ya hay una corrida de ralph en curso (lock: $LOCK_PATH)."
+  fi
+  if ! printf '%s\n' "$$" > "$LOCK_PATH/pid"; then
+    rmdir "$LOCK_PATH" 2>/dev/null || true
+    fail "No pude escribir el lock de la corrida '$LOCK_PATH'."
+  fi
+  LOCK_ACQUIRED=1
+}
+
+if [ "$DRY_RUN" != "1" ]; then
+  acquire_run_lock
+fi
 
 # Seteados por los runners cuando un agente reporta un tope de uso.
 LIMIT_KIND=""
@@ -292,6 +320,22 @@ repo_host() {
   esac
 }
 
+working_tree_status() {
+  local status_line status_path lock_relative=""
+  if [ "$LOCK_ACQUIRED" -eq 1 ] && [[ "$LOCK_PATH" == "$PROJECT_ROOT"/* ]]; then
+    lock_relative="${LOCK_PATH#"$PROJECT_ROOT"/}"
+  fi
+  while IFS= read -r status_line; do
+    status_path="${status_line:3}"
+    case "$status_path" in
+      "$lock_relative"|"$lock_relative"/*)
+        [ -n "$lock_relative" ] && continue
+        ;;
+    esac
+    printf '%s\n' "$status_line"
+  done < <(git status --porcelain --untracked-files=all)
+}
+
 for cmd in git gh; do
   command -v "$cmd" >/dev/null 2>&1 || fail "Falta '$cmd' en el PATH."
 done
@@ -325,10 +369,9 @@ REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
 REPO_HOST="$(repo_host)"
 
 # El working tree debe estar limpio: vamos a saltar entre branches y mergear.
-if [ "$DRY_RUN" != "1" ] && [ -n "$(git status --porcelain)" ]; then
+if [ "$DRY_RUN" != "1" ] && [ -n "$(working_tree_status)" ]; then
   fail "Working tree sucio. Commiteá o stasheá antes de correr ralph."
 fi
-
 PROMPT_IMPLEMENT="$(cat "$SCRIPT_DIR/prompt_implement.md")"
 PROMPT_REVIEW="$(cat "$SCRIPT_DIR/prompt_review.md")"
 PROMPT_REVISE="$(cat "$SCRIPT_DIR/prompt_revise.md")"
@@ -1116,7 +1159,7 @@ $PROMPT_CONFLICTS"
     fi
     return "$rc"
   fi
-  if [ -n "$(git status --porcelain)" ] || ! git merge-base --is-ancestor "origin/$BASE_BRANCH" HEAD; then
+  if [ -n "$(working_tree_status)" ] || ! git merge-base --is-ancestor "origin/$BASE_BRANCH" HEAD; then
     if ! git merge --abort >/dev/null 2>&1; then
       echo "⚠️  No pude abortar el merge; conservo el árbol en conflicto para recuperación manual."
     fi
@@ -1389,7 +1432,7 @@ $PROMPT_IMPLEMENT"
 
     # El agente debe dejar el trabajo commiteado. Preservamos el árbol para
     # recuperación manual, pero nunca fabricamos un commit por él.
-    if [ -n "$(git status --porcelain)" ]; then
+    if [ -n "$(working_tree_status)" ]; then
       echo "❌ Codex dejó cambios sin commitear; conservo el estado y detengo la corrida."
       return 70
     fi
@@ -1468,7 +1511,7 @@ $PROMPT_REVIEW"
       fi
     fi
     if [ "$ci_ok" -eq 1 ]; then
-      if [ -n "$(git status --porcelain)" ]; then
+      if [ -n "$(working_tree_status)" ]; then
         echo "❌ El árbol cambió después de la revisión; detengo la corrida."
         return 70
       fi
@@ -1562,7 +1605,7 @@ $PROMPT_REVISE"
 
     # Las correcciones también deben llegar commiteadas por Codex; preservar
     # cambios sin commit es preferible a inventar historia o perderlos.
-    if [ -n "$(git status --porcelain)" ]; then
+    if [ -n "$(working_tree_status)" ]; then
       echo "❌ Codex dejó cambios sin commitear; conservo el estado y detengo la corrida."
       return 70
     fi
