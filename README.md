@@ -4,7 +4,7 @@ Resuelve issues de GitHub sin supervisión, con dos agentes y un gate real:
 
 ```
 Codex (gpt-5.6-luna, xhigh)  implementa con la skill tdd  →  abre PR
-Claude (opus)                revisa el PR                 →  PASS ? merge : comentarios
+Claude (opus)                devuelve la revisión         →  PASS ? merge : Codex corrige
 Codex                        corrige sobre la misma rama  →  Claude vuelve a revisar
 ```
 
@@ -36,6 +36,27 @@ debe terminar en `success`; `skipped`, `neutral`, `cancelled`, `pending` y los
 resultados ausentes no habilitan el merge. Los checks exitosos adicionales no
 reemplazan uno obligatorio. Si no se declara la lista, todos los resultados del
 SHA deben ser exitosos y al menos uno debe existir.
+
+La protección de la base también es `required` por defecto:
+`RALPH_REQUIRE_PROTECTION=1` consulta los rulesets activos de la rama base,
+comprueba que cubran los checks de `RALPH_REQUIRED_CHECKS_JSON` y rechaza
+cualquier bypass para la identidad que mergea. Si se configura una identidad
+revisora distinta con `RALPH_REVIEW_IDENTITY`, el ruleset debe exigir una
+aprobación o el check `ralph-review`; antes del merge, esa aprobación o check
+debe corresponder al SHA revisado y a esa identidad. `RALPH_REQUIRE_PROTECTION=0`
+queda reservado al sandbox de pruebas, avisa explícitamente y se registra en
+`RUN_DIR/summary.json`. La ausencia de `--auto` no desactiva esta protección:
+el merge inmediato sigue respetando las reglas aplicables del servidor.
+
+Después de pedir el merge, Ralph consulta el PR hasta confirmar `state=MERGED`
+con un `mergeCommit.oid` SHA válido. El timeout es de 10 minutos por defecto y
+se configura con `RALPH_MERGE_TIMEOUT_SECONDS`. Si el PR queda encolado hasta
+vencerlo, registra `merge_pending`, conserva ramas y issue, y detiene la corrida
+por defecto; `RALPH_MERGE_PENDING_POLICY=continue` permite seguir con otros
+issues independientes.
+Si GitHub ya borró la ref remota de la rama al completar el merge, Ralph la
+considera eliminada y continúa con el borrado local, el hook post-merge y el
+cierre del issue.
 
 ## Es agnóstico al proyecto
 
@@ -76,14 +97,28 @@ dry-run sólo necesita las herramientas de lectura (`git` y `gh`).
 ## Cómo elige los issues
 
 1. Issues abiertos con el label `ready-for-agent`, **por número ascendente**.
-2. Excluye los **épicos**: cualquier issue referenciado por otro bajo `## Parent`.
-3. Respeta dependencias: salta los que tienen blockers abiertos bajo
+   La consulta usa un límite explícito alto (`1000`) para no heredar el tope
+   predeterminado de 30 resultados de `gh`; ese límite sólo afecta la consulta,
+   no la cantidad de issues que el selector intenta procesar.
+2. Antes de crear una rama, vuelve a leer y validar el body, el estado y los
+   labels de cada candidato. Un `gh issue view` fallido detiene la pasada
+   (nunca se interpreta como un body sin dependencias). Un issue con
+   `ralph-needs-human` se omite, igual que un PR que tenga ese label.
+3. Excluye los **épicos**: cualquier issue referenciado por otro bajo `## Parent`.
+   Para detectarlos, Ralph inspecciona también hijos cerrados o sin el label de
+   candidatos.
+4. Respeta dependencias: salta los que tienen blockers abiertos bajo
    `## Blocked by`. El estado de cada blocker se consulta **en el momento de
    evaluarlo**, no del listado cacheado al inicio de la pasada: la API de GitHub
    es eventualmente consistente y justo tras cerrar un issue todavía lo devuelve
    abierto, bloqueando de mentira a sus dependientes. Consultarlo en vivo además
    los desbloquea dentro de la misma pasada (por eso el merge a la base ocurre
    antes de seguir: los dependientes heredan el código).
+
+Antes de invocar a cada agente, Ralph repite la validación de estado, labels y
+blockers. Si el issue pierde `ready-for-agent`, se cierra, se bloquea o recibe
+`ralph-needs-human` mientras la corrida está en curso, no se invoca ningún
+agente y la rama queda preservada para la siguiente pasada.
 
 ## Orden de prioridad
 
@@ -194,14 +229,11 @@ stdout real de Codex cortado a mitad del evento turn.completed.
 
 ## Fallos del revisor vs. rechazos
 
-Un revisor que **no llegó a correr** (API 529, red caída, crash) no es un
-rechazo. Si Claude no deja veredicto **ni comentario**, el loop lo trata como
-fallo de infraestructura: reintenta con backoff (1, 3, 9 min) **sin consumir
-ronda**. Agotados los reintentos, el issue queda sin revisar y su PR abierto y
-**sin label**, para que un rerun lo retome.
-
-Sin esto, una caída transitoria del proveedor quema las 3 rondas y manda a Codex
-a "corregir" contra una revisión que nunca existió.
+Claude no publica comentarios: si la ejecución falla antes de devolver su
+cuerpo, el estado remoto queda en `phase=revisión`, con la misma ronda y SHA,
+para que el siguiente intento retome esa revisión sin consumir presupuesto.
+Una respuesta válida se publica una sola vez como el cuerpo exacto; la ronda
+sólo avanza después de que Codex completa la corrección.
 
 ## Topes de uso
 
@@ -270,6 +302,8 @@ Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
 | `RALPH_CODEX_SANDBOX` | `workspace-write` (en este modo Codex monta `.git` como sólo lectura; ralph lo habilita como `writable_root` y ejecuta una sonda de preflight; `danger-full-access` no se recomienda) |
 | `RALPH_CLAUDE_MODEL` | `opus` |
 | `RALPH_MERGE_METHOD` | `--squash` |
+| `RALPH_MERGE_TIMEOUT_SECONDS` | `600` |
+| `RALPH_MERGE_PENDING_POLICY` | `stop` (`continue` es la alternativa explícita) |
 | `RALPH_NEEDS_HUMAN_LABEL` | `ralph-needs-human` |
 | `RALPH_MAX_INFRA_RETRIES` | `3` |
 | `RALPH_MAX_LIMIT_RETRIES` | `3` |
@@ -278,6 +312,9 @@ Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
 | `RALPH_CLOSE_POLICY` | `verified` (valores admitidos: `verified` \| `never`) |
+| `RALPH_REQUIRE_PROTECTION` | `1` |
+| `RALPH_MERGE_IDENTITY` | vacío (login de `gh api user`) |
+| `RALPH_REVIEW_IDENTITY` | vacío (sin identidad revisora separada) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 | `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |
@@ -312,10 +349,17 @@ ninguno fija ni verifica la versión que se ejecuta.
 
 ## Notas de diseño
 
-- **Claude comenta, el script mergea ("modo comentario").** GitHub rechaza
-  `approve` y `request-changes` sobre un PR abierto por la misma cuenta, así
-  que el revisor usa `gh pr comment` y el veredicto viaja en la última línea de
-  su salida. El merge lo ejecuta el script, y sólo ante un `PASS` bien formado.
+- **Claude devuelve, Ralph publica y mergea.** Claude no usa `gh pr comment`:
+  su resultado final contiene el cuerpo completo de la revisión y Ralph lo
+  publica exactamente con `gh pr comment`. Después deja otro comentario remoto
+  marcado `<!-- ralph-state -->` con el ID devuelto, PR, fase, ronda, SHA
+  revisado, resultado y estado de merge. La reanudación reconstruye el último
+  registro marcado desde GitHub, por lo que un comentario ajeno posterior no
+  reemplaza la revisión que recibe Codex.
+- El registro remoto usa eventos inmutables: antes de cada agente guarda la fase
+  y la ronda actual, y sólo avanza la ronda después de completar la corrección.
+  Un tope, timeout o reinicio retoma la misma fase, ronda y SHA. El merge se
+  publica como `merge_pending` y `merged`, y sólo ante un `PASS` bien formado.
   Este modo **no equivale a una required review de GitHub**: el servidor no
   garantiza el PASS, sólo el script. Para que lo garantice hace falta una
   identidad de revisión/merge distinta del implementador y un ruleset sin
@@ -323,6 +367,14 @@ ninguno fija ni verifica la versión que se ejecuta.
   checks.
 - **El issue lo cierra el script, no el agente.** `Closes #N` sólo autocierra
   cuando el PR va contra la rama por defecto; acá la base es configurable.
+- **El cierre depende de la política.** Con `RALPH_CLOSE_POLICY=verified`, el
+  script cierra sólo después de PASS, merge confirmado y un `Closes #N` en el
+  cuerpo del PR. Un `Part of #N`, o cualquier falta de esa declaración, deja el
+  issue abierto y comenta el merge. Con `RALPH_CLOSE_POLICY=never`, nunca usa
+  `gh issue close`, aunque el PR contenga `Closes #N`. El issue lo cierra el
+  script, no el agente; el autocierre nativo de GitHub de `Closes #N` sólo
+  aplica cuando el PR va contra la rama por defecto, pero `verified` hace
+  explícito el cierre tras la verificación.
 - **Codex corre con `network_access=true`** dentro del sandbox `workspace-write`,
   que es lo mínimo que necesita para `git push` y `gh pr create`.
 - **La rama se pone al día con la base antes de cada revisión**, con `git merge`
