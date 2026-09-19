@@ -10,7 +10,8 @@ mutation() {
 }
 
 issue_filter=".issues[] | select(.number == \$number)"
-issue_list_filter=".issues | map(select(.state == \"OPEN\" and ((.labels // []) | index(\$label)))) | map(.number) | sort | .[]"
+issue_list_filter='.issues | map(select(($state == "all" or .state == ($state | ascii_upcase)) and ($label == "" or ((.labels // []) | index($label))))) | map(.number) | sort | .[]'
+issue_list_with_body_filter='.issues | map(select(($state == "all" or .state == ($state | ascii_upcase)) and ($label == "" or ((.labels // []) | index($label))))) | sort_by(.number) | .[] | @json'
 pull_request_filter=".pull_requests[] | select(.number == \$number)"
 head_pull_request_filter=".pull_requests[] | select(.head == \$head)"
 
@@ -66,13 +67,26 @@ case "${1:-}" in
     case "${2:-}" in
       list)
         label=""
+        state="open"
+        issue_limit=30
         for ((i = 1; i <= $#; i++)); do
-          if [ "${!i:-}" = "--label" ]; then
-            next=$((i + 1))
-            label="${!next:-}"
-          fi
+          case "${!i:-}" in
+            --label|--state|--limit)
+              next=$((i + 1))
+              value="${!next:-}"
+              case "${!i}" in
+                --label) label="$value" ;;
+                --state) state="$value" ;;
+                --limit) issue_limit="$value" ;;
+              esac
+              ;;
+          esac
         done
-        fixture_jq --arg label "$label" "$issue_list_filter"
+        if printf '%s\n' "$*" | grep -q -- '--json number,body'; then
+          fixture_jq --arg label "$label" --arg state "$state" "$issue_list_with_body_filter" | head -n "$issue_limit"
+        else
+          fixture_jq --arg label "$label" --arg state "$state" "$issue_list_filter" | head -n "$issue_limit"
+        fi
         ;;
       view)
         number="${3:?missing issue number}"
@@ -89,8 +103,23 @@ case "${1:-}" in
           exit 1
         fi
         if printf '%s\n' "$*" | grep -q ' --json body'; then
+          [ "${FAKE_REJECT_BODY_VIEW:-0}" = "1" ] && exit 1
           fixture_jq --argjson number "$number" "$issue_filter | .body // \"\""
         elif printf '%s\n' "$*" | grep -q ' --json state'; then
+          if [ "${FAKE_STATE_SEQUENCE_ISSUE:-}" = "$number" ] && [ -n "${FAKE_STATE_SEQUENCE:-}" ]; then
+            state_calls=0
+            if [ -f "${FAKE_STATE_SEQUENCE_FILE:-}" ]; then
+              read -r state_calls < "$FAKE_STATE_SEQUENCE_FILE"
+            fi
+            IFS='|' read -r -a state_sequence <<< "$FAKE_STATE_SEQUENCE"
+            state_index="$state_calls"
+            if [ "$state_index" -ge "${#state_sequence[@]}" ]; then
+              state_index=$((${#state_sequence[@]} - 1))
+            fi
+            printf '%s\n' "$((state_calls + 1))" > "$FAKE_STATE_SEQUENCE_FILE"
+            printf '%s\n' "${state_sequence[$state_index]}"
+            exit 0
+          fi
           fixture_jq --argjson number "$number" "$issue_filter | .state"
         elif printf '%s\n' "$*" | grep -q ' --json labels'; then
           if [ -n "${FAKE_ISSUE_LABELS_SEQUENCE:-}" ]; then

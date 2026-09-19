@@ -72,6 +72,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LABEL="${RALPH_LABEL:-ready-for-agent}"
+# Este es el tamaño de página de la consulta, no un límite de ejecución: cada
+# candidato devuelto sigue siendo considerado por el selector. Se explicita
+# porque gh limita por defecto la lista de issues a 30 resultados.
+ISSUE_QUERY_LIMIT=1000
 # La base es el trunk del repo (main/master según el remoto), nunca la rama en
 # la que estés parado: ralph mergea acá y los issues dependientes heredan ese
 # código. Detectarla mantiene el script agnóstico al proyecto.
@@ -1968,6 +1972,15 @@ $PROMPT_REVISE"
 
 # --------------------------------------------------------------- selector --
 
+populate_issue_bodies() {
+  local issue_json issue_number
+  while IFS= read -r issue_json; do
+    [ -n "$issue_json" ] || continue
+    issue_number="$(jq -r '.number' <<<"$issue_json")"
+    BODY[$issue_number]="$(jq -r '.body // ""' <<<"$issue_json")"
+  done <<<"${1:-}"
+}
+
 refs_csv() {
   local refs="${1:-}" ref result=""
   while IFS= read -r ref; do
@@ -2107,38 +2120,59 @@ print_plan_issue() {
 # de pasadas para que un blocker cerrado durante la corrida desbloquee a otro.
 select_issues() {
   local mode="$1"
-  local attempted=" " progress=1 numbers issue_list n num priority parents blockers open_blockers
+  local attempted=" " progress=1 numbers n num priority parents blockers open_blockers
   local epics p b state pr needs_human exclusion rc blocked_by_error
+  local candidate_issues all_issues
 
   while [ "$progress" -eq 1 ]; do
     progress=0
-    if ! issue_list="$(gh issue list --state open --label "$LABEL" --json number \
-      --jq 'sort_by(.number) | .[].number')"; then
+    if ! candidate_issues="$(gh issue list --state open --label "$LABEL" \
+      --limit "$ISSUE_QUERY_LIMIT" --json number,body,state,labels \
+      --jq 'sort_by(.number) | .[] | @json')"; then
       echo "❌ No pude listar los issues candidatos; detengo la corrida."
       return 70
     fi
-    numbers="$(printf '%s\n' "$issue_list" | apply_issue_order)"
+    numbers="$(printf '%s\n' "$candidate_issues" | jq -r '.number' | apply_issue_order)"
     [ -z "$numbers" ] && break
 
-    # Cachear body, estado y labels de la pasada para detectar épicos y
-    # validar candidatos antes de crear ramas.
+    # Cachear cuerpos de todos los issues, no sólo de los candidatos: un hijo
+    # cerrado o sin label sigue haciendo épico a su padre.
     unset BODY ISSUE_STATE_BY_ISSUE ISSUE_LABELS_BY_ISSUE
     declare -A BODY ISSUE_STATE_BY_ISSUE ISSUE_LABELS_BY_ISSUE
-    # Blockers ya confirmados cerrados. Sólo cacheamos CLOSED: es un estado final,
-    # mientras que OPEN puede dejar de serlo dentro de esta misma pasada.
-    unset CLOSED_BLOCKER; declare -A CLOSED_BLOCKER
+    populate_issue_bodies "$candidate_issues"
+    if ! all_issues="$(gh issue list --state all --limit "$ISSUE_QUERY_LIMIT" \
+      --json number,body --jq 'sort_by(.number) | .[] | @json')"; then
+      echo "❌ No pude listar todos los issues para detectar padres; detengo la corrida."
+      return 70
+    fi
+    populate_issue_bodies "$all_issues"
+
+    # En modo normal se releen body, estado y labels antes de crear la rama.
+    # El plan usa los mismos datos del listado para seguir siendo una operación
+    # de sólo lectura y evitar consultas por issue innecesarias.
+    while IFS= read -r issue_json; do
+      [ -n "$issue_json" ] || continue
+      n="$(jq -r '.number' <<<"$issue_json")"
+      if [ "$mode" = "run" ]; then
+        read_issue_data "$n"
+        rc=$?
+        [ "$rc" -eq 0 ] || return "$rc"
+        BODY[$n]="$ISSUE_BODY"
+        ISSUE_STATE_BY_ISSUE[$n]="$ISSUE_STATE"
+        ISSUE_LABELS_BY_ISSUE[$n]="$ISSUE_LABELS"
+      else
+        ISSUE_STATE_BY_ISSUE[$n]="$(jq -r '.state // empty' <<<"$issue_json")"
+        ISSUE_LABELS_BY_ISSUE[$n]="$(jq -r '.labels[]? | if type == "object" then .name else . end' <<<"$issue_json")"
+      fi
+    done <<<"$candidate_issues"
+
     epics=" "
-    for n in $numbers; do
-      read_issue_data "$n"
-      rc=$?
-      [ "$rc" -eq 0 ] || return "$rc"
-      BODY[$n]="$ISSUE_BODY"
-      ISSUE_STATE_BY_ISSUE[$n]="$ISSUE_STATE"
-      ISSUE_LABELS_BY_ISSUE[$n]="$ISSUE_LABELS"
+    while IFS= read -r n; do
+      [ -n "$n" ] || continue
       for p in $(printf '%s' "${BODY[$n]}" | section_refs 'Parent'); do
         epics="$epics$p "
       done
-    done
+    done < <(printf '%s\n' "$all_issues" | jq -r '.number')
 
     priority=0
     for num in $numbers; do
@@ -2148,13 +2182,10 @@ select_issues() {
       blocked_by_error="$(printf '%s' "${BODY[$num]}" | validate_blocked_by)"
       open_blockers=""
       for b in $blockers; do
-        [ -n "${CLOSED_BLOCKER[$b]:-}" ] && continue
         state="$(read_issue_state "$b")"
         rc=$?
         [ "$rc" -eq 0 ] || return "$rc"
-        if [ "$state" = "CLOSED" ]; then
-          CLOSED_BLOCKER[$b]=1
-        else
+        if [ "$state" != "CLOSED" ]; then
           [ -n "$open_blockers" ] && open_blockers="$open_blockers"$'\n'
           open_blockers="${open_blockers}${b}"
         fi
