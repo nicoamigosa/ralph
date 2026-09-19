@@ -164,7 +164,7 @@ load test_helper
 @test "epoch formatting uses BSD date -r on Darwin" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
-  export FAKE_CLAUDE_RESULTS='usage limit|<verdict>PASS</verdict>'
+  export FAKE_CLAUDE_RESULTS='__rate_limit__|<verdict>PASS</verdict>'
   export FAKE_UNAME_SYSTEM=Darwin
   export FAKE_DATE_FAST_FORWARD=1
   export FAKE_DATE_INCREMENTAL_FAST_FORWARD=1
@@ -824,7 +824,7 @@ load test_helper
   [ "$status" -eq 0 ]
 }
 
-@test "usage limit during conflict keeps the PR unlabeled for retry" {
+@test "exit codes without a provider signal stay unlabeled and do not retry" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
   export FAKE_CODEX_EXITS='8|9'
   export FAKE_DATE_FAST_FORWARD=1
@@ -842,7 +842,7 @@ load test_helper
 
   run_once
 
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 8 ]
   run bash -c '! grep -Fq "$1" "$2"' _ 'labels[]=' "$GH_MUTATION_LOG"
   [ "$status" -eq 0 ]
   run bash -c '! grep -Fq "$1" "$2"' _ 'pr comment' "$GH_MUTATION_LOG"
@@ -998,11 +998,140 @@ load test_helper
   run_once
 
   [ "$status" -eq 1 ]
-  [[ "$output" != *"Tope"* ]]
+  [[ "$output" == *"unknown del proveedor"* ]]
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
   [ "$(cat "$FAKE_CODEX_CALL_COUNT_FILE")" = 1 ]
   result_file="$(find "$RUN_DIR" -name 'codex-*.result.json' -print -quit)"
-  [ "$(jq -r '.status' "$result_file")" = failed ]
+  [ "$(jq -r '.status' "$result_file")" = unknown ]
   [ "$(jq -r '.retryable' "$result_file")" = false ]
   [ "$(jq -r '.exit_code' "$result_file")" = 1 ]
+}
+
+@test "raw auth exit code without a provider signal stays unknown" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=65
+  export RALPH_CI_POLICY=none
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 65 ]
+  [[ "$output" == *"unknown del proveedor"* ]]
+  result_file="$RUN_DIR/codex-1.result.json"
+  [ "$(jq -r '.status' "$result_file")" = unknown ]
+  [ ! -e "$TEST_REPO/last_run.md" ]
+}
+
+@test "successful codex tool output mentioning rate limit is not a usage limit" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_FINAL_MESSAGE='implementation complete'
+  export FAKE_CODEX_STDOUT='{"type":"thread.started","thread_id":"thread_fixture"}
+{"type":"item.completed","item":{"type":"command_execution","aggregated_output":"diff contains rate limit implementation"}}
+{"type":"item.completed","item":{"type":"agent_message","text":"implementation complete"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Tope"* ]]
+  [ ! -s "$FAKE_SLEEP_LOG" ]
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "provider rate limit event preserves retry_at and retries the same issue" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_EXITS='1|0'
+  export FAKE_CODEX_FINAL_MESSAGE='implementation complete'
+  export FAKE_CODEX_STDOUT='{"type":"error","error":{"code":"rate_limit_exceeded","limit_scope":"session","retry_at":"2026-09-18T23:05:00Z","message":"provider rate limit"}}
+{"type":"item.completed","item":{"type":"agent_message","text":"implementation complete"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
+  export FAKE_DATE_FAST_FORWARD=1
+  export FAKE_SLEEP_NOOP=1
+  export RUN_DIR="$TEST_ROOT/run"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '════ Issue #1' <<<"$output")" -eq 2 ]
+  first_result="$RUN_DIR/codex-1.result.json"
+  [ "$(jq -r '.status' "$first_result")" = rate_limited ]
+  [ "$(jq -r '.retry_at' "$first_result")" != null ]
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "provider rate limit without retry_at retries at most three times" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXITS=1
+  export FAKE_CODEX_FINAL_MESSAGE='implementation incomplete'
+  export FAKE_CODEX_STDOUT='{"type":"error","error":{"code":"rate_limit_exceeded","limit_scope":"session","message":"provider rate limit"}}'
+  export FAKE_SLEEP_NOOP=1
+  export RUN_DIR="$TEST_ROOT/run"
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last_run.md"
+  export RALPH_MAX_LIMIT_RETRIES=3
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_CODEX_CALL_COUNT_FILE")" = 4 ]
+  [ "$(jq -r '.status' "$RUN_DIR"/codex-4.result.json)" = rate_limited ]
+  [ "$(jq -r '.retry_at' "$RUN_DIR"/codex-4.result.json)" = null ]
+  [ ! -s "$FAKE_SLEEP_LOG" ]
+  [[ "$output" == *"máximo 3"* ]]
+  [ -f "$RALPH_CHECKPOINT_FILE" ]
+}
+
+@test "provider auth_error stops the run with a checkpoint" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=1
+  export FAKE_CODEX_FINAL_MESSAGE='authentication failed'
+  export FAKE_CODEX_STDOUT='{"type":"error","error":{"code":"unauthorized","message":"provider rejected credentials"}}'
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last_run.md"
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [ "$(cat "$FAKE_CODEX_CALL_COUNT_FILE" 2>/dev/null || printf 0)" = 0 ]
+  [[ "$output" == *"auth_error"* ]]
+  [[ "$output" == *"provider rejected credentials"* ]]
+  [ -f "$RALPH_CHECKPOINT_FILE" ]
+  [ "$(jq -r '.status' "$RUN_DIR"/codex-1.result.json)" = auth_error ]
+}
+
+@test "provider reset after the global deadline is not awaited" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=1
+  export FAKE_CODEX_STDOUT='{"type":"error","error":{"code":"rate_limit_exceeded","retry_at":4102444800,"message":"provider rate limit"}}'
+  export FAKE_SLEEP_NOOP=1
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last_run.md"
+  export RALPH_DEADLINE_EPOCH=4102440000
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"excede el deadline global"* ]]
+  [ ! -s "$FAKE_SLEEP_LOG" ]
+  [ -f "$RALPH_CHECKPOINT_FILE" ]
+  [ "$(jq -r '.status' "$RUN_DIR"/codex-1.result.json)" = rate_limited ]
+}
+
+@test "provider config_error stops the run with a checkpoint" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=1
+  export FAKE_CODEX_STDOUT='{"type":"error","error":{"code":"invalid_model","message":"provider rejected model"}}'
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last_run.md"
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"config_error"* ]]
+  [[ "$output" == *"provider rejected model"* ]]
+  [ -f "$RALPH_CHECKPOINT_FILE" ]
+  [ "$(jq -r '.status' "$RUN_DIR"/codex-1.result.json)" = config_error ]
 }

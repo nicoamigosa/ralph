@@ -57,6 +57,7 @@ setup() {
   export FAKE_CLAUDE_CALL_COUNT_FILE="$TEST_ROOT/claude-calls"
   export FAKE_DATE_CALL_COUNT_FILE="$TEST_ROOT/date-calls"
   export FAKE_DATE_LOG="$TEST_ROOT/date.log"
+  export FAKE_SLEEP_LOG="$TEST_ROOT/sleep.log"
   export FAKE_MKTEMP_LOG="$TEST_ROOT/mktemp.log"
   export FAKE_API_LOG="$TEST_ROOT/api.log"
   unset FAKE_CODEX_SIGNAL_GROUP FAKE_CODEX_SIGNAL_MARKER \
@@ -69,6 +70,7 @@ setup() {
   : > "$FAKE_AGENT_LOG"
   : > "$FAKE_MKTEMP_LOG"
   : > "$FAKE_DATE_LOG"
+  : > "$FAKE_SLEEP_LOG"
   printf '0\n' > "$FAKE_CODEX_CALL_COUNT_FILE"
   printf '0\n' > "$FAKE_CLAUDE_CALL_COUNT_FILE"
   printf '0\n' > "$FAKE_DATE_CALL_COUNT_FILE"

@@ -27,6 +27,12 @@ if [ -n "${FAKE_CLAUDE_STDOUT_FILE:-}" ]; then
   cat "$FAKE_CLAUDE_STDOUT_FILE"
 elif [ -n "${FAKE_CLAUDE_STDOUT:-}" ]; then
   printf '%b\n' "$FAKE_CLAUDE_STDOUT"
+elif [ "$claude_result" = '__rate_limit__' ]; then
+  retry_at="$(( $($RALPH_TEST_REAL_DATE +%s) + 60 ))"
+  jq -cn --argjson retry_at "$retry_at" \
+    '{type: "result", subtype: "error_during_execution", is_error: true,
+      error: {code: "rate_limit_exceeded", limit_scope: "session", retry_at: $retry_at,
+        message: "provider rate limit"}}'
 elif printf '%s' "$claude_result" | grep -Eqi 'usage limit|rate limit'; then
   jq -cn '{type: "result", subtype: "error_during_execution", is_error: true}'
   printf '%s\n' 'usage limit' >&2
