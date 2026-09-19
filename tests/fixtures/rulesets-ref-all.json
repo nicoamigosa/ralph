@@ -1,0 +1,32 @@
+{
+  "list": [
+    {
+      "id": 16,
+      "name": "ralph-all-branches",
+      "target": "branch",
+      "source_type": "Repository",
+      "source": "nicoamigosa/ralph",
+      "enforcement": "active",
+      "node_id": "RRS_16",
+      "_links": {},
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "details": {
+    "16": {
+      "id": 16,
+      "name": "ralph-all-branches",
+      "target": "branch",
+      "source_type": "Repository",
+      "source": "nicoamigosa/ralph",
+      "enforcement": "active",
+      "conditions": {"ref_name": {"include": ["~ALL"], "exclude": []}},
+      "rules": [{
+        "type": "required_status_checks",
+        "parameters": {"required_status_checks": [{"context": "CI"}]}
+      }],
+      "bypass_actors": []
+    }
+  }
+}

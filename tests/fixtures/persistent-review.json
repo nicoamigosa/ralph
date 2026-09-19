@@ -1,0 +1,37 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {
+      "number": 99,
+      "title": "Persistent review",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    }
+  ],
+  "pull_requests": [
+    {
+      "number": 199,
+      "head": "ralph/issue-99",
+      "available_before_codex": true,
+      "labels": [],
+      "comments": [
+        {
+          "id": 7001,
+          "author": {"login": "ralph-bot"},
+          "body": "1. Corregir el checkpoint remoto.\n<verdict>CHANGES_REQUESTED</verdict>\n\n<!-- ralph-state -->\n{\"schema\":1,\"pr\":199,\"issue\":99,\"phase\":\"corrección\",\"round\":1,\"reviewed_sha\":\"STATE_SHA\",\"status\":\"correction_pending\",\"merge_status\":\"open\",\"review_body\":\"1. Corregir el checkpoint remoto.\\n<verdict>CHANGES_REQUESTED</verdict>\",\"comment_id\":7001}"
+        },
+        {
+          "id": 7002,
+          "author": {"login": "other-user"},
+          "body": "Comentario ajeno posterior: ignóralo completamente."
+        }
+      ],
+      "mergeCommit": {"oid": "9999999999999999999999999999999999999999"}
+    }
+  ],
+  "checks": "pass"
+}

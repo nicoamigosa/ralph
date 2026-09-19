@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'post_merge %s\n' "$1" >> "$GH_MUTATION_LOG"

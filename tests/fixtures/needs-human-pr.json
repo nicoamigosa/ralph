@@ -5,7 +5,7 @@
   "issues": [
     {
       "number": 1,
-      "title": "Harness de tests",
+      "title": "Existing human review",
       "state": "OPEN",
       "labels": ["ready-for-agent"],
       "body": "No dependencies.\n",
@@ -16,9 +16,8 @@
     {
       "number": 101,
       "head": "ralph/issue-1",
-      "available_before_codex": false,
-      "body": "Closes #1",
-      "labels": [],
+      "available_before_codex": true,
+      "labels": ["ralph-needs-human"],
       "comments": [],
       "mergeCommit": {"oid": "1111111111111111111111111111111111111111"}
     }
