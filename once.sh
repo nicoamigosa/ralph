@@ -75,7 +75,8 @@ LABEL="${RALPH_LABEL:-ready-for-agent}"
 # La base es el trunk del repo (main/master según el remoto), nunca la rama en
 # la que estés parado: ralph mergea acá y los issues dependientes heredan ese
 # código. Detectarla mantiene el script agnóstico al proyecto.
-BASE_BRANCH="${RALPH_BASE_BRANCH:-$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)}"
+DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"
+BASE_BRANCH="${RALPH_BASE_BRANCH:-$DEFAULT_BRANCH}"
 BASE_BRANCH="${BASE_BRANCH:-main}"
 BRANCH_PREFIX="${RALPH_BRANCH_PREFIX:-ralph/issue-}"
 MAX_ROUNDS="${RALPH_MAX_ROUNDS:-3}"
@@ -391,7 +392,11 @@ write_protection_summary() {
 ref_name_matches_pattern() {
   local ref_name="$1" pattern="$2"
   case "$pattern" in
-    "~ALL"|"~DEFAULT_BRANCH") return 0 ;;
+    "~ALL") return 0 ;;
+    "~DEFAULT_BRANCH")
+      [ -n "$DEFAULT_BRANCH" ] && [ "$BASE_BRANCH" = "$DEFAULT_BRANCH" ]
+      return
+      ;;
     *)
       # shellcheck disable=SC2254
       case "$ref_name" in

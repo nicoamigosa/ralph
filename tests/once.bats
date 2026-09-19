@@ -231,6 +231,37 @@ load test_helper
   grep -Fq 'pr merge' "$GH_MUTATION_LOG"
 }
 
+@test "preflight rejects the default-branch pattern for a different base branch" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_BASE_BRANCH=develop
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_REQUIRED_CHECKS_JSON='["CI"]'
+  export RALPH_CI_POLICY=none
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-ref-default-branch.json"
+  git -C "$TEST_REPO" branch develop main
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ruleset activo que cubra 'develop'"* ]]
+}
+
+@test "preflight accepts the default-branch pattern for the default base branch" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_BASE_BRANCH=main
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_REQUIRED_CHECKS_JSON='["CI"]'
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-ref-default-branch.json"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Protección verificada para 'main'"* ]]
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
 @test "preflight accepts fnmatch refs and rejects an excluded base ref" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export RALPH_REQUIRE_PROTECTION=1
