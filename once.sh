@@ -105,7 +105,6 @@ ADAPTER_EXIT_CODE=0
 ADAPTER_ERROR=""
 ADAPTER_STATUS="ok"
 CI_FAILURE_BODY=""
-PR_STATE_COMMENT_BODY=""
 
 CURRENT_ISSUE=""
 CURRENT_PHASE="preflight"
@@ -1040,7 +1039,7 @@ extract_comment_id() {
 publish_pr_state() {
   local pr="$1" issue="$2" phase="$3" round="$4" reviewed_sha="$5"
   local status="$6" merge_status="$7" review_body="${8:-}"
-  local payload state_body comment_ref comment_id checkpoint_body
+  local payload state_body comment_ref comment_id checkpoint_body publish_review=0
 
   payload="$(jq -cn \
     --arg pr "$pr" \
@@ -1058,7 +1057,14 @@ publish_pr_state() {
     return 70
   }
   comment_id="${PR_STATE_COMMENT_ID:-}"
-  if [ -n "$review_body" ] && { [ -z "$comment_id" ] || [ "$review_body" != "${PR_STATE_COMMENT_BODY:-}" ]; }; then
+  case "$status" in
+    pass|changes_requested) publish_review=1 ;;
+  esac
+  if [ "$publish_review" -eq 1 ]; then
+    [ -n "$review_body" ] || {
+      echo "❌ El resultado publicable del revisor del PR #$pr está vacío." >&2
+      return 70
+    }
     comment_ref="$(gh pr comment "$pr" --body "$review_body" 2>/dev/null)" || {
       echo "❌ No pude publicar el estado del PR #$pr." >&2
       return 70
@@ -1087,9 +1093,6 @@ publish_pr_state() {
     return 70
   fi
   PR_STATE_COMMENT_ID="$comment_id"
-  if [ -n "$review_body" ]; then
-    PR_STATE_COMMENT_BODY="$review_body"
-  fi
 }
 
 load_pr_state() {
@@ -1102,7 +1105,6 @@ load_pr_state() {
   PR_STATE_MERGE_STATUS=""
   PR_STATE_REVIEW_BODY=""
   PR_STATE_COMMENT_ID=""
-  PR_STATE_COMMENT_BODY=""
 
   comments_json="$(gh pr view "$pr" --json comments --jq '.comments' 2>/dev/null)" || {
     echo "❌ No pude reconstruir el estado remoto del PR #$pr." >&2
@@ -1137,7 +1139,6 @@ load_pr_state() {
   PR_STATE_MERGE_STATUS="$(jq -r '.merge_status' <<<"$state_json")"
   PR_STATE_REVIEW_BODY="$(jq -r '.review_body' <<<"$state_json")"
   PR_STATE_COMMENT_ID="$(jq -r '.comment_id // empty' <<<"$state_json")"
-  PR_STATE_COMMENT_BODY="$PR_STATE_REVIEW_BODY"
   [ -n "$PR_STATE_COMMENT_ID" ] || {
     echo "❌ El registro remoto del PR #$pr no conserva el ID del comentario." >&2
     return 70
@@ -1191,6 +1192,16 @@ checkout_or_fail() {
 }
 
 verify_reviewed_head() {
+  local pr="$1" expected_sha="$2" rc
+  reviewed_head_matches "$pr" "$expected_sha"
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -ne 1 ] && return "$rc"
+  echo "❌ head_changed: el SHA revisado ya no coincide con HEAD local o headRefOid."
+  return 70
+}
+
+reviewed_head_matches() {
   local pr="$1" expected_sha="$2" local_sha remote_sha
   local_sha="$(git rev-parse HEAD 2>/dev/null)" || {
     echo "❌ No pude leer HEAD local; detengo la corrida."
@@ -1201,8 +1212,7 @@ verify_reviewed_head() {
     return 70
   }
   if [ "$local_sha" != "$expected_sha" ] || [ "$remote_sha" != "$expected_sha" ]; then
-    echo "❌ head_changed: el SHA revisado ya no coincide con HEAD local o headRefOid."
-    return 70
+    return 1
   fi
   return 0
 }
@@ -1600,6 +1610,24 @@ $PROMPT_IMPLEMENT"
     fi
     [ "$rc" -ne 0 ] && return "$rc"
 
+    if [ "$state_status" = "pass" ] || [ "$state_status" = "merge_pending" ]; then
+      reviewed_head_matches "$pr" "$reviewed_sha"
+      rc=$?
+      if [ "$rc" -eq 1 ]; then
+        reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
+          echo "❌ No pude capturar el SHA después de actualizar la base; detengo la corrida."
+          return 70
+        }
+        publish_pr_state "$pr" "$num" "revisión" "$round" "$reviewed_sha" \
+          "reviewing" "open" "" || return $?
+        state_phase="revisión"
+        state_status="reviewing"
+        review_body=""
+      elif [ "$rc" -ne 0 ]; then
+        return "$rc"
+      fi
+    fi
+
     if [ "$state_status" = "changes_requested" ] || [ "$state_status" = "correction_pending" ]; then
       if [ "$round" -eq "$MAX_ROUNDS" ]; then
         echo "🙋 #$num agotó las $MAX_ROUNDS rondas sin PASS. PR #$pr queda abierto para revisión humana."
@@ -1633,7 +1661,7 @@ $PROMPT_IMPLEMENT"
     if [ "$state_status" = "pass" ] || [ "$state_status" = "merge_pending" ]; then
       verdict="<verdict>PASS</verdict>"
     else
-      if [ -z "$reviewed_sha" ]; then
+      if [ "$state_status" = "reviewing" ] || [ -z "$reviewed_sha" ]; then
         reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
           echo "❌ No pude capturar el SHA a revisar; detengo la corrida."
           return 70

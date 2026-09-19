@@ -882,7 +882,7 @@ load test_helper
   ' "$FAKE_GH_STATE_FILE"
 }
 
-@test "orchestrator publishes the exact reviewer body with persistent state" {
+@test "orchestrator publishes the exact reviewer body once per review round" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
   export FAKE_CLAUDE_RESULT=$'1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>'
@@ -894,15 +894,19 @@ load test_helper
   [ "$status" -eq 0 ]
   grep -Fq 'pr comment 101 --body 1. Revisar el estado remoto.' "$GH_MUTATION_LOG"
   grep -Fq '<!-- ralph-state -->' "$GH_MUTATION_LOG"
-  [ "$(jq '[.comments[] | select(.body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>")] | length' "$FAKE_GH_STATE_FILE")" -eq 1 ]
+  [ "$(jq '[.comments[] | select(.body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>")] | length' "$FAKE_GH_STATE_FILE")" -eq 3 ]
   jq -e '
     ([.comments[] |
       select(.body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>") |
-      .id] | last) as $review_id |
+      .id]) as $review_ids |
     ([.comments[] | select(.body | contains("<!-- ralph-state -->")) |
-      .body | split("<!-- ralph-state -->")[1] | fromjson] | last) as $state |
-    $state.pr == 101 and $state.round == 3 and $state.comment_id == $review_id and
-    $state.review_body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>"
+      .body | split("<!-- ralph-state -->")[1] | fromjson |
+      select(.status == "changes_requested")]) as $review_states |
+    ($review_ids | length) == 3 and ($review_states | length) == 3 and
+    ($review_states | map(.round)) == [1, 2, 3] and
+    ($review_states | map(.comment_id)) == $review_ids and
+    ($review_states | last).pr == 101 and
+    ($review_states | last).review_body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>"
   ' "$FAKE_GH_STATE_FILE"
 }
 
@@ -985,6 +989,44 @@ load test_helper
     [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
       .body | split("<!-- ralph-state -->")[1] | fromjson] | last |
       .phase == "revisión" and .round == 1 and .status == "reviewing"
+  ' "$FAKE_GH_STATE_FILE"
+}
+
+@test "reviewing after a base advance recaptures the SHA and can merge" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT='__rate_limit__'
+  export RALPH_CI_POLICY=none
+  export RALPH_MAX_LIMIT_RETRIES=0
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  reviewed_sha_before_base="$(jq -r '
+    [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last | .reviewed_sha
+  ' "$FAKE_GH_STATE_FILE")"
+
+  git -C "$TEST_REPO" switch -q main
+  printf '%s\n' 'base advanced after the review stopped' > "$TEST_REPO/base-advance.txt"
+  git -C "$TEST_REPO" add base-advance.txt
+  git -C "$TEST_REPO" commit -q -m 'advance base after review stop'
+  git -C "$TEST_REPO" push -q origin main
+  git -C "$TEST_REPO" switch -q ralph/issue-1
+
+  export FAKE_CLAUDE_RESULT='<verdict>PASS</verdict>'
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"🔍 Claude revisa PR #101 (ronda 1/3)"* ]]
+  [[ "$output" != *"head_changed"* ]]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+  grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  jq -e --arg old_sha "$reviewed_sha_before_base" '
+    ([.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last) as $state |
+    $state.status == "merged" and $state.round == 1 and
+    $state.reviewed_sha != $old_sha
   ' "$FAKE_GH_STATE_FILE"
 }
 
