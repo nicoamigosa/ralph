@@ -52,6 +52,8 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #                           configurado; danger-full-access no se recomienda)
 #   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus)
 #   RALPH_MERGE_METHOD   método de merge del PR          (default: --squash)
+#   RALPH_MERGE_TIMEOUT_SECONDS espera confirmación       (default: 600)
+#   RALPH_MERGE_PENDING_POLICY ante merge encolado         (default: stop)
 #   RALPH_MAX_INFRA_RETRIES  reintentos ante caída del revisor (default: 3)
 #   RALPH_MAX_LIMIT_RETRIES  reintentos ante un tope del proveedor (default: 3)
 #   RALPH_DEADLINE_EPOCH     deadline global opcional, como epoch UTC
@@ -78,6 +80,8 @@ CODEX_EFFORT="${RALPH_CODEX_EFFORT:-xhigh}"
 CODEX_SANDBOX="${RALPH_CODEX_SANDBOX:-workspace-write}"
 CLAUDE_MODEL="${RALPH_CLAUDE_MODEL:-opus}"
 MERGE_METHOD="${RALPH_MERGE_METHOD:---squash}"
+MERGE_TIMEOUT_SECONDS="${RALPH_MERGE_TIMEOUT_SECONDS:-600}"
+MERGE_PENDING_POLICY="${RALPH_MERGE_PENDING_POLICY:-stop}"
 NEEDS_HUMAN_LABEL="${RALPH_NEEDS_HUMAN_LABEL:-ralph-needs-human}"
 MAX_INFRA_RETRIES="${RALPH_MAX_INFRA_RETRIES:-3}"
 MAX_LIMIT_RETRIES="${RALPH_MAX_LIMIT_RETRIES:-3}"
@@ -103,6 +107,7 @@ ADAPTER_RESULT_FILE=""
 ADAPTER_FINAL_MESSAGE=""
 ADAPTER_EXIT_CODE=0
 ADAPTER_ERROR=""
+MERGED_SHA=""
 ADAPTER_STATUS=""
 
 CURRENT_ISSUE=""
@@ -252,6 +257,15 @@ CONFIG_ERROR_RC=66
 case "$MERGE_METHOD" in
   --squash|--merge|--rebase) ;;
   *) fail "RALPH_MERGE_METHOD debe ser exactamente --squash, --merge o --rebase." ;;
+esac
+
+case "$MERGE_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) fail "RALPH_MERGE_TIMEOUT_SECONDS debe ser un entero no negativo." ;;
+esac
+
+case "$MERGE_PENDING_POLICY" in
+  stop|continue) ;;
+  *) fail "RALPH_MERGE_PENDING_POLICY debe ser exactamente stop o continue." ;;
 esac
 
 case "$CI_POLICY" in
@@ -1313,6 +1327,39 @@ wait_for_ci() {
   done
 }
 
+# gh pr merge puede aceptar un merge encolado sin que el PR esté mergeado aún.
+# Sólo un estado MERGED con un OID SHA válido habilita borrar la rama y avanzar.
+# Devuelve 0 confirmado · 2 merge_pending · 70 fallo de infraestructura.
+wait_for_merge() {
+  local pr="$1" started now deadline remaining merge_result merge_state merge_oid
+
+  MERGED_SHA=""
+  started="$(date +%s 2>/dev/null)" || return 70
+  deadline=$((started + MERGE_TIMEOUT_SECONDS))
+  while :; do
+    merge_result="$(gh pr view "$pr" --json state,mergeCommit \
+      --jq '.state + "\t" + (.mergeCommit.oid // "")' 2>/dev/null)" || {
+      echo "❌ No pude consultar el estado de merge del PR #$pr; detengo la corrida."
+      return 70
+    }
+    merge_state="${merge_result%%$'\t'*}"
+    merge_oid="${merge_result#*$'\t'}"
+    if [ "$merge_state" = "MERGED" ] &&
+       printf '%s\n' "$merge_oid" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+      MERGED_SHA="$merge_oid"
+      return 0
+    fi
+
+    now="$(date +%s 2>/dev/null)" || return 70
+    if [ "$now" -ge "$deadline" ]; then
+      echo "⚠️  PR #$pr sigue sin merge confirmado; estado merge_pending, sin borrar rama ni cerrar issue."
+      return 2
+    fi
+    remaining=$((deadline - now))
+    sleep $(( remaining > 30 ? 30 : remaining ))
+  done
+}
+
 # ------------------------------------------------------------ ciclo por issue --
 
 # Procesa UN issue: implementación por Codex, revisión por Claude, hasta
@@ -1323,6 +1370,7 @@ process_issue() {
   local branch="${BRANCH_PREFIX}${num}"
   local rc issue_ctx commits pr round verdict comments prior_work reviewed_sha
   local infra_retries comments_before comments_after backoff merged_sha ci_ok ci_rc
+  local remote_delete_error
 
   CURRENT_ISSUE="$num"
   CURRENT_PHASE="preparación"
@@ -1479,9 +1527,36 @@ $PROMPT_REVIEW"
       echo "🟢 CI verde. Mergeo PR #$pr."
       checkout_or_fail "$BASE_BRANCH" || return 70
       if gh pr merge "$pr" "$MERGE_METHOD" \
-          --match-head-commit "$reviewed_sha" --delete-branch >/dev/null 2>&1; then
-        git branch -D "$branch" >/dev/null 2>&1 || true
-        merged_sha="$(gh pr view "$pr" --json mergeCommit --jq .mergeCommit.oid 2>/dev/null)"
+          --match-head-commit "$reviewed_sha" >/dev/null 2>&1; then
+        wait_for_merge "$pr"
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+          if [ "$MERGE_PENDING_POLICY" = "stop" ]; then
+            checkout_or_fail "$BASE_BRANCH" || return 70
+            write_checkpoint "merge_pending para el PR #$pr; la corrida se detiene sin borrar la rama ni cerrar el issue."
+            exit 0
+          fi
+          checkout_or_fail "$BASE_BRANCH" || return 70
+          return 0
+        elif [ "$rc" -ne 0 ]; then
+          return "$rc"
+        fi
+        merged_sha="$MERGED_SHA"
+        remote_delete_error=""
+        if ! remote_delete_error="$(gh api --method DELETE \
+            "repos/$REPO_SLUG/git/refs/heads/$branch" 2>&1)"; then
+          case "$remote_delete_error" in
+            *"Reference does not exist"*"HTTP 422"*) : ;;
+            *)
+              echo "❌ No pude borrar la rama remota '$branch' después de confirmar el merge; detengo la corrida."
+              return 70
+              ;;
+          esac
+        fi
+        if ! git branch -D "$branch" >/dev/null 2>&1; then
+          echo "❌ No pude borrar la rama local '$branch' después de confirmar el merge; detengo la corrida."
+          return 70
+        fi
         # La base local debe traer el merge: los issues dependientes heredan ese código.
         if ! git pull --ff-only origin "$BASE_BRANCH" >/dev/null 2>&1; then
           echo "❌ No pude actualizar '$BASE_BRANCH' local con --ff-only; conservo el estado y detengo la corrida."

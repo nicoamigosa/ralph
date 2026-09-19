@@ -37,6 +37,16 @@ resultados ausentes no habilitan el merge. Los checks exitosos adicionales no
 reemplazan uno obligatorio. Si no se declara la lista, todos los resultados del
 SHA deben ser exitosos y al menos uno debe existir.
 
+Después de pedir el merge, Ralph consulta el PR hasta confirmar `state=MERGED`
+con un `mergeCommit.oid` SHA válido. El timeout es de 10 minutos por defecto y
+se configura con `RALPH_MERGE_TIMEOUT_SECONDS`. Si el PR queda encolado hasta
+vencerlo, registra `merge_pending`, conserva ramas y issue, y detiene la corrida
+por defecto; `RALPH_MERGE_PENDING_POLICY=continue` permite seguir con otros
+issues independientes.
+Si GitHub ya borró la ref remota de la rama al completar el merge, Ralph la
+considera eliminada y continúa con el borrado local, el hook post-merge y el
+cierre del issue.
+
 ## Es agnóstico al proyecto
 
 Instalá una release etiquetada como `ralph/` en cualquier repo con remoto de
@@ -263,6 +273,8 @@ Todo por entorno, todo opcional:
 | `RALPH_CODEX_SANDBOX` | `workspace-write` (en este modo Codex monta `.git` como sólo lectura; ralph lo habilita como `writable_root` y ejecuta una sonda de preflight; `danger-full-access` no se recomienda) |
 | `RALPH_CLAUDE_MODEL` | `opus` |
 | `RALPH_MERGE_METHOD` | `--squash` |
+| `RALPH_MERGE_TIMEOUT_SECONDS` | `600` |
+| `RALPH_MERGE_PENDING_POLICY` | `stop` (`continue` es la alternativa explícita) |
 | `RALPH_NEEDS_HUMAN_LABEL` | `ralph-needs-human` |
 | `RALPH_MAX_INFRA_RETRIES` | `3` |
 | `RALPH_MAX_LIMIT_RETRIES` | `3` |
