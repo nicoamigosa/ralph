@@ -358,22 +358,28 @@ load test_helper
   export FAKE_ISSUE_VIEW_FAIL_FIELD=body
 
   run_once
+  run_output="$output"
 
   [ "$status" -eq 70 ]
-  ! git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
-  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
-  [[ "$output" == *"No pude leer el body del issue #1"* ]]
+  run git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  [ "$status" -ne 0 ]
+  run grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  [ "$status" -eq 1 ]
+  [[ "$run_output" == *"No pude leer el body del issue #1"* ]]
 }
 
 @test "ralph-needs-human en el issue omite el issue sin rama ni agentes" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/needs-human-issue.json"
 
   run_once
+  run_output="$output"
 
   [ "$status" -eq 0 ]
-  ! git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
-  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
-  [[ "$output" == *"#1 marcado con ralph-needs-human"* ]]
+  run git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  [ "$status" -ne 0 ]
+  run grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  [ "$status" -eq 1 ]
+  [[ "$run_output" == *"#1 marcado con ralph-needs-human"* ]]
 }
 
 @test "issue que pierde ready-for-agent antes del agente no invoca Codex" {
@@ -383,20 +389,26 @@ load test_helper
   export RALPH_CI_POLICY=none
 
   run_once
+  run_output="$output"
 
   [ "$status" -eq 0 ]
-  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
-  [[ "$output" == *"#1 ya no tiene el label 'ready-for-agent'"* ]]
+  run grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  [ "$status" -eq 1 ]
+  run git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  [ "$status" -eq 0 ]
+  [[ "$run_output" == *"#1 ya no tiene el label 'ready-for-agent'; no invoco agentes."* ]]
 }
 
 @test "ralph-needs-human en el PR omite el issue sin invocar agentes" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/needs-human-pr.json"
 
   run_once
+  run_output="$output"
 
   [ "$status" -eq 0 ]
-  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
-  [[ "$output" == *"PR #101 espera revisión humana"* ]]
+  run grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  [ "$status" -eq 1 ]
+  [[ "$run_output" == *"PR #101 espera revisión humana"* ]]
 }
 
 @test "claude PASS with a nonzero exit never merges the issue" {
