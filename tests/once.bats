@@ -133,6 +133,326 @@ load test_helper
   [ ! -s "$FAKE_AGENT_LOG" ]
 }
 
+@test "preflight fails when the base has no protection ruleset" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-none.json"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ruleset"* ]]
+  [[ "$output" == *"required status checks"* ]]
+}
+
+@test "preflight fails when an active ruleset has no branch targets" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_REQUIRED_CHECKS_JSON='["CI"]'
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-no-targets.json"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ruleset activo que cubra 'main'"* ]]
+  ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight passes when the ruleset covers every required status check" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_REQUIRED_CHECKS_JSON='["CI / test","ShellCheck"]'
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-required-checks.json"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Protección verificada para 'main'"* ]]
+  grep -Fq 'rulesets?includes_parents=true' "$FAKE_API_LOG"
+  grep -Fq 'rulesets/12' "$FAKE_API_LOG"
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "preflight fails when the merge identity can bypass the ruleset" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-bypass.json"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"identidad de merge 'ralph-bot' tiene bypass"* ]]
+  ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight fails closed when an active ruleset omits bypass actors" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_CI_POLICY=none
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-missing-bypass-actors.json"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"bypass_actors"* ]]
+  [[ "$output" == *"dato insuficiente"* ]]
+  ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight fails closed when the merge user id cannot be resolved" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export FAKE_MERGE_USER_EXIT=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-bypass.json"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"hay un bypass_actor que no se puede demostrar como un usuario distinto"* ]]
+  [[ "$output" != *"identidad de merge 'ralph-bot' tiene bypass"* ]]
+  ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight fails closed for role organization and team bypass actors" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-bypass-non-user.json"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"bypass_actor"* ]]
+  ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight accepts a ruleset covering all refs with the GitHub ~ALL pattern" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_REQUIRED_CHECKS_JSON='["CI"]'
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-ref-all.json"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "preflight rejects the default-branch pattern for a different base branch" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_BASE_BRANCH=develop
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_REQUIRED_CHECKS_JSON='["CI"]'
+  export RALPH_CI_POLICY=none
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-ref-default-branch.json"
+  git -C "$TEST_REPO" branch develop main
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ruleset activo que cubra 'develop'"* ]]
+}
+
+@test "preflight accepts the default-branch pattern for the default base branch" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_BASE_BRANCH=main
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_REQUIRED_CHECKS_JSON='["CI"]'
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-ref-default-branch.json"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Protección verificada para 'main'"* ]]
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "preflight accepts fnmatch refs and rejects an excluded base ref" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_REQUIRED_CHECKS_JSON='["CI"]'
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-ref-glob.json"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-ref-excluded.json"
+  : > "$GH_MUTATION_LOG"
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ruleset activo que cubra 'main'"* ]]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "disabling protection warns and records the decision in the run summary" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=0
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RALPH_REQUIRE_PROTECTION=0"* ]]
+  [ "$(jq -r '.protection.required' "$RUN_DIR/summary.json")" = false ]
+  [ "$(jq -r '.protection.status' "$RUN_DIR/summary.json")" = disabled ]
+}
+
+@test "distinct review identity requires an approval rule or ralph-review check" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export RALPH_REVIEW_IDENTITY=claude-reviewer
+  export RALPH_REQUIRED_CHECKS_JSON='["CI / test"]'
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-required-checks.json"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ralph-review"* ]]
+  [[ "$output" == *"aprobación"* ]]
+}
+
+@test "distinct review identity must approve the reviewed SHA before merge" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export RALPH_REVIEW_IDENTITY=claude-reviewer
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-review-approval.json"
+  export FAKE_REVIEWS_JSON='[]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"claude-reviewer"* ]]
+  [[ "$output" == *"no aprobó el SHA"* ]]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "approval by the distinct reviewer is accepted only for the reviewed SHA" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export RALPH_REVIEW_IDENTITY=claude-reviewer
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-review-approval.json"
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_REVIEWS_JSON='[{"user":{"login":"claude-reviewer"},"state":"APPROVED","commit_id":"'"$reviewed_sha"'"}]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"🎉 #1 mergeado a main y cerrado."* ]]
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "approval by the distinct reviewer on another SHA does not merge" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export RALPH_REVIEW_IDENTITY=claude-reviewer
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-review-approval.json"
+  export FAKE_REVIEWS_JSON='[{"user":{"login":"claude-reviewer"},"state":"APPROVED","commit_id":"another-sha"}]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aprobó el SHA"* ]]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "ralph-review check must be successful on the reviewed SHA and reviewer identity" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export RALPH_REVIEW_IDENTITY=claude-reviewer
+  export RALPH_CI_POLICY=none
+  export RALPH_REQUIRED_CHECKS_JSON='["CI"]'
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-review-check.json"
+  export FAKE_REVIEWS_JSON='[]'
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_CHECK_RUNS_JSON='[{"name":"ralph-review","head_sha":"'"$reviewed_sha"'","status":"completed","conclusion":"success","creator":{"login":"claude-reviewer"}}]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"🎉 #1 mergeado a main y cerrado."* ]]
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "ralph-review from another creator does not merge" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export RALPH_REVIEW_IDENTITY=claude-reviewer
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-review-check.json"
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_CHECK_RUNS_JSON='[{"name":"ralph-review","head_sha":"'"$reviewed_sha"'","status":"completed","conclusion":"success","creator":{"login":"another-reviewer"}}]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aprobó el SHA"* ]]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "ralph-review for another SHA does not merge" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export RALPH_REVIEW_IDENTITY=claude-reviewer
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-review-check.json"
+  export FAKE_CHECK_RUNS_JSON='[{"name":"ralph-review","head_sha":"another-sha","status":"completed","conclusion":"success","creator":{"login":"claude-reviewer"}}]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aprobó el SHA"* ]]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "ralph-review without a successful conclusion does not merge" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_MERGE_IDENTITY=ralph-bot
+  export RALPH_REVIEW_IDENTITY=claude-reviewer
+  export RALPH_CI_POLICY=none
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-review-check.json"
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_CHECK_RUNS_JSON='[{"name":"ralph-review","head_sha":"'"$reviewed_sha"'","status":"completed","conclusion":"failure","creator":{"login":"claude-reviewer"}}]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no aprobó el SHA"* ]]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
 @test "mktemp failure stops through fail with a clear message" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_MKTEMP_EXIT=1

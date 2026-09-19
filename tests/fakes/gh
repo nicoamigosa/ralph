@@ -197,6 +197,18 @@ case "${1:-}" in
     mutation "$*"
     ;;
   api)
+    if [ "${2:-}" = "user" ]; then
+      if [ "${FAKE_MERGE_USER_EXIT:-0}" -ne 0 ]; then
+        printf '%s\n' 'unable to resolve the authenticated user' >&2
+        exit "$FAKE_MERGE_USER_EXIT"
+      fi
+      if [ -n "${FAKE_MERGE_USER_JSON:-}" ]; then
+        printf '%s\n' "$FAKE_MERGE_USER_JSON"
+      else
+        printf '%s\n' '{"login":"ralph-bot","id":1}'
+      fi
+      exit 0
+    fi
     api_endpoint=""
     fake_ci_result=""
     fake_sha="$($RALPH_TEST_REAL_GIT rev-parse HEAD)"
@@ -212,6 +224,24 @@ case "${1:-}" in
       : > "${GH_MUTATION_LOG}.head-changed"
     fi
     case "$api_endpoint" in
+      */pulls/*/reviews)
+        printf '%s\n' "${FAKE_REVIEWS_JSON:-[]}"
+        ;;
+      */rulesets\?*)
+        if [ -n "${FAKE_RULESETS_FILE:-}" ]; then
+          jq -c '.list // []' "$FAKE_RULESETS_FILE"
+        else
+          printf '%s\n' "${FAKE_RULESETS_JSON:-[]}"
+        fi
+        ;;
+      */rulesets/*)
+        ruleset_id="${api_endpoint##*/}"
+        if [ -n "${FAKE_RULESETS_FILE:-}" ]; then
+          jq -c --arg id "$ruleset_id" '.details[$id] // empty' "$FAKE_RULESETS_FILE"
+        else
+          exit 1
+        fi
+        ;;
       */check-runs)
         if [ -n "${FAKE_CHECK_RUNS_JSON+x}" ]; then
           printf '{"check_runs":%s}\n' "$FAKE_CHECK_RUNS_JSON"
