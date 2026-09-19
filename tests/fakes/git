@@ -4,7 +4,10 @@ set -euo pipefail
 case "${FAKE_GIT_FAIL:-}" in
   fetch|push|pull|checkout|merge)
     if [ "${1:-}" = "${FAKE_GIT_FAIL}" ]; then
-      exit 73
+      case " $* " in
+        *refs/ralph/lock*) ;;
+        *) exit 73 ;;
+      esac
     fi
     ;;
   merge-abort)

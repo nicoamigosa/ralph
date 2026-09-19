@@ -62,8 +62,9 @@ se mergea cada PR aprobado, y de ahí sale la rama del siguiente issue.
 
 `RALPH_DRY_RUN=1` imprime el plan del selector —prioridad, host, padres,
 blockers, exclusión por revisión humana y PR existente— y termina antes de
-checkout, agentes, labels, push o merge. Sirve para inspeccionar una corrida
-sin modificar el repositorio ni GitHub.
+checkout, agentes, labels, push o merge. También lee la ref remota de lock: si
+hay otra corrida activa lo informa y nunca reclama ni modifica esa ref. Sirve
+para inspeccionar una corrida sin modificar el repositorio ni GitHub.
 
 Requisitos para una corrida completa: Bash **5 o superior**, `git`, `gh`
 (autenticado, scope `repo`), `jq`, `codex`, `claude`, remoto `origin`, y
@@ -126,6 +127,21 @@ bloquea el issue y Ralph informa explícitamente el error.
 Si una corrida se corta (Ctrl-C, tope de uso, caída), la siguiente **reutiliza**
 la rama y el PR existentes en vez de recrearlos, y salta lo ya mergeado. Volver
 a correr `./ralph/once.sh` siempre es seguro.
+
+## Exclusión entre hosts
+
+Cada corrida normal adquiere atómicamente `refs/ralph/lock` en `origin` con un
+`git push` de creación. El commit de la ref contiene host, PID, inicio y último
+heartbeat; mientras la corrida está activa, Ralph lo renueva con un
+`--force-with-lease` y lo libera con el mismo lease en el trap de salida. Una
+segunda corrida, incluso desde WSL o macOS, sale antes de seleccionar issues,
+agentes, labels, push o merge.
+
+El heartbeat se considera vencido después de `RALPH_LOCK_TTL_SECONDS` y puede
+reclamarse con otro compare-and-swap atómico. El valor por defecto es dos veces
+`RALPH_AGENT_TIMEOUT_SECONDS`. La reclamación imprime el host y PID anteriores;
+un lock con metadatos inválidos detiene la corrida (fail-closed). El dry-run
+sólo lee esta ref y nunca la crea, renueva, reclama ni libera.
 
 Ralph nunca crea commits para tapar trabajo que Codex dejó sin commitear: conserva
 el árbol y detiene la corrida con código 70 para que el estado pueda recuperarse
@@ -270,6 +286,11 @@ Todo por entorno, todo opcional:
 | `RALPH_CI_POLICY` | `required` |
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
+| `RALPH_AGENT_TIMEOUT_SECONDS` | `1800` (base del TTL del lock) |
+| `RALPH_LOCK_REF` | `refs/ralph/lock` |
+| `RALPH_LOCK_TTL_SECONDS` | `2 × RALPH_AGENT_TIMEOUT_SECONDS` |
+| `RALPH_LOCK_HEARTBEAT_SECONDS` | mitad del TTL (mínimo `1`) |
+| `RALPH_LOCK_HOST` | nombre del host (`uname -n`) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 | `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |

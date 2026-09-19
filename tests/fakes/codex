@@ -15,6 +15,15 @@ if [ -n "${FAKE_CODEX_PID_FILE:-}" ]; then
   printf '%s\n' "$$" > "$FAKE_CODEX_PID_FILE"
 fi
 
+if [ -n "${FAKE_CODEX_LOCK_SEEN_FILE:-}" ]; then
+  "$RALPH_TEST_REAL_GIT" ls-remote origin refs/ralph/lock > "$FAKE_CODEX_LOCK_SEEN_FILE"
+fi
+
+if [ -n "${FAKE_CODEX_LOCK_METADATA_FILE:-}" ]; then
+  lock_oid="$($RALPH_TEST_REAL_GIT ls-remote origin refs/ralph/lock | cut -f1)"
+  "$RALPH_TEST_REAL_GIT" show -s --format=%B "$lock_oid" > "$FAKE_CODEX_LOCK_METADATA_FILE"
+fi
+
 output_file=""
 previous=""
 for arg in "$@"; do
@@ -85,7 +94,7 @@ fi
 
 if [ -n "${FAKE_CODEX_WAIT_FILE:-}" ]; then
   : > "$FAKE_CODEX_WAIT_FILE"
-  while :; do
+  while [ -z "${FAKE_CODEX_RELEASE_FILE:-}" ] || [ ! -f "$FAKE_CODEX_RELEASE_FILE" ]; do
     sleep 1
   done
 fi
