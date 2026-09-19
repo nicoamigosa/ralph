@@ -1,0 +1,17 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {
+      "number": 1,
+      "title": "Needs a human",
+      "state": "OPEN",
+      "labels": ["ready-for-agent", "ralph-needs-human"],
+      "body": "No dependencies.\n",
+      "comments": []
+    }
+  ],
+  "pull_requests": [],
+  "checks": "pass"
+}

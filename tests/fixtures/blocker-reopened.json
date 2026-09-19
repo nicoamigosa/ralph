@@ -1,0 +1,12 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {"number": 1, "title": "First dependent", "state": "OPEN", "labels": ["ready-for-agent"], "body": "## Blocked by\n#2\n", "comments": []},
+    {"number": 2, "title": "Reopened blocker", "state": "CLOSED", "labels": [], "body": "No dependencies.\n", "comments": []},
+    {"number": 3, "title": "Second dependent", "state": "OPEN", "labels": ["ready-for-agent"], "body": "## Blocked by\n#2\n", "comments": []}
+  ],
+  "pull_requests": [],
+  "checks": "pass"
+}
