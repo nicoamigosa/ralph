@@ -1,0 +1,40 @@
+{
+  "list": [
+    {
+      "id": 20,
+      "name": "ralph-main-missing-bypass-actors",
+      "target": "branch",
+      "source_type": "Repository",
+      "source": "nicoamigosa/ralph",
+      "enforcement": "active",
+      "node_id": "RRS_20",
+      "_links": {},
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "details": {
+    "20": {
+      "id": 20,
+      "name": "ralph-main-missing-bypass-actors",
+      "target": "branch",
+      "source_type": "Repository",
+      "source": "nicoamigosa/ralph",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "include": ["refs/heads/main"],
+          "exclude": []
+        }
+      },
+      "rules": [
+        {
+          "type": "required_status_checks",
+          "parameters": {
+            "required_status_checks": [{"context": "CI"}]
+          }
+        }
+      ]
+    }
+  }
+}

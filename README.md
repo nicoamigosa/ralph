@@ -37,6 +37,27 @@ resultados ausentes no habilitan el merge. Los checks exitosos adicionales no
 reemplazan uno obligatorio. Si no se declara la lista, todos los resultados del
 SHA deben ser exitosos y al menos uno debe existir.
 
+La protección de la base también es `required` por defecto:
+`RALPH_REQUIRE_PROTECTION=1` consulta los rulesets activos de la rama base,
+comprueba que cubran los checks de `RALPH_REQUIRED_CHECKS_JSON` y rechaza
+cualquier bypass para la identidad que mergea. Si se configura una identidad
+revisora distinta con `RALPH_REVIEW_IDENTITY`, el ruleset debe exigir una
+aprobación o el check `ralph-review`; antes del merge, esa aprobación o check
+debe corresponder al SHA revisado y a esa identidad. `RALPH_REQUIRE_PROTECTION=0`
+queda reservado al sandbox de pruebas, avisa explícitamente y se registra en
+`RUN_DIR/summary.json`. La ausencia de `--auto` no desactiva esta protección:
+el merge inmediato sigue respetando las reglas aplicables del servidor.
+
+Después de pedir el merge, Ralph consulta el PR hasta confirmar `state=MERGED`
+con un `mergeCommit.oid` SHA válido. El timeout es de 10 minutos por defecto y
+se configura con `RALPH_MERGE_TIMEOUT_SECONDS`. Si el PR queda encolado hasta
+vencerlo, registra `merge_pending`, conserva ramas y issue, y detiene la corrida
+por defecto; `RALPH_MERGE_PENDING_POLICY=continue` permite seguir con otros
+issues independientes.
+Si GitHub ya borró la ref remota de la rama al completar el merge, Ralph la
+considera eliminada y continúa con el borrado local, el hook post-merge y el
+cierre del issue.
+
 ## Es agnóstico al proyecto
 
 Instalá una release etiquetada como `ralph/` en cualquier repo con remoto de
@@ -79,16 +100,25 @@ dry-run sólo necesita las herramientas de lectura (`git` y `gh`).
    La consulta usa un límite explícito alto (`1000`) para no heredar el tope
    predeterminado de 30 resultados de `gh`; ese límite sólo afecta la consulta,
    no la cantidad de issues que el selector intenta procesar.
-2. Excluye los **épicos**: cualquier issue referenciado por otro bajo `## Parent`.
+2. Antes de crear una rama, vuelve a leer y validar el body, el estado y los
+   labels de cada candidato. Un `gh issue view` fallido detiene la pasada
+   (nunca se interpreta como un body sin dependencias). Un issue con
+   `ralph-needs-human` se omite, igual que un PR que tenga ese label.
+3. Excluye los **épicos**: cualquier issue referenciado por otro bajo `## Parent`.
    Para detectarlos, Ralph inspecciona también hijos cerrados o sin el label de
    candidatos.
-3. Respeta dependencias: salta los que tienen blockers abiertos bajo
+4. Respeta dependencias: salta los que tienen blockers abiertos bajo
    `## Blocked by`. El estado de cada blocker se consulta **en el momento de
    evaluarlo**, no del listado cacheado al inicio de la pasada: la API de GitHub
    es eventualmente consistente y justo tras cerrar un issue todavía lo devuelve
    abierto, bloqueando de mentira a sus dependientes. Consultarlo en vivo además
    los desbloquea dentro de la misma pasada (por eso el merge a la base ocurre
    antes de seguir: los dependientes heredan el código).
+
+Antes de invocar a cada agente, Ralph repite la validación de estado, labels y
+blockers. Si el issue pierde `ready-for-agent`, se cierra, se bloquea o recibe
+`ralph-needs-human` mientras la corrida está en curso, no se invoca ningún
+agente y la rama queda preservada para la siguiente pasada.
 
 ## Orden de prioridad
 
@@ -268,6 +298,8 @@ Todo por entorno, todo opcional:
 | `RALPH_CODEX_SANDBOX` | `workspace-write` (en este modo Codex monta `.git` como sólo lectura; ralph lo habilita como `writable_root` y ejecuta una sonda de preflight; `danger-full-access` no se recomienda) |
 | `RALPH_CLAUDE_MODEL` | `opus` |
 | `RALPH_MERGE_METHOD` | `--squash` |
+| `RALPH_MERGE_TIMEOUT_SECONDS` | `600` |
+| `RALPH_MERGE_PENDING_POLICY` | `stop` (`continue` es la alternativa explícita) |
 | `RALPH_NEEDS_HUMAN_LABEL` | `ralph-needs-human` |
 | `RALPH_MAX_INFRA_RETRIES` | `3` |
 | `RALPH_MAX_LIMIT_RETRIES` | `3` |
@@ -275,6 +307,9 @@ Todo por entorno, todo opcional:
 | `RALPH_CI_POLICY` | `required` |
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
+| `RALPH_REQUIRE_PROTECTION` | `1` |
+| `RALPH_MERGE_IDENTITY` | vacío (login de `gh api user`) |
+| `RALPH_REVIEW_IDENTITY` | vacío (sin identidad revisora separada) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 | `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |
@@ -311,12 +346,10 @@ ninguno fija ni verifica la versión que se ejecuta.
 - **Claude comenta, el script mergea ("modo comentario").** GitHub rechaza
   `approve` y `request-changes` sobre un PR abierto por la misma cuenta, así
   que el revisor usa `gh pr comment` y el veredicto viaja en la última línea de
-  su salida. El merge lo ejecuta el script, y sólo ante un `PASS` bien formado.
-  Este modo **no equivale a una required review de GitHub**: el servidor no
-  garantiza el PASS, sólo el script. Para que lo garantice hace falta una
-  identidad de revisión/merge distinta del implementador y un ruleset sin
-  bypass en la base; mientras no exista, el ruleset sólo puede exigir status
-  checks.
+  su salida. El merge lo ejecuta el script sólo ante un `PASS` bien formado y,
+  cuando existe `RALPH_REVIEW_IDENTITY`, además exige la aprobación o el check
+  de esa identidad sobre el SHA revisado. El ruleset activo y sin bypass para la
+  identidad de merge es una condición independiente del veredicto.
 - **El issue lo cierra el script, no el agente.** `Closes #N` sólo autocierra
   cuando el PR va contra la rama por defecto; acá la base es configurable.
 - **Codex corre con `network_access=true`** dentro del sandbox `workspace-write`,
