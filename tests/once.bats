@@ -317,6 +317,33 @@ load test_helper
   [ ! -s "$FAKE_AGENT_LOG" ]
 }
 
+@test "more than 30 issues and parents with children outside candidates: full selection" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/complete-selection.json"
+  export RALPH_DRY_RUN=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -Ec '^#[0-9]+ priority=')" -eq 45 ]
+  [[ "$output" == *"#1 priority=1 host=github.com parents=none blockers=none needs-human=no pr=none excluded=parent"* ]]
+  [[ "$output" == *"#45 priority=45 host=github.com parents=none blockers=none needs-human=no pr=none"* ]]
+}
+
+@test "a blocker reopened during the pass blocks later candidates again" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/blocker-reopened.json"
+  export RALPH_DRY_RUN=1
+  export FAKE_STATE_SEQUENCE_ISSUE=2
+  export FAKE_STATE_SEQUENCE='CLOSED|OPEN'
+  export FAKE_STATE_SEQUENCE_FILE="$TEST_ROOT/blocker-state-calls"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"#1 priority=1 host=github.com parents=none blockers=2 needs-human=no pr=none"* ]]
+  [[ "$output" == *"#3 priority=2 host=github.com parents=none blockers=2 needs-human=no pr=none excluded=blocked-by:2"* ]]
+  [ "$(cat "$FAKE_STATE_SEQUENCE_FILE")" -eq 2 ]
+}
+
 @test "section references stop at the next heading" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/section-refs.json"
   export RALPH_DRY_RUN=1

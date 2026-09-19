@@ -66,6 +66,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LABEL="${RALPH_LABEL:-ready-for-agent}"
+# This is the query page size, not an execution cap: every returned candidate
+# is still considered by the selector.  Keep it explicit because gh defaults
+# issue list to 30 results.
+ISSUE_QUERY_LIMIT=1000
 # La base es el trunk del repo (main/master según el remoto), nunca la rama en
 # la que estés parado: ralph mergea acá y los issues dependientes heredan ese
 # código. Detectarla mantiene el script agnóstico al proyecto.
@@ -1614,23 +1618,30 @@ print_plan_issue() {
 # de pasadas para que un blocker cerrado durante la corrida desbloquee a otro.
 select_issues() {
   local mode="$1"
-  local attempted=" " progress=1 numbers n num priority parents blockers open_blockers
-  local epics p b state pr needs_human exclusion rc blocked_by_error
+  local attempted=" " progress=1 numbers all_numbers n num priority parents blockers open_blockers
+  local epics p b state pr needs_human exclusion rc blocked_by_error body
 
   while [ "$progress" -eq 1 ]; do
     progress=0
-    numbers="$(gh issue list --state open --label "$LABEL" --json number \
-      --jq 'sort_by(.number) | .[].number' | apply_issue_order)"
+    if ! numbers="$(gh issue list --state open --label "$LABEL" --limit "$ISSUE_QUERY_LIMIT" --json number \
+      --jq 'sort_by(.number) | .[].number' | apply_issue_order)"; then
+      fail "No pude listar los issues candidatos."
+    fi
     [ -z "$numbers" ] && break
 
-    # Cachear bodies de la pasada (una llamada por issue) para detectar épicos y blockers.
+    # Cachear cuerpos de todos los issues, no sólo de los candidatos: un hijo
+    # cerrado o sin label sigue haciendo épico a su padre.
     unset BODY; declare -A BODY
-    # Blockers ya confirmados cerrados. Sólo cacheamos CLOSED: es un estado final,
-    # mientras que OPEN puede dejar de serlo dentro de esta misma pasada.
-    unset CLOSED_BLOCKER; declare -A CLOSED_BLOCKER
+    if ! all_numbers="$(gh issue list --state all --limit "$ISSUE_QUERY_LIMIT" --json number \
+      --jq 'sort_by(.number) | .[].number')"; then
+      fail "No pude listar todos los issues para detectar padres."
+    fi
     epics=" "
-    for n in $numbers; do
-      BODY[$n]="$(gh issue view "$n" --json body --jq '.body')"
+    for n in $all_numbers; do
+      if ! body="$(gh issue view "$n" --json body --jq '.body')"; then
+        fail "No pude leer el cuerpo del issue #$n para detectar padres."
+      fi
+      BODY[$n]="$body"
       for p in $(printf '%s' "${BODY[$n]}" | section_refs 'Parent'); do
         epics="$epics$p "
       done
@@ -1644,11 +1655,8 @@ select_issues() {
       blocked_by_error="$(printf '%s' "${BODY[$num]}" | validate_blocked_by)"
       open_blockers=""
       for b in $blockers; do
-        [ -n "${CLOSED_BLOCKER[$b]:-}" ] && continue
         state="$(gh issue view "$b" --json state --jq '.state' 2>/dev/null || echo OPEN)"
-        if [ "$state" = "CLOSED" ]; then
-          CLOSED_BLOCKER[$b]=1
-        else
+        if [ "$state" != "CLOSED" ]; then
           [ -n "$open_blockers" ] && open_blockers="$open_blockers"$'\n'
           open_blockers="${open_blockers}${b}"
         fi
