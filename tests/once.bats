@@ -865,6 +865,7 @@ load test_helper
 @test "happy path implements reviews merges and closes the issue" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
+  export FAKE_PR_BODY='Closes #1'
 
   run_once
 
@@ -875,6 +876,70 @@ load test_helper
   grep -Fq 'claude ' "$FAKE_AGENT_LOG"
   grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
   grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+}
+
+@test "verified closes only when the merged PR declares Closes" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_PR_BODY='Closes #1'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
+}
+
+@test "verified leaves a Part of issue open and comments after merge" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_PR_BODY='Part of #1'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
+}
+
+@test "implementation prompt receives the verified close policy" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_PR_BODY='Closes #1'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'RALPH_CLOSE_POLICY=verified' "$FAKE_AGENT_LOG"
+  grep -Fq 'PR body MUST declare `Closes #<issue number>`' "$FAKE_AGENT_LOG"
+}
+
+@test "never keeps the issue open even when the PR declares Closes" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_PR_BODY='Closes #1'
+  export RALPH_CLOSE_POLICY=never
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
+  grep -Fq 'RALPH_CLOSE_POLICY=never' "$FAKE_AGENT_LOG"
+  grep -Fq 'Part of #<issue number>' "$FAKE_AGENT_LOG"
+  grep -Fq 'MUST NOT contain the autoclose keywords `Closes`, `Fixes`, or `Resolves`' "$FAKE_AGENT_LOG"
+}
+
+@test "invalid close policy fails before agents or mutations" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_CLOSE_POLICY=maybe
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RALPH_CLOSE_POLICY debe ser exactamente verified o never"* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
 }
 
 @test "review corrections push only to the isolated test remote" {
