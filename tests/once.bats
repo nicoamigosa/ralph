@@ -894,6 +894,7 @@ load test_helper
   [ "$status" -eq 0 ]
   grep -Fq 'pr comment 101 --body 1. Revisar el estado remoto.' "$GH_MUTATION_LOG"
   grep -Fq '<!-- ralph-state -->' "$GH_MUTATION_LOG"
+  [ "$(jq '[.comments[] | select(.body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>")] | length' "$FAKE_GH_STATE_FILE")" -eq 1 ]
   jq -e '
     ([.comments[] |
       select(.body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>") |
@@ -903,6 +904,23 @@ load test_helper
     $state.pr == 101 and $state.round == 3 and $state.comment_id == $review_id and
     $state.review_body == "1. Revisar el estado remoto.\n<verdict>CHANGES_REQUESTED</verdict>"
   ' "$FAKE_GH_STATE_FILE"
+}
+
+@test "CI failure becomes the next correction body with its run URL" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT=fail
+  export FAKE_CI_RUN_URL='https://github.com/nicoamigosa/ralph/actions/runs/456'
+  export RALPH_MAX_ROUNDS=2
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  correction_prompt="$(awk '/^codex exec/ {codex_calls++; capture=(codex_calls == 2)} /^claude / {if (capture) exit} capture {print}' "$FAKE_AGENT_LOG")"
+  [[ "$correction_prompt" == *"https://github.com/nicoamigosa/ralph/actions/runs/456"* ]]
+  [[ "$correction_prompt" != *"<verdict>PASS</verdict>"* ]]
 }
 
 @test "correction receives the saved review body, not a later foreign comment" {

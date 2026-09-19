@@ -104,6 +104,8 @@ ADAPTER_FINAL_MESSAGE=""
 ADAPTER_EXIT_CODE=0
 ADAPTER_ERROR=""
 ADAPTER_STATUS="ok"
+CI_FAILURE_BODY=""
+PR_STATE_COMMENT_BODY=""
 
 CURRENT_ISSUE=""
 CURRENT_PHASE="preflight"
@@ -1055,16 +1057,21 @@ publish_pr_state() {
     echo "❌ No pude serializar el estado del PR #$pr." >&2
     return 70
   }
-  if [ -n "$review_body" ]; then
-    state_body="$review_body"
-  else
+  comment_id="${PR_STATE_COMMENT_ID:-}"
+  if [ -n "$review_body" ] && { [ -z "$comment_id" ] || [ "$review_body" != "${PR_STATE_COMMENT_BODY:-}" ]; }; then
+    comment_ref="$(gh pr comment "$pr" --body "$review_body" 2>/dev/null)" || {
+      echo "❌ No pude publicar el estado del PR #$pr." >&2
+      return 70
+    }
+    comment_id="$(extract_comment_id "$comment_ref")"
+  elif [ -z "$comment_id" ]; then
     state_body="<!-- ralph-state -->"$'\n'"$payload"
+    comment_ref="$(gh pr comment "$pr" --body "$state_body" 2>/dev/null)" || {
+      echo "❌ No pude publicar el estado del PR #$pr." >&2
+      return 70
+    }
+    comment_id="$(extract_comment_id "$comment_ref")"
   fi
-  comment_ref="$(gh pr comment "$pr" --body "$state_body" 2>/dev/null)" || {
-    echo "❌ No pude publicar el estado del PR #$pr." >&2
-    return 70
-  }
-  comment_id="$(extract_comment_id "$comment_ref")"
   [ -n "$comment_id" ] || {
     echo "❌ gh pr comment no devolvió un ID reconocible para el PR #$pr." >&2
     return 70
@@ -1079,6 +1086,10 @@ publish_pr_state() {
     echo "❌ No pude confirmar el estado remoto del PR #$pr." >&2
     return 70
   fi
+  PR_STATE_COMMENT_ID="$comment_id"
+  if [ -n "$review_body" ]; then
+    PR_STATE_COMMENT_BODY="$review_body"
+  fi
 }
 
 load_pr_state() {
@@ -1091,6 +1102,7 @@ load_pr_state() {
   PR_STATE_MERGE_STATUS=""
   PR_STATE_REVIEW_BODY=""
   PR_STATE_COMMENT_ID=""
+  PR_STATE_COMMENT_BODY=""
 
   comments_json="$(gh pr view "$pr" --json comments --jq '.comments' 2>/dev/null)" || {
     echo "❌ No pude reconstruir el estado remoto del PR #$pr." >&2
@@ -1125,6 +1137,7 @@ load_pr_state() {
   PR_STATE_MERGE_STATUS="$(jq -r '.merge_status' <<<"$state_json")"
   PR_STATE_REVIEW_BODY="$(jq -r '.review_body' <<<"$state_json")"
   PR_STATE_COMMENT_ID="$(jq -r '.comment_id // empty' <<<"$state_json")"
+  PR_STATE_COMMENT_BODY="$PR_STATE_REVIEW_BODY"
   [ -n "$PR_STATE_COMMENT_ID" ] || {
     echo "❌ El registro remoto del PR #$pr no conserva el ID del comentario." >&2
     return 70
@@ -1389,6 +1402,8 @@ check_required_checks() {
 wait_for_ci() {
   local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining
 
+  CI_FAILURE_BODY=""
+
   if [ "$CI_POLICY" = "none" ]; then
     echo "⚠️  CI sin checks: política RALPH_CI_POLICY=none explícita; continúo sin esa garantía."
     return 0
@@ -1404,11 +1419,11 @@ wait_for_ci() {
     elif [ "$checks_rc" -eq 1 ]; then
       run_url="$(gh run list --branch "$branch" --limit 1 --json url --jq '.[0].url' 2>/dev/null)"
       if [ -n "$REQUIRED_CHECKS_JSON" ]; then
+        CI_FAILURE_BODY="1. CI obligatorio en rojo: ${REQUIRED_CHECKS_FAILURES:-check sin éxito}; reproducir con la suite en base virgen y corregir (${run_url:-sin URL del run})."
         echo "🔴 CI obligatorio en rojo en PR #$pr: ${REQUIRED_CHECKS_FAILURES:-check sin éxito} (${run_url:-sin URL del run})"
-        gh pr comment "$pr" --body "1. CI obligatorio en rojo: ${REQUIRED_CHECKS_FAILURES:-check sin éxito}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
       else
+        CI_FAILURE_BODY="1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir."
         echo "🔴 CI en rojo en PR #$pr: ${run_url:-sin URL del run}"
-        gh pr comment "$pr" --body "1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
       fi
       return 1
     else
@@ -1685,6 +1700,7 @@ $PROMPT_REVIEW"
         return 0
       elif [ "$ci_rc" -eq 1 ]; then
         state_status="changes_requested"
+        review_body="$CI_FAILURE_BODY"
         publish_pr_state "$pr" "$num" "revisión" "$round" "$reviewed_sha" \
           "$state_status" "open" "$review_body" || return $?
       fi
