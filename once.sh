@@ -122,11 +122,12 @@ ADAPTER_RESULT_FILE=""
 ADAPTER_FINAL_MESSAGE=""
 ADAPTER_EXIT_CODE=0
 ADAPTER_ERROR=""
+ADAPTER_STATUS="ok"
+CI_FAILURE_BODY=""
 PROTECTION_STATUS="not_checked"
 PROTECTION_FAILURES=""
 PROTECTION_RULESET_IDS=""
 MERGED_SHA=""
-ADAPTER_STATUS=""
 
 CURRENT_ISSUE=""
 CURRENT_PHASE="preflight"
@@ -1297,6 +1298,167 @@ add_label() {
     || echo "⚠️  No pude aplicar el label '$2' a #$1."
 }
 
+extract_comment_id() {
+  local reference="$1"
+  printf '%s\n' "$reference" | sed -n 's/.*issuecomment-\([0-9][0-9]*\).*/\1/p'
+}
+
+publish_pr_state() {
+  local pr="$1" issue="$2" phase="$3" round="$4" reviewed_sha="$5"
+  local status="$6" merge_status="$7" review_body="${8:-}"
+  local payload state_body comment_ref comment_id checkpoint_body publish_review=0
+
+  payload="$(jq -cn \
+    --arg pr "$pr" \
+    --arg issue "$issue" \
+    --arg phase "$phase" \
+    --arg round "$round" \
+    --arg reviewed_sha "$reviewed_sha" \
+    --arg status "$status" \
+    --arg merge_status "$merge_status" \
+    --arg review_body "$review_body" \
+    '{schema: 1, pr: ($pr | tonumber), issue: ($issue | tonumber), phase: $phase,
+      round: ($round | tonumber), reviewed_sha: $reviewed_sha, status: $status,
+      merge_status: $merge_status, review_body: $review_body, comment_id: null}')" || {
+    echo "❌ No pude serializar el estado del PR #$pr." >&2
+    return 70
+  }
+  comment_id="${PR_STATE_COMMENT_ID:-}"
+  case "$status" in
+    pass|changes_requested) publish_review=1 ;;
+  esac
+  if [ "$publish_review" -eq 1 ]; then
+    [ -n "$review_body" ] || {
+      echo "❌ El resultado publicable del revisor del PR #$pr está vacío." >&2
+      return 70
+    }
+    comment_ref="$(gh pr comment "$pr" --body "$review_body" 2>/dev/null)" || {
+      echo "❌ No pude publicar el estado del PR #$pr." >&2
+      return 70
+    }
+    comment_id="$(extract_comment_id "$comment_ref")"
+  elif [ -z "$comment_id" ]; then
+    state_body="<!-- ralph-state -->"$'\n'"$payload"
+    comment_ref="$(gh pr comment "$pr" --body "$state_body" 2>/dev/null)" || {
+      echo "❌ No pude publicar el estado del PR #$pr." >&2
+      return 70
+    }
+    comment_id="$(extract_comment_id "$comment_ref")"
+  fi
+  [ -n "$comment_id" ] || {
+    echo "❌ gh pr comment no devolvió un ID reconocible para el PR #$pr." >&2
+    return 70
+  }
+
+  payload="$(jq -cn \
+    --argjson state "$payload" \
+    --arg comment_id "$comment_id" \
+    '$state | .comment_id = ($comment_id | tonumber)')" || return 70
+  checkpoint_body="<!-- ralph-state -->"$'\n'"$payload"
+  if ! gh pr comment "$pr" --body "$checkpoint_body" >/dev/null 2>&1; then
+    echo "❌ No pude confirmar el estado remoto del PR #$pr." >&2
+    return 70
+  fi
+  PR_STATE_COMMENT_ID="$comment_id"
+}
+
+resolve_merge_identity() {
+  local identity_json=""
+  [ -n "$MERGE_IDENTITY" ] && return 0
+
+  identity_json="$(gh api user 2>/dev/null | jq -c . 2>/dev/null)" || identity_json=""
+  MERGE_IDENTITY="$(jq -r '.login // empty' <<<"$identity_json" 2>/dev/null)"
+  [ -n "$MERGE_IDENTITY" ] || {
+    echo "❌ No pude resolver la identidad que mergea (gh api user o RALPH_MERGE_IDENTITY)." >&2
+    return 70
+  }
+}
+
+load_pr_state() {
+  local pr="$1" comments_json state_json
+  resolve_merge_identity || return $?
+  PR_STATE_FOUND=0
+  PR_STATE_PHASE=""
+  PR_STATE_ROUND=0
+  PR_STATE_REVIEWED_SHA=""
+  PR_STATE_STATUS=""
+  PR_STATE_MERGE_STATUS=""
+  PR_STATE_REVIEW_BODY=""
+  PR_STATE_COMMENT_ID=""
+
+  comments_json="$(gh pr view "$pr" --json comments --jq '.comments' 2>/dev/null)" || {
+    echo "❌ No pude reconstruir el estado remoto del PR #$pr." >&2
+    return 70
+  }
+  state_json="$(jq -c --arg identity "$MERGE_IDENTITY" '
+    [.[] | select((.author.login // "") == $identity)
+     | select((.body // "") | contains("<!-- ralph-state -->"))
+     | try ((.body | split("<!-- ralph-state -->")[1]) | fromjson) catch empty]
+    | last // empty
+  ' <<<"$comments_json")" || {
+    echo "❌ El registro remoto del PR #$pr no es JSON válido." >&2
+    return 70
+  }
+  [ -n "$state_json" ] || return 0
+  jq -e --argjson expected_pr "$pr" '
+    type == "object" and .schema == 1 and .pr == $expected_pr and
+    (.pr | type) == "number" and (.issue | type) == "number" and
+    (.phase | type) == "string" and (.round | type) == "number" and
+    (.round >= 1) and ((.round | floor) == .round) and
+    (.reviewed_sha | type) == "string" and (.status | type) == "string" and
+    (.merge_status | type) == "string" and (.review_body | type) == "string" and
+    (.comment_id | type) == "number"
+  ' <<<"$state_json" >/dev/null 2>&1 || {
+    echo "❌ El registro remoto del PR #$pr tiene un formato no reconocido." >&2
+    return 70
+  }
+  PR_STATE_FOUND=1
+  PR_STATE_PHASE="$(jq -r '.phase' <<<"$state_json")"
+  PR_STATE_ROUND="$(jq -r '.round' <<<"$state_json")"
+  PR_STATE_REVIEWED_SHA="$(jq -r '.reviewed_sha' <<<"$state_json")"
+  PR_STATE_STATUS="$(jq -r '.status' <<<"$state_json")"
+  PR_STATE_MERGE_STATUS="$(jq -r '.merge_status' <<<"$state_json")"
+  PR_STATE_REVIEW_BODY="$(jq -r '.review_body' <<<"$state_json")"
+  PR_STATE_COMMENT_ID="$(jq -r '.comment_id // empty' <<<"$state_json")"
+  [ -n "$PR_STATE_COMMENT_ID" ] || {
+    echo "❌ El registro remoto del PR #$pr no conserva el ID del comentario." >&2
+    return 70
+  }
+}
+
+run_codex_correction() {
+  local pr="$1" branch="$2" issue_ctx="$3" review_body="$4" num="$5" rc
+  CURRENT_PHASE="corrección"
+  echo "✏️  Codex corrige PR #$pr..."
+  run_codex "Your pull request was reviewed and did not pass.
+
+Pull request: #$pr
+Branch (already checked out, stay on it): $branch
+Base branch:                              $BASE_BRANCH
+
+## The GitHub issue this PR must satisfy
+$issue_ctx
+
+## The review you must address
+$review_body
+
+## Working instructions
+$PROMPT_REVISE"
+  rc=$?
+  if [ "$rc" -ge 128 ]; then
+    echo "❌ Codex terminó por señal (rc=$rc): fallo de infraestructura del issue #$num."
+  fi
+  [ "$rc" -ne 0 ] && return "$rc"
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "❌ Codex dejó cambios sin commitear; conservo el estado y detengo la corrida."
+    return 70
+  fi
+  if ! git push -q origin "$branch" >/dev/null 2>&1; then
+    echo "❌ No pude publicar $branch; conservo el estado y detengo la corrida."
+    return 70
+  fi
+}
+
 pr_for_branch() {
   local pr
   if ! pr="$(gh pr list --head "$1" --state open --json number --jq '.[0].number // empty' 2>/dev/null)"; then
@@ -1316,6 +1478,16 @@ checkout_or_fail() {
 }
 
 verify_reviewed_head() {
+  local pr="$1" expected_sha="$2" rc
+  reviewed_head_matches "$pr" "$expected_sha"
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -ne 1 ] && return "$rc"
+  echo "❌ head_changed: el SHA revisado ya no coincide con HEAD local o headRefOid."
+  return 70
+}
+
+reviewed_head_matches() {
   local pr="$1" expected_sha="$2" local_sha remote_sha
   local_sha="$(git rev-parse HEAD 2>/dev/null)" || {
     echo "❌ No pude leer HEAD local; detengo la corrida."
@@ -1326,8 +1498,7 @@ verify_reviewed_head() {
     return 70
   }
   if [ "$local_sha" != "$expected_sha" ] || [ "$remote_sha" != "$expected_sha" ]; then
-    echo "❌ head_changed: el SHA revisado ya no coincide con HEAD local o headRefOid."
-    return 70
+    return 1
   fi
   return 0
 }
@@ -1564,6 +1735,8 @@ verify_distinct_review() {
 wait_for_ci() {
   local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining
 
+  CI_FAILURE_BODY=""
+
   if [ "$CI_POLICY" = "none" ]; then
     echo "⚠️  CI sin checks: política RALPH_CI_POLICY=none explícita; continúo sin esa garantía."
     return 0
@@ -1579,11 +1752,11 @@ wait_for_ci() {
     elif [ "$checks_rc" -eq 1 ]; then
       run_url="$(gh run list --branch "$branch" --limit 1 --json url --jq '.[0].url' 2>/dev/null)"
       if [ -n "$REQUIRED_CHECKS_JSON" ]; then
+        CI_FAILURE_BODY="1. CI obligatorio en rojo: ${REQUIRED_CHECKS_FAILURES:-check sin éxito}; reproducir con la suite en base virgen y corregir (${run_url:-sin URL del run})."
         echo "🔴 CI obligatorio en rojo en PR #$pr: ${REQUIRED_CHECKS_FAILURES:-check sin éxito} (${run_url:-sin URL del run})"
-        gh pr comment "$pr" --body "1. CI obligatorio en rojo: ${REQUIRED_CHECKS_FAILURES:-check sin éxito}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
       else
+        CI_FAILURE_BODY="1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir."
         echo "🔴 CI en rojo en PR #$pr: ${run_url:-sin URL del run}"
-        gh pr comment "$pr" --body "1. CI en rojo: ${run_url:-ver la pestaña Checks del PR}; reproducir con la suite en base virgen y corregir." >/dev/null 2>&1 || true
       fi
       return 1
     else
@@ -1663,9 +1836,10 @@ wait_for_merge() {
 process_issue() {
   local num="$1"
   local branch="${BRANCH_PREFIX}${num}"
-  local rc issue_ctx commits pr round verdict comments prior_work reviewed_sha
+  local rc issue_ctx commits pr round verdict review_body prior_work reviewed_sha
+  local state_status state_phase infra_retries merged_sha ci_ok ci_rc backoff
   local pr_body
-  local infra_retries comments_before comments_after backoff merged_sha ci_ok ci_rc review_rc
+  local review_rc
   local remote_delete_error
 
   CURRENT_ISSUE="$num"
@@ -1677,6 +1851,16 @@ process_issue() {
   # reutilizamos. Recrearla con 'checkout -B' descartaría ese trabajo.
   if git show-ref --verify --quiet "refs/heads/$branch"; then
     checkout_or_fail "$branch" || return 70
+    prior_work="$(git log --oneline "$BASE_BRANCH..$branch" 2>/dev/null)"
+  elif git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    if ! git fetch -q origin "$branch" >/dev/null 2>&1; then
+      echo "❌ No pude traer '$branch' desde origin; detengo la corrida."
+      return 70
+    fi
+    if ! git checkout -b "$branch" "origin/$branch" >/dev/null 2>&1; then
+      echo "❌ No pude crear '$branch' desde origin; detengo la corrida."
+      return 70
+    fi
     prior_work="$(git log --oneline "$BASE_BRANCH..$branch" 2>/dev/null)"
   else
     if ! git checkout -b "$branch" "$BASE_BRANCH" >/dev/null 2>&1; then
@@ -1768,9 +1952,32 @@ $PROMPT_IMPLEMENT"
     echo "♻️  PR #$pr ya existe; voy directo a revisión."
   fi
 
+  load_pr_state "$pr" || return $?
+
   # ---- Fase 2: revisión, hasta MAX_ROUNDS ----
   CURRENT_PHASE="revisión"
   round=1
+  state_status=""
+  state_phase=""
+  review_body=""
+  reviewed_sha=""
+  if [ "$PR_STATE_FOUND" -eq 1 ]; then
+    round="$PR_STATE_ROUND"
+    state_phase="$PR_STATE_PHASE"
+    state_status="$PR_STATE_STATUS"
+    reviewed_sha="$PR_STATE_REVIEWED_SHA"
+    review_body="$PR_STATE_REVIEW_BODY"
+    case "$state_phase" in
+      revisión) CURRENT_PHASE="revisión" ;;
+      corrección) CURRENT_PHASE="corrección" ;;
+      merge) CURRENT_PHASE="merge" ;;
+    esac
+    if [ "$PR_STATE_MERGE_STATUS" = "merged" ]; then
+      echo "✅ PR #$pr ya figura como mergeado en el estado remoto."
+      checkout_or_fail "$BASE_BRANCH" || return 70
+      return 0
+    fi
+  fi
   infra_retries=0
   while [ "$round" -le "$MAX_ROUNDS" ]; do
     update_branch_with_base "$branch" "$pr"
@@ -1780,24 +1987,86 @@ $PROMPT_IMPLEMENT"
     fi
     [ "$rc" -ne 0 ] && return "$rc"
 
-    reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
-      echo "❌ No pude capturar el SHA a revisar; detengo la corrida."
-      return 70
-    }
-    verify_reviewed_head "$pr" "$reviewed_sha"
-    rc=$?
-    [ "$rc" -ne 0 ] && return "$rc"
-
-    echo "🔍 Claude revisa PR #$pr (ronda $round/$MAX_ROUNDS)..."
-    comments_before="$(gh pr view "$pr" --json comments --jq '.comments|length' 2>/dev/null || echo 0)"
-    validate_issue_for_agent "$num" "$pr"
-    rc=$?
-    if [ "$rc" -eq 1 ]; then
-      checkout_or_fail "$BASE_BRANCH" || return 70
-      return 0
+    if [ "$state_status" = "pass" ] || [ "$state_status" = "merge_pending" ]; then
+      reviewed_head_matches "$pr" "$reviewed_sha"
+      rc=$?
+      if [ "$rc" -eq 1 ]; then
+        reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
+          echo "❌ No pude capturar el SHA después de actualizar la base; detengo la corrida."
+          return 70
+        }
+        publish_pr_state "$pr" "$num" "revisión" "$round" "$reviewed_sha" \
+          "reviewing" "open" "" || return $?
+        state_phase="revisión"
+        state_status="reviewing"
+        review_body=""
+      elif [ "$rc" -ne 0 ]; then
+        return "$rc"
+      fi
     fi
-    [ "$rc" -eq 0 ] || return "$rc"
-    run_claude "You are reviewing ONE pull request.
+
+    if [ "$state_status" = "changes_requested" ] || [ "$state_status" = "correction_pending" ]; then
+      if [ "$round" -eq "$MAX_ROUNDS" ]; then
+        echo "🙋 #$num agotó las $MAX_ROUNDS rondas sin PASS. PR #$pr queda abierto para revisión humana."
+        add_label "$pr" "$NEEDS_HUMAN_LABEL"
+        gh pr comment "$pr" --body "🤖 Ralph agotó las $MAX_ROUNDS rondas de revisión sin alcanzar PASS. Sin merge: necesita un humano." >/dev/null 2>&1 || true
+        checkout_or_fail "$BASE_BRANCH" || return 70
+        return 0
+      fi
+      if [ "$state_status" != "correction_pending" ]; then
+        publish_pr_state "$pr" "$num" "corrección" "$round" "$reviewed_sha" \
+          "correction_pending" "open" "$review_body" || return $?
+        state_phase="corrección"
+        state_status="correction_pending"
+      fi
+      validate_issue_for_agent "$num" "$pr"
+      rc=$?
+      if [ "$rc" -eq 1 ]; then
+        checkout_or_fail "$BASE_BRANCH" || return 70
+        return 0
+      fi
+      [ "$rc" -eq 0 ] || return "$rc"
+      run_codex_correction "$pr" "$branch" "$issue_ctx" "$review_body" "$num"
+      rc=$?
+      [ "$rc" -ne 0 ] && return "$rc"
+      round=$((round + 1))
+      reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
+        echo "❌ No pude capturar el SHA después de la corrección; detengo la corrida."
+        return 70
+      }
+      publish_pr_state "$pr" "$num" "revisión" "$round" "$reviewed_sha" \
+        "reviewing" "open" "" || return $?
+      state_phase="revisión"
+      state_status="reviewing"
+      review_body=""
+      continue
+    fi
+
+    if [ "$state_status" = "pass" ] || [ "$state_status" = "merge_pending" ]; then
+      verdict="<verdict>PASS</verdict>"
+    else
+      if [ "$state_status" = "reviewing" ] || [ -z "$reviewed_sha" ]; then
+        reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
+          echo "❌ No pude capturar el SHA a revisar; detengo la corrida."
+          return 70
+        }
+      fi
+      verify_reviewed_head "$pr" "$reviewed_sha"
+      rc=$?
+      [ "$rc" -ne 0 ] && return "$rc"
+      publish_pr_state "$pr" "$num" "revisión" "$round" "$reviewed_sha" \
+        "reviewing" "open" "" || return $?
+      state_phase="revisión"
+      state_status="reviewing"
+      validate_issue_for_agent "$num" "$pr"
+      rc=$?
+      if [ "$rc" -eq 1 ]; then
+        checkout_or_fail "$BASE_BRANCH" || return 70
+        return 0
+      fi
+      [ "$rc" -eq 0 ] || return "$rc"
+      echo "🔍 Claude revisa PR #$pr (ronda $round/$MAX_ROUNDS)..."
+      run_claude "You are reviewing ONE pull request.
 
 Pull request: #$pr   (inspect it with: gh pr view $pr, gh pr diff $pr)
 Branch under review (already checked out): $branch
@@ -1808,17 +2077,30 @@ $issue_ctx
 
 ## Review instructions
 $PROMPT_REVIEW"
-    rc=$?
-
-    # Fail-closed: sin PASS explícito y bien formado, no se mergea.
-    verdict="$(printf '%s\n' "$ADAPTER_FINAL_MESSAGE" | tail -n 1 | \
-      grep -xE '<verdict>(PASS|CHANGES_REQUESTED)</verdict>' || true)"
-
-    if [ "$rc" -ne 0 ]; then
-      if [ "$rc" -ne 8 ] && [ "$rc" -ne 9 ]; then
+      rc=$?
+      if [ "$rc" -ne 0 ] && [ "$rc" -ne 8 ] && [ "$rc" -ne 9 ]; then
         echo "❌ Claude terminó con rc=$rc; #$num queda abierto sin merge."
       fi
-      return "$rc"
+      [ "$rc" -ne 0 ] && return "$rc"
+      review_body="$ADAPTER_FINAL_MESSAGE"
+      # Fail-closed: sin PASS explícito y bien formado, no se mergea.
+      verdict="$(printf '%s\n' "$review_body" | tail -n 1 | \
+        grep -xE '<verdict>(PASS|CHANGES_REQUESTED)</verdict>' || true)"
+      if [ -z "$verdict" ] && [ "$infra_retries" -lt "$MAX_INFRA_RETRIES" ]; then
+        infra_retries=$((infra_retries + 1))
+        backoff=$((60 * 3 ** (infra_retries - 1)))
+        echo "🔁 El revisor no dejó un veredicto válido; reintento $infra_retries/$MAX_INFRA_RETRIES sin consumir ronda."
+        sleep "$backoff"
+        continue
+      fi
+      if [ "$verdict" = "<verdict>PASS</verdict>" ]; then
+        state_status="pass"
+      else
+        verdict="<verdict>CHANGES_REQUESTED</verdict>"
+        state_status="changes_requested"
+      fi
+      publish_pr_state "$pr" "$num" "revisión" "$round" "$reviewed_sha" \
+        "$state_status" "open" "$review_body" || return $?
     fi
     # PASS con CI en rojo no mergea: wait_for_ci deja el ítem en el PR y se
     # cae a la Fase 3 como con cualquier CHANGES_REQUESTED.
@@ -1844,6 +2126,11 @@ $PROMPT_REVIEW"
       elif [ "$ci_rc" -eq 2 ]; then
         checkout_or_fail "$BASE_BRANCH" || return 70
         return 0
+      elif [ "$ci_rc" -eq 1 ]; then
+        state_status="changes_requested"
+        review_body="$CI_FAILURE_BODY"
+        publish_pr_state "$pr" "$num" "revisión" "$round" "$reviewed_sha" \
+          "$state_status" "open" "$review_body" || return $?
       fi
     fi
     if [ "$ci_ok" -eq 1 ]; then
@@ -1855,6 +2142,8 @@ $PROMPT_REVIEW"
       rc=$?
       [ "$rc" -ne 0 ] && return "$rc"
       echo "🟢 CI verde. Mergeo PR #$pr."
+      publish_pr_state "$pr" "$num" "merge" "$round" "$reviewed_sha" \
+        "merge_pending" "open" "$review_body" || return $?
       checkout_or_fail "$BASE_BRANCH" || return 70
       if gh pr merge "$pr" "$MERGE_METHOD" \
           --match-head-commit "$reviewed_sha" >/dev/null 2>&1; then
@@ -1887,6 +2176,8 @@ $PROMPT_REVIEW"
           echo "❌ No pude borrar la rama local '$branch' después de confirmar el merge; detengo la corrida."
           return 70
         fi
+        publish_pr_state "$pr" "$num" "merge" "$round" "$reviewed_sha" \
+          "merged" "merged" "$review_body" || return $?
         # La base local debe traer el merge: los issues dependientes heredan ese código.
         if ! git pull --ff-only origin "$BASE_BRANCH" >/dev/null 2>&1; then
           echo "❌ No pude actualizar '$BASE_BRANCH' local con --ff-only; conservo el estado y detengo la corrida."
@@ -1913,84 +2204,27 @@ $PROMPT_REVIEW"
         fi
       else
         echo "⚠️  El merge de PR #$pr falló (¿conflictos, o checks pendientes?). Queda abierto."
+        publish_pr_state "$pr" "$num" "merge" "$round" "$reviewed_sha" \
+          "merge_failed" "failed" "$review_body" || return $?
         add_label "$pr" "$NEEDS_HUMAN_LABEL"
       fi
       return 0
     fi
 
-    # Un revisor que no llegó a correr (529, red caída, crash) NO es un rechazo:
-    # gastar una ronda mandaría a Codex a "corregir" contra una revisión que no
-    # existe. La señal de que hubo revisión real es que dejó comentario.
-    if [ -z "$verdict" ]; then
-      comments_after="$(gh pr view "$pr" --json comments --jq '.comments|length' 2>/dev/null || echo 0)"
-      if [ "$comments_after" -le "$comments_before" ]; then
-        infra_retries=$((infra_retries + 1))
-        if [ "$infra_retries" -gt "$MAX_INFRA_RETRIES" ]; then
-          echo "⚠️  El revisor no arrancó en $MAX_INFRA_RETRIES intentos (fallo de infraestructura, no del código)."
-          echo "🔸 #$num queda sin revisar; PR #$pr abierto y SIN label: un rerun lo retoma."
-          checkout_or_fail "$BASE_BRANCH" || return 70
-          return 0
-        fi
-        backoff=$((60 * 3 ** (infra_retries - 1)))
-        echo "🔁 El revisor no dejó veredicto ni comentario: lo trato como fallo de infraestructura."
-        echo "   Reintento $infra_retries/$MAX_INFRA_RETRIES en $((backoff / 60)) min, sin consumir ronda."
-        sleep "$backoff"
-        continue
+    if [ "$state_status" = "changes_requested" ]; then
+      if [ "$round" -eq "$MAX_ROUNDS" ]; then
+        echo "🙋 #$num agotó las $MAX_ROUNDS rondas sin PASS. PR #$pr queda abierto para revisión humana."
+        add_label "$pr" "$NEEDS_HUMAN_LABEL"
+        gh pr comment "$pr" --body "🤖 Ralph agotó las $MAX_ROUNDS rondas de revisión sin alcanzar PASS. Sin merge: necesita un humano." >/dev/null 2>&1 || true
+        checkout_or_fail "$BASE_BRANCH" || return 70
+        return 0
       fi
-      echo "⚠️  Claude comentó pero no emitió veredicto válido; lo trato como CHANGES_REQUESTED."
+      publish_pr_state "$pr" "$num" "corrección" "$round" "$reviewed_sha" \
+        "correction_pending" "open" "$review_body" || return $?
+      state_phase="corrección"
+      state_status="correction_pending"
+      continue
     fi
-
-    if [ "$round" -eq "$MAX_ROUNDS" ]; then
-      echo "🙋 #$num agotó las $MAX_ROUNDS rondas sin PASS. PR #$pr queda abierto para revisión humana."
-      add_label "$pr" "$NEEDS_HUMAN_LABEL"
-      gh pr comment "$pr" --body "🤖 Ralph agotó las $MAX_ROUNDS rondas de revisión sin alcanzar PASS. Sin merge: necesita un humano." >/dev/null 2>&1 || true
-      checkout_or_fail "$BASE_BRANCH" || return 70
-      return 0
-    fi
-
-    # ---- Fase 3: Codex atiende los comentarios ----
-    CURRENT_PHASE="corrección"
-    echo "✏️  Codex corrige PR #$pr..."
-    comments="$(gh pr view "$pr" --json comments --jq '.comments[-1] | "### \(.author.login) escribió:\n\n\(.body)"' 2>/dev/null)"
-    validate_issue_for_agent "$num" "$pr"
-    rc=$?
-    if [ "$rc" -eq 1 ]; then
-      checkout_or_fail "$BASE_BRANCH" || return 70
-      return 0
-    fi
-    [ "$rc" -eq 0 ] || return "$rc"
-    run_codex "Your pull request was reviewed and did not pass.
-
-Pull request: #$pr
-Branch (already checked out, stay on it): $branch
-Base branch:                              $BASE_BRANCH
-
-## The GitHub issue this PR must satisfy
-$issue_ctx
-
-## The review you must address
-$comments
-
-## Working instructions
-$PROMPT_REVISE"
-    rc=$?
-    if [ "$rc" -ge 128 ]; then
-      echo "❌ Codex terminó por señal (rc=$rc): fallo de infraestructura del issue #$num."
-    fi
-    [ "$rc" -ne 0 ] && return "$rc"
-
-    # Las correcciones también deben llegar commiteadas por Codex; preservar
-    # cambios sin commit es preferible a inventar historia o perderlos.
-    if [ -n "$(git status --porcelain)" ]; then
-      echo "❌ Codex dejó cambios sin commitear; conservo el estado y detengo la corrida."
-      return 70
-    fi
-    if ! git push -q origin "$branch" >/dev/null 2>&1; then
-      echo "❌ No pude publicar $branch; conservo el estado y detengo la corrida."
-      return 70
-    fi
-
-    round=$((round + 1))
   done
 
   checkout_or_fail "$BASE_BRANCH" || return 70

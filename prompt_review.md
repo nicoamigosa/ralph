@@ -60,18 +60,18 @@ not emit PASS either.
 
 # 4. Deliver the review
 
-Post exactly ONE comment on the pull request with `gh pr comment`. Use a comment,
-not `gh pr review` — GitHub refuses approve and request-changes on a PR opened by
-the same account, so a review verb will fail.
+Do not publish a comment yourself. Return the complete review body in your final
+result; the orchestrator publishes that exact body and records its remote state.
+Do not use `gh pr comment` or `gh pr review`.
 
-The comment must be precise, concise and actionable. Its reader is another agent
+The review body must be precise, concise and actionable. Its reader is another agent
 with no memory of your reasoning, so:
 
 - One numbered item per finding, ordered most blocking first.
 - Each item names the file and line, states what is wrong in one sentence, and
   states what must change. No essays, no restating the diff back.
 - Never write "consider" or "maybe" — if it is not blocking, leave it out.
-- If everything passes, the comment is a short approval that names the gates you
+- If everything passes, the body is a short approval that names the gates you
   ran and their result.
 
 # 5. Verdict

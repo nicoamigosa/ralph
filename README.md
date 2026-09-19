@@ -4,7 +4,7 @@ Resuelve issues de GitHub sin supervisión, con dos agentes y un gate real:
 
 ```
 Codex (gpt-5.6-luna, xhigh)  implementa con la skill tdd  →  abre PR
-Claude (opus)                revisa el PR                 →  PASS ? merge : comentarios
+Claude (opus)                devuelve la revisión         →  PASS ? merge : Codex corrige
 Codex                        corrige sobre la misma rama  →  Claude vuelve a revisar
 ```
 
@@ -229,14 +229,11 @@ stdout real de Codex cortado a mitad del evento turn.completed.
 
 ## Fallos del revisor vs. rechazos
 
-Un revisor que **no llegó a correr** (API 529, red caída, crash) no es un
-rechazo. Si Claude no deja veredicto **ni comentario**, el loop lo trata como
-fallo de infraestructura: reintenta con backoff (1, 3, 9 min) **sin consumir
-ronda**. Agotados los reintentos, el issue queda sin revisar y su PR abierto y
-**sin label**, para que un rerun lo retome.
-
-Sin esto, una caída transitoria del proveedor quema las 3 rondas y manda a Codex
-a "corregir" contra una revisión que nunca existió.
+Claude no publica comentarios: si la ejecución falla antes de devolver su
+cuerpo, el estado remoto queda en `phase=revisión`, con la misma ronda y SHA,
+para que el siguiente intento retome esa revisión sin consumir presupuesto.
+Una respuesta válida se publica una sola vez como el cuerpo exacto; la ronda
+sólo avanza después de que Codex completa la corrección.
 
 ## Topes de uso
 
@@ -344,15 +341,24 @@ ninguno fija ni verifica la versión que se ejecuta.
 
 ## Notas de diseño
 
-- **Claude comenta, el script mergea ("modo comentario").** GitHub rechaza
-  `approve` y `request-changes` sobre un PR abierto por la misma cuenta, así
-  que el revisor usa `gh pr comment` y el veredicto viaja en la última línea de
-  su salida. El merge lo ejecuta el script sólo ante un `PASS` bien formado y,
-  cuando existe `RALPH_REVIEW_IDENTITY`, además exige la aprobación o el check
-  de esa identidad sobre el SHA revisado. El ruleset activo y sin bypass para
-  la identidad de merge es una condición independiente del veredicto. Sin una
-  identidad revisora distinta, este modo **no equivale a una required review de
-  GitHub**: el servidor no garantiza el PASS, sólo el script.
+- **Claude devuelve, Ralph publica y mergea.** Claude no usa `gh pr comment`:
+  su resultado final contiene el cuerpo completo de la revisión y Ralph lo
+  publica exactamente con `gh pr comment`. Después deja otro comentario remoto
+  marcado `<!-- ralph-state -->` con el ID devuelto, PR, fase, ronda, SHA
+  revisado, resultado y estado de merge. La reanudación reconstruye el último
+  registro marcado desde GitHub, por lo que un comentario ajeno posterior no
+  reemplaza la revisión que recibe Codex.
+- El registro remoto usa eventos inmutables: antes de cada agente guarda la fase
+  y la ronda actual, y sólo avanza la ronda después de completar la corrección.
+  Un tope, timeout o reinicio retoma la misma fase, ronda y SHA. El merge se
+  publica como `merge_pending` y `merged`, y sólo ante un `PASS` bien formado.
+  Este modo **no equivale a una required review de GitHub**: el servidor no
+  garantiza el PASS, sólo el script. Para que lo garantice hace falta una
+  identidad de revisión/merge distinta del implementador y un ruleset sin
+  bypass en la base; mientras no exista, el ruleset sólo puede exigir status
+  checks.
+- **El issue lo cierra el script, no el agente.** `Closes #N` sólo autocierra
+  cuando el PR va contra la rama por defecto; acá la base es configurable.
 - **El cierre depende de la política.** Con `RALPH_CLOSE_POLICY=verified`, el
   script cierra sólo después de PASS, merge confirmado y un `Closes #N` en el
   cuerpo del PR. Un `Part of #N`, o cualquier falta de esa declaración, deja el
