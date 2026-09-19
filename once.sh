@@ -483,6 +483,10 @@ check_base_protection() {
     PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }ruleset activo que cubra '$branch'"
   else
     PROTECTION_RULESET_IDS="$(jq -r 'map(.id // .name // empty) | join(",")' <<<"$active_rulesets")"
+    if jq -e 'any(.[]; ((.bypass_actors? // null) | type != "array"))' \
+        <<<"$active_rulesets" >/dev/null; then
+      PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }el ruleset activo no expone bypass_actors como array; dato insuficiente para verificar ausencia de bypass"
+    fi
   fi
 
   required_checks="$(jq -c '[.[] |
@@ -501,7 +505,7 @@ check_base_protection() {
 
   if [ -n "$REVIEW_IDENTITY" ] && [ "$REVIEW_IDENTITY" != "$MERGE_IDENTITY" ]; then
     if jq -e 'any(.[]; any(.rules[]?;
-        .type == "required_pull_request_reviews" and
+        .type == "pull_request" and
         ((.parameters.required_approving_review_count // 0) > 0)))' \
         <<<"$active_rulesets" >/dev/null; then
       review_rule=1
@@ -515,12 +519,11 @@ check_base_protection() {
   fi
 
   if [ -n "$MERGE_IDENTITY" ] && [ "$(jq 'length' <<<"$active_rulesets")" -gt 0 ]; then
-    if jq -e --arg login "$MERGE_IDENTITY" --arg id "$identity_id" '
+    if jq -e --arg id "$identity_id" '
         any(.[]; any(.bypass_actors[]?;
           ((.bypass_mode // "always") != "never") and
           ((.actor_type // "") == "User") and
-          ((.actor_name // "") == $login or
-            ($id != "" and ((.actor_id // "") | tostring) == $id))))' \
+          ($id != "" and ((.actor_id // "") | tostring) == $id)))' \
         <<<"$active_rulesets" >/dev/null; then
       PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }la identidad de merge '$MERGE_IDENTITY' tiene bypass"
     fi
@@ -528,8 +531,7 @@ check_base_protection() {
         any(.[]; any(.bypass_actors[]?;
           ((.bypass_mode // "always") != "never") and
           (((.actor_type // "") != "User") or
-            (((.actor_name // "") == "") and
-              ($id == "" or .actor_id == null)))))' \
+            ($id == "" or .actor_id == null))))' \
         <<<"$active_rulesets" >/dev/null; then
       PROTECTION_FAILURES="${PROTECTION_FAILURES}${PROTECTION_FAILURES:+; }hay un bypass_actor que no se puede demostrar como un usuario distinto de la identidad de merge"
     fi

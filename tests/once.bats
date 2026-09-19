@@ -175,7 +175,21 @@ load test_helper
   ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
 }
 
-@test "preflight checks actor_name when the merge user id cannot be resolved" {
+@test "preflight fails closed when an active ruleset omits bypass actors" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_PROTECTION=1
+  export RALPH_CI_POLICY=none
+  export FAKE_RULESETS_FILE="$PROJECT_ROOT/tests/fixtures/rulesets-missing-bypass-actors.json"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"bypass_actors"* ]]
+  [[ "$output" == *"dato insuficiente"* ]]
+  ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight fails closed when the merge user id cannot be resolved" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export RALPH_REQUIRE_PROTECTION=1
   export RALPH_MERGE_IDENTITY=ralph-bot
@@ -185,7 +199,8 @@ load test_helper
   run_once
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"identidad de merge 'ralph-bot' tiene bypass"* ]]
+  [[ "$output" == *"hay un bypass_actor que no se puede demostrar como un usuario distinto"* ]]
+  [[ "$output" != *"identidad de merge 'ralph-bot' tiene bypass"* ]]
   ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
 }
 
