@@ -1,0 +1,26 @@
+[
+  {
+    "id": 15,
+    "name": "ralph-main-review-check",
+    "target": "branch",
+    "enforcement": "active",
+    "conditions": {
+      "ref_name": {
+        "include": ["refs/heads/main"],
+        "exclude": []
+      }
+    },
+    "rules": [
+      {
+        "type": "required_status_checks",
+        "parameters": {
+          "required_status_checks": [
+            {"context": "CI"},
+            {"context": "ralph-review"}
+          ]
+        }
+      }
+    ],
+    "bypass_actors": []
+  }
+]

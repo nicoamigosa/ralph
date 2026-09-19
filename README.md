@@ -37,6 +37,17 @@ resultados ausentes no habilitan el merge. Los checks exitosos adicionales no
 reemplazan uno obligatorio. Si no se declara la lista, todos los resultados del
 SHA deben ser exitosos y al menos uno debe existir.
 
+La protección de la base también es `required` por defecto:
+`RALPH_REQUIRE_PROTECTION=1` consulta los rulesets activos de la rama base,
+comprueba que cubran los checks de `RALPH_REQUIRED_CHECKS_JSON` y rechaza
+cualquier bypass para la identidad que mergea. Si se configura una identidad
+revisora distinta con `RALPH_REVIEW_IDENTITY`, el ruleset debe exigir una
+aprobación o el check `ralph-review`; antes del merge, esa aprobación o check
+debe corresponder al SHA revisado y a esa identidad. `RALPH_REQUIRE_PROTECTION=0`
+queda reservado al sandbox de pruebas, avisa explícitamente y se registra en
+`RUN_DIR/summary.json`. La ausencia de `--auto` no desactiva esta protección:
+el merge inmediato sigue respetando las reglas aplicables del servidor.
+
 ## Es agnóstico al proyecto
 
 Instalá una release etiquetada como `ralph/` en cualquier repo con remoto de
@@ -270,6 +281,9 @@ Todo por entorno, todo opcional:
 | `RALPH_CI_POLICY` | `required` |
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
+| `RALPH_REQUIRE_PROTECTION` | `1` |
+| `RALPH_MERGE_IDENTITY` | vacío (login de `gh api user`) |
+| `RALPH_REVIEW_IDENTITY` | vacío (sin identidad revisora separada) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 | `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |
@@ -306,12 +320,10 @@ ninguno fija ni verifica la versión que se ejecuta.
 - **Claude comenta, el script mergea ("modo comentario").** GitHub rechaza
   `approve` y `request-changes` sobre un PR abierto por la misma cuenta, así
   que el revisor usa `gh pr comment` y el veredicto viaja en la última línea de
-  su salida. El merge lo ejecuta el script, y sólo ante un `PASS` bien formado.
-  Este modo **no equivale a una required review de GitHub**: el servidor no
-  garantiza el PASS, sólo el script. Para que lo garantice hace falta una
-  identidad de revisión/merge distinta del implementador y un ruleset sin
-  bypass en la base; mientras no exista, el ruleset sólo puede exigir status
-  checks.
+  su salida. El merge lo ejecuta el script sólo ante un `PASS` bien formado y,
+  cuando existe `RALPH_REVIEW_IDENTITY`, además exige la aprobación o el check
+  de esa identidad sobre el SHA revisado. El ruleset activo y sin bypass para la
+  identidad de merge es una condición independiente del veredicto.
 - **El issue lo cierra el script, no el agente.** `Closes #N` sólo autocierra
   cuando el PR va contra la rama por defecto; acá la base es configurable.
 - **Codex corre con `network_access=true`** dentro del sandbox `workspace-write`,

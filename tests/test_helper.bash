@@ -60,6 +60,9 @@ setup() {
   export FAKE_SLEEP_LOG="$TEST_ROOT/sleep.log"
   export FAKE_MKTEMP_LOG="$TEST_ROOT/mktemp.log"
   export FAKE_API_LOG="$TEST_ROOT/api.log"
+  # The GitHub fixture is a sandbox without branch rulesets; protection-specific
+  # tests opt back into the production default explicitly.
+  export RALPH_REQUIRE_PROTECTION=0
   unset FAKE_CODEX_SIGNAL_GROUP FAKE_CODEX_SIGNAL_MARKER \
     FAKE_CODEX_CHILD_PID_FILE FAKE_CODEX_CHILD_SECONDS FAKE_CODEX_WAIT_FILE \
     FAKE_CODEX_PID_FILE FAKE_PS_DELAY_AGENT_PGID \

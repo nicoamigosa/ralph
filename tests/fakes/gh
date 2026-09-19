@@ -169,6 +169,14 @@ case "${1:-}" in
     mutation "$*"
     ;;
   api)
+    if [ "${2:-}" = "user" ]; then
+      if [ -n "${FAKE_MERGE_USER_JSON:-}" ]; then
+        printf '%s\n' "$FAKE_MERGE_USER_JSON"
+      else
+        printf '%s\n' '{"login":"ralph-bot","id":1}'
+      fi
+      exit 0
+    fi
     api_endpoint=""
     fake_ci_result=""
     fake_sha="$($RALPH_TEST_REAL_GIT rev-parse HEAD)"
@@ -184,6 +192,16 @@ case "${1:-}" in
       : > "${GH_MUTATION_LOG}.head-changed"
     fi
     case "$api_endpoint" in
+      */pulls/*/reviews)
+        printf '%s\n' "${FAKE_REVIEWS_JSON:-[]}"
+        ;;
+      */rulesets*)
+        if [ -n "${FAKE_RULESETS_FILE:-}" ]; then
+          cat "$FAKE_RULESETS_FILE"
+        else
+          printf '%s\n' "${FAKE_RULESETS_JSON:-[]}"
+        fi
+        ;;
       */check-runs)
         if [ -n "${FAKE_CHECK_RUNS_JSON+x}" ]; then
           printf '{"check_runs":%s}\n' "$FAKE_CHECK_RUNS_JSON"

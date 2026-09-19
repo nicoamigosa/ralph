@@ -1,0 +1,30 @@
+[
+  {
+    "id": 13,
+    "name": "ralph-main-bypass",
+    "target": "branch",
+    "enforcement": "active",
+    "conditions": {
+      "ref_name": {
+        "include": ["refs/heads/main"],
+        "exclude": []
+      }
+    },
+    "rules": [
+      {
+        "type": "required_status_checks",
+        "parameters": {
+          "required_status_checks": [{"context": "CI"}]
+        }
+      }
+    ],
+    "bypass_actors": [
+      {
+        "actor_id": 1,
+        "actor_name": "ralph-bot",
+        "actor_type": "User",
+        "bypass_mode": "always"
+      }
+    ]
+  }
+]
