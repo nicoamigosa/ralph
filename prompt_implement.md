@@ -94,9 +94,9 @@ Commit on your branch. The message must state:
 
 Push your branch and open a PR against the base branch you were given.
 
-The PR body MUST contain, in this order:
+The PR body MUST contain, in this order, the issue-link requirement from the
+close policy passed by Ralph below, followed by:
 
-- `Closes #<issue number>`
 - `## What changed` — the shape of the change, not a file listing
 - `## Seams under test` — the seams you chose, and why those
 - `## How I verified` — the exact commands you ran and their result

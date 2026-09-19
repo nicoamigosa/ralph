@@ -17,6 +17,7 @@
       "number": 101,
       "head": "ralph/issue-1",
       "available_before_codex": false,
+      "body": "Closes #1",
       "labels": [],
       "comments": [],
       "mergeCommit": {"oid": "1111111111111111111111111111111111111111"}

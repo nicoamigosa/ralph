@@ -307,6 +307,7 @@ Todo por entorno, todo opcional:
 | `RALPH_CI_POLICY` | `required` |
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
 | `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
+| `RALPH_CLOSE_POLICY` | `verified` (`never` deja los issues abiertos) |
 | `RALPH_REQUIRE_PROTECTION` | `1` |
 | `RALPH_MERGE_IDENTITY` | vacío (login de `gh api user`) |
 | `RALPH_REVIEW_IDENTITY` | vacío (sin identidad revisora separada) |
@@ -348,10 +349,18 @@ ninguno fija ni verifica la versión que se ejecuta.
   que el revisor usa `gh pr comment` y el veredicto viaja en la última línea de
   su salida. El merge lo ejecuta el script sólo ante un `PASS` bien formado y,
   cuando existe `RALPH_REVIEW_IDENTITY`, además exige la aprobación o el check
-  de esa identidad sobre el SHA revisado. El ruleset activo y sin bypass para la
-  identidad de merge es una condición independiente del veredicto.
-- **El issue lo cierra el script, no el agente.** `Closes #N` sólo autocierra
-  cuando el PR va contra la rama por defecto; acá la base es configurable.
+  de esa identidad sobre el SHA revisado. El ruleset activo y sin bypass para
+  la identidad de merge es una condición independiente del veredicto. Sin una
+  identidad revisora distinta, este modo **no equivale a una required review de
+  GitHub**: el servidor no garantiza el PASS, sólo el script.
+- **El cierre depende de la política.** Con `RALPH_CLOSE_POLICY=verified`, el
+  script cierra sólo después de PASS, merge confirmado y un `Closes #N` en el
+  cuerpo del PR. Un `Part of #N`, o cualquier falta de esa declaración, deja el
+  issue abierto y comenta el merge. Con `RALPH_CLOSE_POLICY=never`, nunca usa
+  `gh issue close`, aunque el PR contenga `Closes #N`. El issue lo cierra el
+  script, no el agente; el autocierre nativo de GitHub de `Closes #N` sólo
+  aplica cuando el PR va contra la rama por defecto, pero `verified` hace
+  explícito el cierre tras la verificación.
 - **Codex corre con `network_access=true`** dentro del sandbox `workspace-write`,
   que es lo mínimo que necesita para `git push` y `gh pr create`.
 - **La rama se pone al día con la base antes de cada revisión**, con `git merge`

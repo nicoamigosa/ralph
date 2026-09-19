@@ -183,6 +183,12 @@ case "${1:-}" in
           merge_state
         elif printf '%s\n' "$*" | grep -q ' --json mergeCommit'; then
           fixture_jq --argjson number "$number" "$pull_request_filter | .mergeCommit"
+        elif printf '%s\n' "$*" | grep -q ' --json body'; then
+          if [ -n "${FAKE_PR_BODY+x}" ]; then
+            printf '%s\n' "$FAKE_PR_BODY"
+          else
+            fixture_jq --argjson number "$number" "$pull_request_filter | .body // \"\""
+          fi
         else
           fixture_jq --argjson number "$number" "$pull_request_filter"
         fi
