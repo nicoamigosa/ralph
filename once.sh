@@ -1369,6 +1369,7 @@ process_issue() {
   local branch="${BRANCH_PREFIX}${num}"
   local rc issue_ctx commits pr round verdict comments prior_work reviewed_sha
   local infra_retries comments_before comments_after backoff merged_sha ci_ok ci_rc
+  local remote_delete_error
 
   CURRENT_ISSUE="$num"
   CURRENT_PHASE="preparación"
@@ -1540,10 +1541,16 @@ $PROMPT_REVIEW"
           return "$rc"
         fi
         merged_sha="$MERGED_SHA"
-        if ! gh api --method DELETE \
-            "repos/$REPO_SLUG/git/refs/heads/$branch" >/dev/null 2>&1; then
-          echo "❌ No pude borrar la rama remota '$branch' después de confirmar el merge; detengo la corrida."
-          return 70
+        remote_delete_error=""
+        if ! remote_delete_error="$(gh api --method DELETE \
+            "repos/$REPO_SLUG/git/refs/heads/$branch" 2>&1)"; then
+          case "$remote_delete_error" in
+            *"Reference does not exist"*"HTTP 422"*) : ;;
+            *)
+              echo "❌ No pude borrar la rama remota '$branch' después de confirmar el merge; detengo la corrida."
+              return 70
+              ;;
+          esac
         fi
         if ! git branch -D "$branch" >/dev/null 2>&1; then
           echo "❌ No pude borrar la rama local '$branch' después de confirmar el merge; detengo la corrida."

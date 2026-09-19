@@ -748,6 +748,24 @@ load test_helper
   grep -Fq 'post_merge 1111111111111111111111111111111111111111' "$GH_MUTATION_LOG"
 }
 
+@test "rama remota ya borrada tras MERGED no impide limpieza ni cierre" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_MERGE_STATES=MERGED
+  export FAKE_MERGE_QUERY_COUNT_FILE="$TEST_ROOT/merge-queries"
+  export FAKE_REMOTE_DELETE_422=1
+  export RALPH_POST_MERGE_CHECK="$PROJECT_ROOT/tests/fakes/post-merge-check"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  grep -q '^api --method DELETE ' "$FAKE_API_LOG"
+  grep -Fq 'git branch -D ralph/issue-1' "$GH_MUTATION_LOG"
+  grep -Fq 'post_merge 1111111111111111111111111111111111111111' "$GH_MUTATION_LOG"
+  grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+}
+
 @test "merge encolado: no cerrar issue ni borrar rama" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/two-issues.json"
   export FAKE_CODEX_CREATE_PR=1

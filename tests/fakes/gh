@@ -269,6 +269,14 @@ case "${1:-}" in
         fi
         printf '[]\n'
         ;;
+      */git/refs/heads/*)
+        if [ "${FAKE_REMOTE_DELETE_422:-0}" = "1" ] &&
+           [ "${2:-}" = "--method" ] && [ "${3:-}" = "DELETE" ]; then
+          printf '%s\n' 'gh: Reference does not exist (HTTP 422)' >&2
+          exit 1
+        fi
+        mutation "$*"
+        ;;
       *)
         mutation "$*"
         ;;

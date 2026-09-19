@@ -43,6 +43,9 @@ se configura con `RALPH_MERGE_TIMEOUT_SECONDS`. Si el PR queda encolado hasta
 vencerlo, registra `merge_pending`, conserva ramas y issue, y detiene la corrida
 por defecto; `RALPH_MERGE_PENDING_POLICY=continue` permite seguir con otros
 issues independientes.
+Si GitHub ya borró la ref remota de la rama al completar el merge, Ralph la
+considera eliminada y continúa con el borrado local, el hook post-merge y el
+cierre del issue.
 
 ## Es agnóstico al proyecto
 
