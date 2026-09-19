@@ -157,6 +157,11 @@ REQUIRE_PROTECTION="${RALPH_REQUIRE_PROTECTION:-1}"
 MERGE_IDENTITY="${RALPH_MERGE_IDENTITY:-}"
 REVIEW_IDENTITY="${RALPH_REVIEW_IDENTITY:-}"
 DRY_RUN="${RALPH_DRY_RUN:-0}"
+AGENT_TIMEOUT_SECONDS="${RALPH_AGENT_TIMEOUT_SECONDS:-1800}"
+LOCK_REF="${RALPH_LOCK_REF:-refs/ralph/lock}"
+LOCK_TTL_SECONDS="${RALPH_LOCK_TTL_SECONDS:-}"
+LOCK_HEARTBEAT_SECONDS="${RALPH_LOCK_HEARTBEAT_SECONDS:-}"
+LOCK_HOST="${RALPH_LOCK_HOST:-$(uname -n 2>/dev/null || printf '%s' unknown)}"
 CLOSE_POLICY="${RALPH_CLOSE_POLICY:-verified}"
 
 CHECKPOINT_FILE="${RALPH_CHECKPOINT_FILE:-$SCRIPT_DIR/last_run.md}"
@@ -217,6 +222,17 @@ CURRENT_AGENT_ERR_FIFO=""
 CURRENT_TEE_PID=""
 CURRENT_TEE_ERR_PID=""
 SIGNAL_EXITING=0
+LOCK_HELD=0
+LOCK_COMMIT=""
+LOCK_STARTED_AT=""
+LOCK_NEXT_HEARTBEAT_MONOTONIC=""
+LOCK_STATE="missing"
+LOCK_REMOTE_OID=""
+LOCK_REMOTE_HOST=""
+LOCK_REMOTE_PID=""
+LOCK_REMOTE_STARTED_AT=""
+LOCK_REMOTE_HEARTBEAT_AT=""
+LOCK_TREE=""
 
 process_group_for_pid() {
   ps -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]'
@@ -329,6 +345,7 @@ handle_signal() {
 
 cleanup_on_exit() {
   [ "$SIGNAL_EXITING" -eq 1 ] || terminate_agent_processes
+  release_remote_lock
   rm -f "$AGENT_LOG" "$LAST_MSG"
   [ -n "$CURRENT_AGENT_FIFO" ] && rm -f "$CURRENT_AGENT_FIFO"
   [ -n "$CURRENT_AGENT_ERR_FIFO" ] && rm -f "$CURRENT_AGENT_ERR_FIFO"
@@ -400,6 +417,25 @@ case "$DEADLINE_EPOCH" in
   *[!0-9]*) fail "RALPH_DEADLINE_EPOCH debe ser un epoch entero no negativo." ;;
   *) ;;
 esac
+case "$AGENT_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) fail "RALPH_AGENT_TIMEOUT_SECONDS debe ser un entero positivo." ;;
+esac
+[ "$AGENT_TIMEOUT_SECONDS" -gt 0 ] || fail "RALPH_AGENT_TIMEOUT_SECONDS debe ser un entero positivo."
+if [ -z "$LOCK_TTL_SECONDS" ]; then
+  LOCK_TTL_SECONDS=$((AGENT_TIMEOUT_SECONDS * 2))
+fi
+case "$LOCK_TTL_SECONDS" in
+  ''|*[!0-9]*) fail "RALPH_LOCK_TTL_SECONDS debe ser un entero positivo." ;;
+esac
+[ "$LOCK_TTL_SECONDS" -gt 0 ] || fail "RALPH_LOCK_TTL_SECONDS debe ser un entero positivo."
+if [ -z "$LOCK_HEARTBEAT_SECONDS" ]; then
+  LOCK_HEARTBEAT_SECONDS=$((LOCK_TTL_SECONDS / 2))
+  [ "$LOCK_HEARTBEAT_SECONDS" -gt 0 ] || LOCK_HEARTBEAT_SECONDS=1
+fi
+case "$LOCK_HEARTBEAT_SECONDS" in
+  ''|*[!0-9]*) fail "RALPH_LOCK_HEARTBEAT_SECONDS debe ser un entero positivo." ;;
+esac
+[ "$LOCK_HEARTBEAT_SECONDS" -gt 0 ] || fail "RALPH_LOCK_HEARTBEAT_SECONDS debe ser un entero positivo."
 
 load_prompt() {
   local name="$1" common_prompt local_prompt
@@ -441,6 +477,170 @@ repo_host() {
       printf '%s\n' "github.com"
       ;;
   esac
+}
+
+lock_field() {
+  local field="$1"
+  awk -F': ' -v wanted="$field" '$1 == wanted {print substr($0, length(wanted) + 3); exit}'
+}
+
+lock_remote_oid() {
+  git ls-remote origin "$LOCK_REF" 2>/dev/null | awk 'NR == 1 {print $1; exit}'
+}
+
+lock_epoch_now() {
+  printf '%(%s)T\n' -1
+}
+
+lock_read_metadata() {
+  local oid="$1" body
+  if ! git cat-file -e "$oid^{commit}" 2>/dev/null; then
+    git fetch --no-write-fetch-head -q origin "$LOCK_REF" >/dev/null 2>&1 || return 70
+  fi
+  body="$(git show -s --format=%B "$oid" 2>/dev/null)" || return 70
+  case "$body" in
+    "ralph-lock: v1"$'\n'*) ;;
+    *) return 70 ;;
+  esac
+  LOCK_REMOTE_HOST="$(printf '%s\n' "$body" | lock_field host)"
+  LOCK_REMOTE_PID="$(printf '%s\n' "$body" | lock_field pid)"
+  LOCK_REMOTE_STARTED_AT="$(printf '%s\n' "$body" | lock_field started_at)"
+  LOCK_REMOTE_HEARTBEAT_AT="$(printf '%s\n' "$body" | lock_field heartbeat_at)"
+  case "$LOCK_REMOTE_HOST" in
+    '') return 70 ;;
+  esac
+  case "$LOCK_REMOTE_PID:$LOCK_REMOTE_STARTED_AT:$LOCK_REMOTE_HEARTBEAT_AT" in
+    *[!0-9:]*|:*|*::*) return 70 ;;
+  esac
+  return 0
+}
+
+inspect_remote_lock() {
+  local now age
+  LOCK_STATE="missing"
+  LOCK_REMOTE_OID="$(lock_remote_oid)" || return 70
+  [ -n "$LOCK_REMOTE_OID" ] || return 0
+  case "$LOCK_REMOTE_OID" in
+    *[!0-9a-f]*)
+      echo "❌ La ref remota '$LOCK_REF' no contiene un objeto Git válido." >&2
+      LOCK_STATE="invalid"
+      return 70
+      ;;
+  esac
+  if ! lock_read_metadata "$LOCK_REMOTE_OID"; then
+    echo "❌ El lock remoto '$LOCK_REF' tiene metadatos inválidos o ilegibles." >&2
+    LOCK_STATE="invalid"
+    return 70
+  fi
+  now="$(date +%s)" || return 70
+  age=$((now - LOCK_REMOTE_HEARTBEAT_AT))
+  if [ "$age" -ge "$LOCK_TTL_SECONDS" ]; then
+    LOCK_STATE="stale"
+  else
+    LOCK_STATE="active"
+  fi
+  return 0
+}
+
+lock_make_commit() {
+  local heartbeat="$1" parent="${2:-}" message
+  message="ralph-lock: v1
+host: $LOCK_HOST
+pid: $$
+started_at: $LOCK_STARTED_AT
+heartbeat_at: $heartbeat"
+  if [ -n "$parent" ]; then
+    printf '%s\n' "$message" | GIT_AUTHOR_DATE="@$heartbeat" \
+      GIT_COMMITTER_DATE="@$heartbeat" \
+      git -c user.name=ralph -c user.email=ralph@localhost commit-tree "$LOCK_TREE" -p "$parent"
+  else
+    printf '%s\n' "$message" | GIT_AUTHOR_DATE="@$heartbeat" \
+      GIT_COMMITTER_DATE="@$heartbeat" \
+      git -c user.name=ralph -c user.email=ralph@localhost commit-tree "$LOCK_TREE"
+  fi
+}
+
+lock_mark_acquired() {
+  local oid="$1"
+  LOCK_HELD=1
+  LOCK_COMMIT="$oid"
+  LOCK_NEXT_HEARTBEAT_MONOTONIC=$((SECONDS + LOCK_HEARTBEAT_SECONDS))
+}
+
+release_remote_lock() {
+  [ "$LOCK_HELD" -eq 1 ] || return 0
+  if git push -q --force-with-lease="$LOCK_REF:$LOCK_COMMIT" \
+      origin ":$LOCK_REF" >/dev/null 2>&1; then
+    LOCK_HELD=0
+  else
+    echo "⚠️  No pude liberar el lock remoto; no borro un lock que pudo reclamar otro proceso." >&2
+  fi
+}
+
+renew_remote_lock() {
+  local now new_oid
+  [ "$LOCK_HELD" -eq 1 ] || return 0
+  now="$(lock_epoch_now)" || return 70
+  new_oid="$(lock_make_commit "$now" "$LOCK_COMMIT")" || return 70
+  if ! git push -q --force-with-lease="$LOCK_REF:$LOCK_COMMIT" origin \
+      "$new_oid:$LOCK_REF" >/dev/null 2>&1; then
+    echo "❌ Perdí la propiedad del lock remoto '$LOCK_REF'; detengo la corrida." >&2
+    return 70
+  fi
+  LOCK_COMMIT="$new_oid"
+  LOCK_NEXT_HEARTBEAT_MONOTONIC=$((SECONDS + LOCK_HEARTBEAT_SECONDS))
+  return 0
+}
+
+heartbeat_remote_lock_if_due() {
+  [ "$LOCK_HELD" -eq 1 ] || return 0
+  [ "$SECONDS" -lt "$LOCK_NEXT_HEARTBEAT_MONOTONIC" ] || renew_remote_lock
+}
+
+acquire_remote_lock() {
+  local now new_oid previous_oid previous_host previous_pid push_rc
+  LOCK_TREE="$(git mktree </dev/null 2>/dev/null)" || return 70
+  [ -n "$LOCK_TREE" ] || return 70
+  LOCK_STARTED_AT="$(lock_epoch_now)" || return 70
+  inspect_remote_lock || return $?
+  case "$LOCK_STATE" in
+    active)
+      echo "🔒 Ya hay una corrida activa en este repositorio (host=$LOCK_REMOTE_HOST pid=$LOCK_REMOTE_PID heartbeat=$LOCK_REMOTE_HEARTBEAT_AT); salgo sin mutaciones."
+      return 1
+      ;;
+    invalid)
+      return 70
+      ;;
+  esac
+
+  previous_oid="$LOCK_REMOTE_OID"
+  previous_host="$LOCK_REMOTE_HOST"
+  previous_pid="$LOCK_REMOTE_PID"
+  now="$LOCK_STARTED_AT"
+  if [ "$LOCK_STATE" = "stale" ]; then
+    new_oid="$(lock_make_commit "$now" "$previous_oid")" || return 70
+    git push -q --force-with-lease="$LOCK_REF:$previous_oid" origin \
+      "$new_oid:$LOCK_REF" >/dev/null 2>&1
+    push_rc=$?
+  else
+    new_oid="$(lock_make_commit "$now")" || return 70
+    git push -q origin "$new_oid:$LOCK_REF" >/dev/null 2>&1
+    push_rc=$?
+  fi
+  if [ "$push_rc" -eq 0 ]; then
+    lock_mark_acquired "$new_oid"
+    if [ "$LOCK_STATE" = "stale" ]; then
+      echo "🔓 Lock remoto vencido; reclamo el lock (host anterior: $previous_host, pid=$previous_pid)."
+    fi
+    return 0
+  fi
+
+  if inspect_remote_lock && [ "$LOCK_STATE" = "active" ]; then
+    echo "🔒 Otra corrida adquirió el lock remoto antes que esta (host=$LOCK_REMOTE_HOST pid=$LOCK_REMOTE_PID); salgo sin mutaciones."
+    return 1
+  fi
+  echo "❌ No pude adquirir el lock remoto '$LOCK_REF'; detengo la corrida." >&2
+  return 70
 }
 
 for cmd in git gh; do
@@ -694,6 +894,17 @@ if [ "$DRY_RUN" != "1" ] && [ -n "$(git status --porcelain)" ]; then
   fail "Working tree sucio. Commiteá o stasheá antes de correr ralph."
 fi
 
+if [ "$DRY_RUN" != "1" ]; then
+  CURRENT_PHASE="adquisición del lock remoto"
+  acquire_remote_lock
+  lock_rc=$?
+  case "$lock_rc" in
+    0) ;;
+    1) exit 0 ;;
+    *) exit 70 ;;
+  esac
+fi
+
 PROMPT_IMPLEMENT="$(load_prompt prompt_implement)"
 PROMPT_IMPLEMENT+=$'\n\n## Close policy passed by Ralph\n\n'
 PROMPT_IMPLEMENT+="$CLOSE_POLICY_INSTRUCTIONS"
@@ -936,7 +1147,7 @@ classify_provider_signal() {
 # Espera hasta el instante fiable entregado por el proveedor, en bloques de
 # <=10min. Devuelve 2 si el deadline global vence antes del reset.
 wait_for_reset() {
-  local issue="$1" target now remaining
+  local issue="$1" target now remaining heartbeat_remaining sleep_for
   [ -n "$RESET_EPOCH" ] || {
     echo "⏭️  Tope sin retry_at fiable; reintento de #$issue sin espera."
     return 0
@@ -950,10 +1161,17 @@ wait_for_reset() {
   [ "$target" -gt "$now" ] || return 0
   echo "⏳ Tope $LIMIT_KIND. Reintento de #$issue ~$(format_epoch "$target" '+%H:%M') (en $(((target - now) / 60)) min)..."
   while :; do
+    heartbeat_remote_lock_if_due || return 70
     now="$(date +%s)"
     remaining=$((target - now))
     [ "$remaining" -le 0 ] && break
-    sleep $(( remaining > 600 ? 600 : remaining ))
+    sleep_for=$(( remaining > 600 ? 600 : remaining ))
+    if [ "$LOCK_HELD" -eq 1 ]; then
+      heartbeat_remaining=$((LOCK_NEXT_HEARTBEAT_MONOTONIC - SECONDS))
+      [ "$heartbeat_remaining" -gt 0 ] && [ "$heartbeat_remaining" -lt "$sleep_for" ] && sleep_for="$heartbeat_remaining"
+    fi
+    [ "$sleep_for" -gt 0 ] || sleep_for=1
+    sleep "$sleep_for"
   done
 }
 
@@ -1038,6 +1256,10 @@ run_agent_group() {
   fi
 
   while [ "$agent_done" -eq 0 ] || [ "$tee_done" -eq 0 ] || [ "$tee_err_done" -eq 0 ]; do
+    if ! heartbeat_remote_lock_if_due; then
+      terminate_agent_processes
+      return 70
+    fi
     if [ "$agent_done" -eq 0 ] && ! process_is_running "$CURRENT_AGENT_PID"; then
       wait "$CURRENT_AGENT_PID" 2>/dev/null
       agent_rc=$?
@@ -1831,7 +2053,7 @@ verify_distinct_review() {
 # pasan, 1 si hay un fallo real (tras dejar en el PR el ítem que Codex debe
 # corregir), y 2 si la ausencia o el estado de CI sigue pendiente.
 wait_for_ci() {
-  local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining
+  local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining heartbeat_remaining
 
   CI_FAILURE_BODY=""
 
@@ -1843,6 +2065,7 @@ wait_for_ci() {
   started="$(date +%s 2>/dev/null)" || return 2
   deadline=$((started + CI_TIMEOUT_SECONDS))
   while :; do
+    heartbeat_remote_lock_if_due || return 70
     check_required_checks "$reviewed_sha"
     checks_rc=$?
     if [ "$checks_rc" -eq 0 ]; then
@@ -1889,7 +2112,15 @@ wait_for_ci() {
       return 2
     fi
     remaining=$((deadline - now))
-    sleep $(( remaining > 30 ? 30 : remaining ))
+    if [ "$remaining" -gt 30 ]; then
+      remaining=30
+    fi
+    if [ "$LOCK_HELD" -eq 1 ]; then
+      heartbeat_remaining=$((LOCK_NEXT_HEARTBEAT_MONOTONIC - SECONDS))
+      [ "$heartbeat_remaining" -gt 0 ] && [ "$heartbeat_remaining" -lt "$remaining" ] && remaining="$heartbeat_remaining"
+    fi
+    [ "$remaining" -gt 0 ] || remaining=1
+    sleep "$remaining"
   done
 }
 
@@ -2224,6 +2455,8 @@ $PROMPT_REVIEW"
       elif [ "$ci_rc" -eq 2 ]; then
         checkout_or_fail "$BASE_BRANCH" || return 70
         return 0
+      elif [ "$ci_rc" -eq 70 ]; then
+        return 70
       elif [ "$ci_rc" -eq 1 ]; then
         state_status="changes_requested"
         review_body="$CI_FAILURE_BODY"
@@ -2684,6 +2917,18 @@ print_plan() {
 # ------------------------------------------------------------------- bucle --
 
 if [ "$DRY_RUN" = "1" ]; then
+  CURRENT_PHASE="lectura del lock remoto"
+  inspect_remote_lock
+  lock_rc=$?
+  [ "$lock_rc" -eq 0 ] || exit 70
+  case "$LOCK_STATE" in
+    active)
+      echo "🔒 Lock remoto activo: host=$LOCK_REMOTE_HOST pid=$LOCK_REMOTE_PID heartbeat=$LOCK_REMOTE_HEARTBEAT_AT; dry-run sólo lo lee."
+      ;;
+    stale)
+      echo "⚠️  Lock remoto vencido: host=$LOCK_REMOTE_HOST pid=$LOCK_REMOTE_PID; dry-run no lo reclama."
+      ;;
+  esac
   print_plan
 else
   run_sandbox_preflight || exit $?

@@ -133,6 +133,142 @@ load test_helper
   [ ! -s "$FAKE_AGENT_LOG" ]
 }
 
+@test "normal run acquires the remote lock before the agent and releases it" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_LOCK_SEEN_FILE="$TEST_ROOT/lock-seen"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  lock_oid="$(cut -f1 "$FAKE_CODEX_LOCK_SEEN_FILE")"
+  [[ "$lock_oid" =~ ^[0-9a-f]{40}$ ]]
+  ! git --git-dir="$TEST_ORIGIN" show-ref --verify --quiet refs/ralph/lock
+}
+
+@test "concurrent runs against one remote leave only one owner" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_WAIT_FILE="$TEST_ROOT/first-codex-waiting"
+  export FAKE_CODEX_RELEASE_FILE="$TEST_ROOT/first-codex-release"
+  export RALPH_CI_POLICY=none
+  second_repo="$TEST_ROOT/second-repo"
+  git clone -q "$TEST_ORIGIN" "$second_repo"
+  git -C "$second_repo" switch -q main
+  git -C "$second_repo" config user.email "ralph-tests@example.invalid"
+  git -C "$second_repo" config user.name "ralph tests"
+
+  bash -c 'cd "$1" && exec bash "$2/once.sh"' _ "$TEST_REPO" "$PROJECT_ROOT" \
+    > "$TEST_ROOT/first-run.log" 2>&1 &
+  first_pid=$!
+  for _ in {1..50}; do
+    [ -f "$FAKE_CODEX_WAIT_FILE" ] && break
+    "$RALPH_TEST_REAL_SLEEP" 0.1
+  done
+  [ -f "$FAKE_CODEX_WAIT_FILE" ]
+
+  run env -u FAKE_CODEX_WAIT_FILE bash -c 'cd "$1" && bash "$2/once.sh"' _ \
+    "$second_repo" "$PROJECT_ROOT"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"corrida activa"* || "$output" == *"adquirió el lock"* ]]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(grep -c '^label create ' "$GH_MUTATION_LOG")" -eq 1 ]
+
+  : > "$FAKE_CODEX_RELEASE_FILE"
+  if wait "$first_pid"; then
+    first_status=0
+  else
+    first_status=$?
+  fi
+  [ "$first_status" -eq 0 ]
+  ! git --git-dir="$TEST_ORIGIN" show-ref --verify --quiet refs/ralph/lock
+}
+
+@test "expired remote lock is claimed and records the previous host" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_LOCK_METADATA_FILE="$TEST_ROOT/claimed-lock"
+  export RALPH_CI_POLICY=none
+  export RALPH_LOCK_HOST=new-host
+  export RALPH_LOCK_TTL_SECONDS=10
+  now="$($RALPH_TEST_REAL_DATE +%s)"
+  lock_tree="$(git -C "$TEST_REPO" mktree </dev/null)"
+  stale_oid="$(printf '%s\n' \
+    'ralph-lock: v1' \
+    'host: stale-host' \
+    'pid: 777' \
+    "started_at: $((now - 100))" \
+    "heartbeat_at: $((now - 100))" | \
+    git -C "$TEST_REPO" -c user.name=ralph -c user.email=ralph@localhost commit-tree "$lock_tree")"
+  git -C "$TEST_REPO" push -q origin "$stale_oid:refs/ralph/lock"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Lock remoto vencido"* ]]
+  [[ "$output" == *"host anterior: stale-host"* ]]
+  grep -Fq 'host: new-host' "$FAKE_CODEX_LOCK_METADATA_FILE"
+  ! git --git-dir="$TEST_ORIGIN" show-ref --verify --quiet refs/ralph/lock
+}
+
+@test "dry-run reads an active remote lock without changing it" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_DRY_RUN=1
+  export RALPH_LOCK_TTL_SECONDS=600
+  now="$($RALPH_TEST_REAL_DATE +%s)"
+  lock_tree="$(git -C "$TEST_REPO" mktree </dev/null)"
+  lock_oid="$(printf '%s\n' \
+    'ralph-lock: v1' \
+    'host: dry-host' \
+    'pid: 778' \
+    "started_at: $((now - 5))" \
+    "heartbeat_at: $((now - 5))" | \
+    git -C "$TEST_REPO" -c user.name=ralph -c user.email=ralph@localhost commit-tree "$lock_tree")"
+  git -C "$TEST_REPO" push -q origin "$lock_oid:refs/ralph/lock"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dry-run sólo lo lee"* ]]
+  [ "$(git --git-dir="$TEST_ORIGIN" rev-parse refs/ralph/lock)" = "$lock_oid" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+}
+
+@test "active run renews the remote lock heartbeat" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_WAIT_FILE="$TEST_ROOT/codex-waiting"
+  export FAKE_CODEX_RELEASE_FILE="$TEST_ROOT/codex-release"
+  export RALPH_CI_POLICY=none
+  export RALPH_LOCK_TTL_SECONDS=10
+  export RALPH_LOCK_HEARTBEAT_SECONDS=1
+
+  bash -c 'cd "$1" && exec bash "$2/once.sh"' _ "$TEST_REPO" "$PROJECT_ROOT" \
+    > "$TEST_ROOT/heartbeat-run.log" 2>&1 &
+  runner_pid=$!
+  for _ in {1..50}; do
+    [ -f "$FAKE_CODEX_WAIT_FILE" ] && break
+    "$RALPH_TEST_REAL_SLEEP" 0.1
+  done
+  [ -f "$FAKE_CODEX_WAIT_FILE" ]
+  before_oid="$(git --git-dir="$TEST_ORIGIN" rev-parse refs/ralph/lock)"
+  "$RALPH_TEST_REAL_SLEEP" 2
+  after_oid="$(git --git-dir="$TEST_ORIGIN" rev-parse refs/ralph/lock)"
+  [ "$after_oid" != "$before_oid" ]
+
+  : > "$FAKE_CODEX_RELEASE_FILE"
+  if wait "$runner_pid"; then
+    runner_status=0
+  else
+    runner_status=$?
+  fi
+  [ "$runner_status" -eq 0 ]
+  ! git --git-dir="$TEST_ORIGIN" show-ref --verify --quiet refs/ralph/lock
+}
+
 @test "preflight fails when the base has no protection ruleset" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export RALPH_REQUIRE_PROTECTION=1
@@ -587,6 +723,7 @@ load test_helper
   [ "$(git -C "$TEST_REPO" branch --show-current)" = "ralph/issue-1" ]
   [ "$(git -C "$TEST_REPO" rev-parse HEAD)" = "$before_sha" ]
   [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
+  ! git --git-dir="$TEST_ORIGIN" show-ref --verify --quiet refs/ralph/lock
 }
 
 @test "TERM does not modify a repo summary.json before RUN_DIR exists" {
