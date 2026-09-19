@@ -1221,3 +1221,15 @@ load test_helper
   [ -f "$RALPH_CHECKPOINT_FILE" ]
   [ "$(jq -r '.status' "$RUN_DIR"/codex-1.result.json)" = config_error ]
 }
+
+@test "fallo fatal antes de correr ningún agente no explota por ADAPTER_STATUS" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
+  export FAKE_HEAD_REF_OID="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  [[ "$output" == *"head_changed"* ]]
+  [[ "$output" == *"Fallo fatal (rc=70)"* ]]
+  [[ "$output" != *"unbound variable"* ]]
+}
