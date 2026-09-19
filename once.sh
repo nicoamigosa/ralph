@@ -53,6 +53,8 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #                           ejecuta una sonda de preflight y reemplaza writable_roots
 #                           configurado; danger-full-access no se recomienda)
 #   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus)
+#   RALPH_REVIEWER_GH_TOKEN token fine-grained read-only para Claude (required)
+#   RALPH_REQUIRE_REVIEWER_TOKEN exige el token; sólo puede ser 0 en sandbox
 #   RALPH_MERGE_METHOD   método de merge del PR          (default: --squash)
 #   RALPH_MERGE_TIMEOUT_SECONDS espera confirmación       (default: 600)
 #   RALPH_MERGE_PENDING_POLICY ante merge encolado         (default: stop)
@@ -141,6 +143,8 @@ CODEX_MODEL="${RALPH_CODEX_MODEL:-gpt-5.6-luna}"
 CODEX_EFFORT="${RALPH_CODEX_EFFORT:-xhigh}"
 CODEX_SANDBOX="${RALPH_CODEX_SANDBOX:-workspace-write}"
 CLAUDE_MODEL="${RALPH_CLAUDE_MODEL:-opus}"
+REVIEWER_GH_TOKEN="${RALPH_REVIEWER_GH_TOKEN:-}"
+REQUIRE_REVIEWER_TOKEN="${RALPH_REQUIRE_REVIEWER_TOKEN:-1}"
 MERGE_METHOD="${RALPH_MERGE_METHOD:---squash}"
 MERGE_TIMEOUT_SECONDS="${RALPH_MERGE_TIMEOUT_SECONDS:-600}"
 MERGE_PENDING_POLICY="${RALPH_MERGE_PENDING_POLICY:-stop}"
@@ -221,6 +225,7 @@ CURRENT_AGENT_FIFO=""
 CURRENT_AGENT_ERR_FIFO=""
 CURRENT_TEE_PID=""
 CURRENT_TEE_ERR_PID=""
+AGENT_ROLE=""
 SIGNAL_EXITING=0
 LOCK_HELD=0
 LOCK_COMMIT=""
@@ -391,6 +396,22 @@ case "$CLOSE_POLICY" in
   verified|never) ;;
   *) fail "RALPH_CLOSE_POLICY debe ser exactamente verified o never." ;;
 esac
+case "$REQUIRE_REVIEWER_TOKEN" in
+  0|1) ;;
+  *) fail "RALPH_REQUIRE_REVIEWER_TOKEN debe ser exactamente 0 o 1." ;;
+esac
+if [ "$DRY_RUN" != "1" ]; then
+  if [ "$REQUIRE_REVIEWER_TOKEN" = "0" ] && [ "$REQUIRE_PROTECTION" != "0" ]; then
+    fail "RALPH_REQUIRE_REVIEWER_TOKEN=0 sólo está permitido junto con RALPH_REQUIRE_PROTECTION=0 en el sandbox."
+  fi
+  if [ "$REQUIRE_REVIEWER_TOKEN" = "1" ] && [ -z "$REVIEWER_GH_TOKEN" ]; then
+    fail "Falta RALPH_REVIEWER_GH_TOKEN. Creá un token fine-grained de GitHub con permisos read-only sobre este repositorio y configurá esa variable; RALPH_REQUIRE_REVIEWER_TOKEN=0 sólo está permitido en el sandbox."
+  fi
+  if [ -n "$REVIEWER_GH_TOKEN" ] && [ -n "${GH_TOKEN:-}" ] \
+      && [ "$REVIEWER_GH_TOKEN" = "$GH_TOKEN" ]; then
+    fail "RALPH_REVIEWER_GH_TOKEN debe ser distinto del token del orquestador GH_TOKEN."
+  fi
+fi
 
 CLOSE_POLICY_INSTRUCTIONS="RALPH_CLOSE_POLICY=$CLOSE_POLICY
 "
@@ -1224,11 +1245,24 @@ run_agent_group() {
   tee "$stderr_file" < "$stderr_fifo" >&2 &
   CURRENT_TEE_ERR_PID=$!
 
+  launch_agent_process() {
+    if [ "$AGENT_ROLE" = "reviewer" ]; then
+      if [ -n "$REVIEWER_GH_TOKEN" ]; then
+        export GH_TOKEN="$REVIEWER_GH_TOKEN"
+      else
+        unset GH_TOKEN
+      fi
+    fi
+    if command -v setsid >/dev/null 2>&1; then
+      exec setsid "${AGENT_COMMAND[@]}"
+    fi
+    exec "${AGENT_COMMAND[@]}"
+  }
   if command -v setsid >/dev/null 2>&1; then
-    setsid "${AGENT_COMMAND[@]}" > "$stdout_fifo" 2> "$stderr_fifo" &
+    launch_agent_process > "$stdout_fifo" 2> "$stderr_fifo" &
   else
     set -m
-    "${AGENT_COMMAND[@]}" > "$stdout_fifo" 2> "$stderr_fifo" &
+    launch_agent_process > "$stdout_fifo" 2> "$stderr_fifo" &
     [ "$had_job_control" -eq 1 ] || set +m
   fi
   CURRENT_AGENT_PID=$!
@@ -1517,6 +1551,7 @@ finish_adapter() {
 
 run_codex() {
   local prompt="$1" process_rc
+  AGENT_ROLE="codex"
   : > "$AGENT_LOG"; : > "$LAST_MSG"
   prepare_agent_capture codex stdout.jsonl
   build_codex_sandbox_config || return $?
@@ -1551,6 +1586,7 @@ run_codex() {
 
 run_claude() {
   local prompt="$1" process_rc
+  AGENT_ROLE="reviewer"
   : > "$AGENT_LOG"; : > "$LAST_MSG"
   prepare_agent_capture claude stdout.json
   AGENT_COMMAND=(

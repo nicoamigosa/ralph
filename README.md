@@ -317,6 +317,8 @@ Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
 | `RALPH_CODEX_EFFORT` | `xhigh` |
 | `RALPH_CODEX_SANDBOX` | `workspace-write` (en este modo Codex monta `.git` como sólo lectura; ralph lo habilita como `writable_root` y ejecuta una sonda de preflight; `danger-full-access` no se recomienda) |
 | `RALPH_CLAUDE_MODEL` | `opus` |
+| `RALPH_REVIEWER_GH_TOKEN` | obligatorio para el revisor: token fine-grained de GitHub, limitado a este repositorio y con permisos de lectura |
+| `RALPH_REQUIRE_REVIEWER_TOKEN` | `1` (sólo `0` junto con `RALPH_REQUIRE_PROTECTION=0` en el sandbox) |
 | `RALPH_MERGE_METHOD` | `--squash` |
 | `RALPH_MERGE_TIMEOUT_SECONDS` | `600` |
 | `RALPH_MERGE_PENDING_POLICY` | `stop` (`continue` es la alternativa explícita) |
@@ -349,6 +351,15 @@ sonda sin modelo que escribe y borra un archivo allí; si `codex sandbox` no est
 disponible en la plataforma, avisa y continúa. `danger-full-access` evita esa
 restricción, pero no se recomienda porque expone todo el filesystem.
 
+El revisor recibe `RALPH_REVIEWER_GH_TOKEN` únicamente como `GH_TOKEN` de su
+proceso hijo. El preflight exige que sea distinto del `GH_TOKEN` del
+orquestador. Creá un token fine-grained con acceso sólo al repositorio objetivo
+y permisos de lectura para `Metadata` (obligatorio en GitHub), `Contents`,
+`Issues` y `Pull requests`; guardalo en el entorno protegido del host, nunca en
+`.ralph/config.env` ni en un archivo versionado. `RALPH_REQUIRE_REVIEWER_TOKEN=0`
+sólo se acepta junto con `RALPH_REQUIRE_PROTECTION=0`, reservado para el
+sandbox; en ese caso el revisor no hereda `GH_TOKEN`.
+
 ## Distribución y versión
 
 `ralph/` se distribuye como **release etiquetada** del repo
@@ -377,6 +388,16 @@ ninguno fija ni verifica la versión que se ejecuta.
   revisado, resultado y estado de merge. La reanudación reconstruye el último
   registro marcado desde GitHub, por lo que un comentario ajeno posterior no
   reemplaza la revisión que recibe Codex.
+- **La credencial del revisor es de sólo lectura.** `RALPH_REVIEWER_GH_TOKEN`
+  reemplaza el `GH_TOKEN` del orquestador sólo dentro del proceso de Claude,
+  para que el revisor pueda inspeccionar el PR sin poder publicar comentarios
+  ni mutaciones de GitHub. El token debe estar limitado al repositorio y a
+  permisos de lectura; `RALPH_REQUIRE_REVIEWER_TOKEN=0` es una excepción sólo
+  para el sandbox.
+- **Límite conocido de v1:** no hay aislamiento por contenedor. Claude sigue
+  ejecutándose con `--dangerously-skip-permissions` y puede acceder al workspace
+  y a las capacidades locales que el host le entregue; v1 aísla únicamente la
+  credencial GitHub usada por el revisor.
 - El registro remoto usa eventos inmutables: antes de cada agente guarda la fase
   y la ronda actual, y sólo avanza la ronda después de completar la corrección.
   Un tope, timeout o reinicio retoma la misma fase, ronda y SHA. El merge se

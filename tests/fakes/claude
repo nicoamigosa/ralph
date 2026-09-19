@@ -3,6 +3,14 @@ set -euo pipefail
 
 printf 'claude %s\n' "$*" >> "$FAKE_AGENT_LOG"
 
+if [ -n "${FAKE_CLAUDE_ENV_FILE:-}" ]; then
+  printf '%s\n' "${GH_TOKEN:-}" > "$FAKE_CLAUDE_ENV_FILE"
+fi
+
+if [ "${FAKE_CLAUDE_ATTEMPT_COMMENT:-0}" = "1" ]; then
+  gh pr comment 101 --body reviewer-pr-comment >/dev/null
+fi
+
 claude_result="${FAKE_CLAUDE_RESULT:-<verdict>PASS</verdict>}"
 if [ -n "${FAKE_CLAUDE_RESULTS:-}" ]; then
   IFS='|' read -r -a claude_results <<< "$FAKE_CLAUDE_RESULTS"

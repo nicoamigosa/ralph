@@ -21,6 +21,11 @@ pr_comment() {
     fi
     previous="$arg"
   done
+  if [ -n "${FAKE_REVIEWER_GH_TOKEN:-}" ] \
+      && [ "${GH_TOKEN:-}" = "$FAKE_REVIEWER_GH_TOKEN" ]; then
+    printf '%s\n' 'fake reviewer token is read-only' >&2
+    return 1
+  fi
   mutation "$*"
   if [ -n "$state_file" ]; then
     comment_id="$(jq -r '.next_id // 9001' "$state_file")"
