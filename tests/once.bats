@@ -993,7 +993,93 @@ load test_helper
   run_once
 
   [ "$status" -eq 0 ]
-  grep -Fq "pr merge 101 --squash --match-head-commit $reviewed_sha --delete-branch" "$GH_MUTATION_LOG"
+  grep -Fq "pr merge 101 --squash --match-head-commit $reviewed_sha" "$GH_MUTATION_LOG"
+}
+
+@test "merge queue confirma MERGED antes de borrar rama, hook y issue" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_MERGE_STATES='OPEN|MERGED'
+  export FAKE_MERGE_QUERY_COUNT_FILE="$TEST_ROOT/merge-queries"
+  export RALPH_MERGE_TIMEOUT_SECONDS=60
+  export FAKE_SLEEP_NOOP=1
+  export RALPH_POST_MERGE_CHECK="$PROJECT_ROOT/tests/fakes/post-merge-check"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_MERGE_QUERY_COUNT_FILE")" -eq 2 ]
+  ! git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  merge_line="$(grep -n '^pr merge ' "$GH_MUTATION_LOG" | cut -d: -f1)"
+  state_line="$(grep -n '^pr state MERGED ' "$GH_MUTATION_LOG" | cut -d: -f1)"
+  remote_delete_line="$(grep -n '^api --method DELETE ' "$GH_MUTATION_LOG" | cut -d: -f1)"
+  delete_line="$(grep -n '^git branch -D ' "$GH_MUTATION_LOG" | cut -d: -f1)"
+  hook_line="$(grep -n '^post_merge ' "$GH_MUTATION_LOG" | cut -d: -f1)"
+  close_line="$(grep -n '^issue close ' "$GH_MUTATION_LOG" | cut -d: -f1)"
+  [ "$merge_line" -lt "$delete_line" ]
+  [ "$state_line" -lt "$remote_delete_line" ]
+  [ "$remote_delete_line" -lt "$delete_line" ]
+  [ "$delete_line" -lt "$hook_line" ]
+  [ "$hook_line" -lt "$close_line" ]
+  grep -Fq 'post_merge 1111111111111111111111111111111111111111' "$GH_MUTATION_LOG"
+}
+
+@test "rama remota ya borrada tras MERGED no impide limpieza ni cierre" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_MERGE_STATES=MERGED
+  export FAKE_MERGE_QUERY_COUNT_FILE="$TEST_ROOT/merge-queries"
+  export FAKE_REMOTE_DELETE_422=1
+  export RALPH_POST_MERGE_CHECK="$PROJECT_ROOT/tests/fakes/post-merge-check"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  grep -q '^api --method DELETE ' "$FAKE_API_LOG"
+  grep -Fq 'git branch -D ralph/issue-1' "$GH_MUTATION_LOG"
+  grep -Fq 'post_merge 1111111111111111111111111111111111111111' "$GH_MUTATION_LOG"
+  grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+}
+
+@test "merge encolado: no cerrar issue ni borrar rama" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/two-issues.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_MERGE_STATES=OPEN
+  export FAKE_MERGE_QUERY_COUNT_FILE="$TEST_ROOT/merge-queries"
+  export RALPH_MERGE_TIMEOUT_SECONDS=0
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last_run.md"
+  export RALPH_POST_MERGE_CHECK="$PROJECT_ROOT/tests/fakes/post-merge-check"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"merge_pending"* ]]
+  [ -f "$RALPH_CHECKPOINT_FILE" ]
+  git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  ! grep -Fq 'branch -D' "$GH_MUTATION_LOG"
+  ! grep -Fq 'post_merge' "$GH_MUTATION_LOG"
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 1 ]
+}
+
+@test "merge_pending con política continue permite otro issue independiente" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/two-issues.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_MERGE_STATES=OPEN
+  export FAKE_MERGE_QUERY_COUNT_FILE="$TEST_ROOT/merge-queries"
+  export RALPH_MERGE_TIMEOUT_SECONDS=0
+  export RALPH_MERGE_PENDING_POLICY=continue
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 2 ]
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+  git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-2
 }
 
 @test "RALPH_MERGE_METHOD con argumentos extra falla en preflight" {
@@ -1410,4 +1496,16 @@ load test_helper
   [[ "$output" == *"provider rejected model"* ]]
   [ -f "$RALPH_CHECKPOINT_FILE" ]
   [ "$(jq -r '.status' "$RUN_DIR"/codex-1.result.json)" = config_error ]
+}
+
+@test "fallo fatal antes de correr ningún agente no explota por ADAPTER_STATUS" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
+  export FAKE_HEAD_REF_OID="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  [[ "$output" == *"head_changed"* ]]
+  [[ "$output" == *"Fallo fatal (rc=70)"* ]]
+  [[ "$output" != *"unbound variable"* ]]
 }
