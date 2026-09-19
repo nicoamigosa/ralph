@@ -168,6 +168,13 @@ LOCK_HEARTBEAT_SECONDS="${RALPH_LOCK_HEARTBEAT_SECONDS:-}"
 LOCK_HOST="${RALPH_LOCK_HOST:-$(uname -n 2>/dev/null || printf '%s' unknown)}"
 CLOSE_POLICY="${RALPH_CLOSE_POLICY:-verified}"
 
+HOST_SYSTEM="$(uname -s 2>/dev/null)" || fail "No pude detectar el sistema operativo con uname -s."
+case "$HOST_SYSTEM" in
+  Darwin) HOST_KIND=macos ;;
+  Linux) HOST_KIND=linux ;;
+  *) fail "Sistema operativo no soportado por Ralph: '$HOST_SYSTEM'." ;;
+esac
+
 CHECKPOINT_FILE="${RALPH_CHECKPOINT_FILE:-$SCRIPT_DIR/last_run.md}"
 
 validate_non_negative_integer() {
@@ -477,29 +484,6 @@ load_prompt() {
   fi
 }
 
-repo_host() {
-  local remote
-  remote="$(git remote get-url origin 2>/dev/null || true)"
-  case "$remote" in
-    http://*|https://*)
-      remote="${remote#*://}"
-      printf '%s\n' "${remote%%/*}"
-      ;;
-    git@*:*)
-      remote="${remote#git@}"
-      printf '%s\n' "${remote%%:*}"
-      ;;
-    ssh://*)
-      remote="${remote#ssh://}"
-      remote="${remote#*@}"
-      printf '%s\n' "${remote%%/*}"
-      ;;
-    *)
-      printf '%s\n' "github.com"
-      ;;
-  esac
-}
-
 lock_field() {
   local field="$1"
   awk -F': ' -v wanted="$field" '$1 == wanted {print substr($0, length(wanted) + 3); exit}'
@@ -694,7 +678,6 @@ git remote get-url origin >/dev/null 2>&1 || fail "No hay remoto 'origin'."
 gh auth status >/dev/null 2>&1 || fail "gh no está autenticado (corré 'gh auth login')."
 REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
 [ -n "$REPO_SLUG" ] || fail "No pude resolver el repo de GitHub."
-REPO_HOST="$(repo_host)"
 
 write_protection_summary() {
   local status="$1" failure required_checks protection_required_json=true summary_tmp
@@ -2676,6 +2659,27 @@ issue_has_label() {
   return 1
 }
 
+host_requirement_for_labels() {
+  local labels="$1" has_macos=0 has_linux=0
+  issue_has_label "$labels" "ralph-host:macos" && has_macos=1
+  issue_has_label "$labels" "ralph-host:linux" && has_linux=1
+  if [ "$has_macos" -eq 1 ] && [ "$has_linux" -eq 1 ]; then
+    return 2
+  elif [ "$has_macos" -eq 1 ]; then
+    printf '%s\n' macos
+  elif [ "$has_linux" -eq 1 ]; then
+    printf '%s\n' linux
+  else
+    printf '%s\n' any
+  fi
+  return 0
+}
+
+host_requirement_matches() {
+  local required="$1"
+  [ "$required" = any ] || [ "$required" = "$HOST_KIND" ]
+}
+
 pr_needs_human() {
   local pr="$1" labels
   [ -z "$pr" ] && return 1
@@ -2687,7 +2691,7 @@ pr_needs_human() {
 }
 
 validate_issue_for_agent() {
-  local num="$1" pr="${2:-}" blockers blocked_by_error b state rc
+  local num="$1" pr="${2:-}" blockers blocked_by_error b state rc host_required
 
   read_issue_data "$num"
   rc=$?
@@ -2702,6 +2706,19 @@ validate_issue_for_agent() {
   fi
   if issue_has_label "$ISSUE_LABELS" "$NEEDS_HUMAN_LABEL"; then
     echo "🙋 #$num marcado con $NEEDS_HUMAN_LABEL; no invoco agentes."
+    return 1
+  fi
+
+  host_required="$(host_requirement_for_labels "$ISSUE_LABELS")"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "🚫 #$num bloqueado: labels de host contradictorios (ralph-host:macos y ralph-host:linux)."
+    return 1
+  elif [ "$rc" -ne 0 ]; then
+    return 70
+  fi
+  if ! host_requirement_matches "$host_required"; then
+    echo "⏭️  #$num requiere host $host_required, actual $HOST_KIND; lo omito."
     return 1
   fi
 
@@ -2734,10 +2751,10 @@ validate_issue_for_agent() {
 }
 
 print_plan_issue() {
-  local num="$1" priority="$2" parents="$3" blockers="$4" needs_human="$5" pr="$6" exclusion="$7"
+  local num="$1" priority="$2" host_required="$3" parents="$4" blockers="$5" needs_human="$6" pr="$7" exclusion="$8"
   local pr_text="${pr:-none}"
-  printf '#%s priority=%s host=%s parents=%s blockers=%s needs-human=%s pr=%s' \
-    "$num" "$priority" "$REPO_HOST" "$(refs_csv "$parents")" \
+  printf '#%s priority=%s host=%s current=%s parents=%s blockers=%s needs-human=%s pr=%s' \
+    "$num" "$priority" "$host_required" "$HOST_KIND" "$(refs_csv "$parents")" \
     "$(refs_csv "$blockers")" "$needs_human" "$pr_text"
   [ -n "$exclusion" ] && printf ' excluded=%s' "$exclusion"
   printf '\n'
@@ -2749,7 +2766,7 @@ print_plan_issue() {
 select_issues() {
   local mode="$1"
   local attempted=" " progress=1 numbers n num priority parents blockers open_blockers
-  local epics p b state pr needs_human exclusion rc blocked_by_error
+  local epics p b state pr needs_human exclusion rc blocked_by_error host_required host_rc
   local candidate_issues all_issues
 
   while [ "$progress" -eq 1 ]; do
@@ -2808,6 +2825,27 @@ select_issues() {
       parents="$(printf '%s' "${BODY[$num]}" | section_refs 'Parent')"
       blockers="$(printf '%s' "${BODY[$num]}" | section_refs 'Blocked by')"
       blocked_by_error="$(printf '%s' "${BODY[$num]}" | validate_blocked_by)"
+      host_required="$(host_requirement_for_labels "${ISSUE_LABELS_BY_ISSUE[$num]}")"
+      host_rc=$?
+      if [ "$host_rc" -eq 2 ]; then
+        echo "🚫 #$num bloqueado: labels de host contradictorios (ralph-host:macos y ralph-host:linux)."
+        if [ "$mode" = "plan" ]; then
+          print_plan_issue "$num" "$priority" conflict "$parents" "$blockers" \
+            no "" host-conflict
+        fi
+        continue
+      elif [ "$host_rc" -ne 0 ]; then
+        echo "❌ No pude determinar el host requerido para #$num; detengo la corrida."
+        return 70
+      fi
+      if ! host_requirement_matches "$host_required"; then
+        echo "⏭️  #$num requiere host $host_required, actual $HOST_KIND; lo omito."
+        if [ "$mode" = "plan" ]; then
+          print_plan_issue "$num" "$priority" "$host_required" "$parents" "$blockers" \
+            no "" "host:$host_required"
+        fi
+        continue
+      fi
       open_blockers=""
       for b in $blockers; do
         state="$(read_issue_state "$b")"
@@ -2834,7 +2872,7 @@ select_issues() {
       if [ -n "$blocked_by_error" ]; then
         echo "🚫 #$num bloqueado: formato inválido en ## Blocked by: $blocked_by_error"
         if [ "$mode" = "plan" ]; then
-          print_plan_issue "$num" "$priority" "$parents" "$blockers" \
+          print_plan_issue "$num" "$priority" "$host_required" "$parents" "$blockers" \
             "$needs_human" "$pr" "invalid-blocked-by"
         fi
         continue
@@ -2849,7 +2887,7 @@ select_issues() {
         [ -n "$exclusion" ] || if [ "$needs_human" = yes ]; then
           exclusion="needs-human"
         fi
-        print_plan_issue "$num" "$priority" "$parents" "$blockers" \
+        print_plan_issue "$num" "$priority" "$host_required" "$parents" "$blockers" \
           "$needs_human" "$pr" "$exclusion"
         continue
       fi

@@ -848,11 +848,74 @@ load test_helper
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Ralph dry-run plan"* ]]
-  [[ "$output" == *"#6 priority=1 host=github.com parents=none blockers=none needs-human=no pr=106"* ]]
-  [[ "$output" == *"#2 priority=4 host=github.com parents=none blockers=none needs-human=no pr=none excluded=parent"* ]]
-  [[ "$output" == *"#5 priority=3 host=github.com parents=none blockers=none needs-human=yes pr=105 excluded=needs-human"* ]]
-  [[ "$output" == *"#10 priority=2 host=github.com parents=2 blockers=4 needs-human=no pr=none excluded=blocked-by:4"* ]]
+  [[ "$output" == *"#6 priority=1 host=any current=linux parents=none blockers=none needs-human=no pr=106"* ]]
+  [[ "$output" == *"#2 priority=4 host=any current=linux parents=none blockers=none needs-human=no pr=none excluded=parent"* ]]
+  [[ "$output" == *"#5 priority=3 host=any current=linux parents=none blockers=none needs-human=yes pr=105 excluded=needs-human"* ]]
+  [[ "$output" == *"#10 priority=2 host=any current=linux parents=2 blockers=4 needs-human=no pr=none excluded=blocked-by:4"* ]]
   [ ! -s "$GH_MUTATION_LOG" ]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+}
+
+@test "host labels route before dependencies and dry-run reports required and current host" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/host-routing.json"
+  export RALPH_DRY_RUN=1
+  export FAKE_UNAME_SYSTEM=Linux
+  export FAKE_ISSUE_VIEW_FAIL_NUM=99
+  export FAKE_ISSUE_VIEW_FAIL_FIELD=state
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"#1 priority=1 host=macos current=linux parents=none blockers=99 needs-human=no pr=none excluded=host:macos"* ]]
+  [[ "$output" == *"#2 priority=2 host=linux current=linux parents=none blockers=none needs-human=no pr=none"* ]]
+  [[ "$output" == *"#3 priority=3 host=any current=linux parents=none blockers=none needs-human=no pr=none"* ]]
+  [[ "$output" == *"#4 bloqueado: labels de host contradictorios (ralph-host:macos y ralph-host:linux)"* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+}
+
+@test "a macOS-only issue is skipped without a branch while an any-host issue is processed on Linux" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/host-routing.json"
+  export FAKE_UNAME_SYSTEM=Linux
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+  run_output="$output"
+
+  [ "$status" -eq 0 ]
+  run git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  [ "$status" -ne 0 ]
+  run git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-4
+  [ "$status" -ne 0 ]
+  run git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-3
+  [ "$status" -eq 0 ]
+  [[ "$run_output" == *"#1 requiere host macos, actual linux; lo omito."* ]]
+  [[ "$run_output" == *"#4 bloqueado: labels de host contradictorios (ralph-host:macos y ralph-host:linux)."* ]]
+  grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "an any-host issue is eligible on macOS and the host is shown in the plan" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/host-routing.json"
+  export RALPH_DRY_RUN=1
+  export FAKE_UNAME_SYSTEM=Darwin
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"#1 priority=1 host=macos current=macos parents=none blockers=99 needs-human=no pr=none"* ]]
+  [[ "$output" == *"#3 priority=3 host=any current=macos parents=none blockers=none needs-human=no pr=none"* ]]
+  [[ "$output" == *"#2 requiere host linux, actual macos; lo omito."* ]]
+}
+
+@test "an unsupported uname system fails before selecting issues" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/host-routing.json"
+  export RALPH_DRY_RUN=1
+  export FAKE_UNAME_SYSTEM=FreeBSD
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Sistema operativo no soportado por Ralph: 'FreeBSD'"* ]]
   [ ! -s "$FAKE_AGENT_LOG" ]
 }
 
@@ -878,8 +941,8 @@ load test_helper
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -Ec '^#[0-9]+ priority=')" -eq 45 ]
-  [[ "$output" == *"#1 priority=1 host=github.com parents=none blockers=none needs-human=no pr=none excluded=parent"* ]]
-  [[ "$output" == *"#45 priority=45 host=github.com parents=none blockers=none needs-human=no pr=none"* ]]
+  [[ "$output" == *"#1 priority=1 host=any current=linux parents=none blockers=none needs-human=no pr=none excluded=parent"* ]]
+  [[ "$output" == *"#45 priority=45 host=any current=linux parents=none blockers=none needs-human=no pr=none"* ]]
 }
 
 @test "configuration is resolved from the repository root when launched below it" {
@@ -932,8 +995,8 @@ load test_helper
   run_once
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"#1 priority=1 host=github.com parents=none blockers=2 needs-human=no pr=none"* ]]
-  [[ "$output" == *"#3 priority=2 host=github.com parents=none blockers=2 needs-human=no pr=none excluded=blocked-by:2"* ]]
+  [[ "$output" == *"#1 priority=1 host=any current=linux parents=none blockers=2 needs-human=no pr=none"* ]]
+  [[ "$output" == *"#3 priority=2 host=any current=linux parents=none blockers=2 needs-human=no pr=none excluded=blocked-by:2"* ]]
   [ "$(cat "$FAKE_STATE_SEQUENCE_FILE")" -eq 2 ]
 }
 
@@ -998,8 +1061,8 @@ load test_helper
   run_once
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"#1 priority=1 host=github.com parents=none blockers=12 needs-human=no pr=none excluded=blocked-by:12"* ]]
-  [[ "$output" == *"#2 priority=2 host=github.com parents=none blockers=12 needs-human=no pr=none excluded=blocked-by:12"* ]]
+  [[ "$output" == *"#1 priority=1 host=any current=linux parents=none blockers=12 needs-human=no pr=none excluded=blocked-by:12"* ]]
+  [[ "$output" == *"#2 priority=2 host=any current=linux parents=none blockers=12 needs-human=no pr=none excluded=blocked-by:12"* ]]
   [[ "$output" != *"blockers=12,999"* ]]
 }
 
@@ -1010,7 +1073,7 @@ load test_helper
   run_once
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"#1 priority=1 host=github.com parents=42 blockers=12,13,14,15 needs-human=no pr=none excluded=blocked-by:12,13,14,15"* ]]
+  [[ "$output" == *"#1 priority=1 host=any current=linux parents=42 blockers=12,13,14,15 needs-human=no pr=none excluded=blocked-by:12,13,14,15"* ]]
   [[ "$output" != *"parents=42,43,44,45"* ]]
 }
 

@@ -1,0 +1,49 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {
+      "number": 1,
+      "title": "macOS issue with an open blocker",
+      "state": "OPEN",
+      "labels": ["ready-for-agent", "ralph-host:macos"],
+      "body": "## Blocked by\n- #99\n",
+      "comments": []
+    },
+    {
+      "number": 2,
+      "title": "Linux issue",
+      "state": "OPEN",
+      "labels": ["ready-for-agent", "ralph-host:linux"],
+      "body": "No dependencies.\n",
+      "comments": []
+    },
+    {
+      "number": 3,
+      "title": "Any host issue",
+      "state": "OPEN",
+      "labels": ["ready-for-agent"],
+      "body": "No dependencies.\n",
+      "comments": []
+    },
+    {
+      "number": 4,
+      "title": "Contradictory host issue",
+      "state": "OPEN",
+      "labels": ["ready-for-agent", "ralph-host:macos", "ralph-host:linux"],
+      "body": "No dependencies.\n",
+      "comments": []
+    },
+    {
+      "number": 99,
+      "title": "Open blocker",
+      "state": "OPEN",
+      "labels": [],
+      "body": "No dependencies.\n",
+      "comments": []
+    }
+  ],
+  "pull_requests": [],
+  "checks": "pass"
+}
