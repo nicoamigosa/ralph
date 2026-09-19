@@ -66,9 +66,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LABEL="${RALPH_LABEL:-ready-for-agent}"
-# This is the query page size, not an execution cap: every returned candidate
-# is still considered by the selector.  Keep it explicit because gh defaults
-# issue list to 30 results.
+# Este es el tamaño de página de la consulta, no un límite de ejecución: cada
+# candidato devuelto sigue siendo considerado por el selector. Se explicita
+# porque gh limita por defecto la lista de issues a 30 resultados.
 ISSUE_QUERY_LIMIT=1000
 # La base es el trunk del repo (main/master según el remoto), nunca la rama en
 # la que estés parado: ralph mergea acá y los issues dependientes heredan ese
