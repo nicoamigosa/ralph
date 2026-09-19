@@ -66,6 +66,9 @@ setup() {
   # The GitHub fixture is a sandbox without branch rulesets; protection-specific
   # tests opt back into the production default explicitly.
   export RALPH_REQUIRE_PROTECTION=0
+  export RALPH_REVIEWER_GH_TOKEN=fake-reviewer-token
+  export GH_TOKEN=fake-orchestrator-token
+  export FAKE_REVIEWER_GH_TOKEN=fake-reviewer-token
   unset FAKE_CODEX_SIGNAL_GROUP FAKE_CODEX_SIGNAL_MARKER \
     FAKE_CODEX_CHILD_PID_FILE FAKE_CODEX_CHILD_SECONDS FAKE_CODEX_WAIT_FILE \
     FAKE_CODEX_RELEASE_FILE FAKE_CODEX_LOCK_METADATA_FILE \

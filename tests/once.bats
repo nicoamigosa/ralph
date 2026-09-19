@@ -23,6 +23,88 @@ load test_helper
   [[ "$first_lines" == *"exit 2"* ]]
 }
 
+@test "preflight requires a dedicated reviewer token and explains how to create it" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  unset RALPH_REVIEWER_GH_TOKEN
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RALPH_REVIEWER_GH_TOKEN"* ]]
+  [[ "$output" == *"fine-grained"* ]]
+  [[ "$output" == *"read-only"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+  ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
+}
+
+@test "reviewer receives the dedicated token instead of the orchestrator token" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_ENV_FILE="$TEST_ROOT/claude-env"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_CLAUDE_ENV_FILE")" = "fake-reviewer-token" ]
+  [ "$(cat "$FAKE_CLAUDE_ENV_FILE")" != "fake-orchestrator-token" ]
+}
+
+@test "preflight rejects reusing the orchestrator token for the reviewer" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REVIEWER_GH_TOKEN=fake-orchestrator-token
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"distinto"* ]]
+  [[ "$output" == *"RALPH_REVIEWER_GH_TOKEN"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+  ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
+}
+
+@test "read-only reviewer credentials cannot publish a pull request comment" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_ATTEMPT_COMMENT=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  ! grep -Fq -- 'reviewer-pr-comment' "$GH_MUTATION_LOG"
+}
+
+@test "reviewer token requirement cannot be disabled outside the sandbox" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  unset RALPH_REVIEWER_GH_TOKEN
+  export RALPH_REQUIRE_REVIEWER_TOKEN=0
+  export RALPH_REQUIRE_PROTECTION=1
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"sólo está permitido"* ]]
+  [[ "$output" == *"RALPH_REQUIRE_PROTECTION=0"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+  ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
+}
+
+@test "sandbox may omit the reviewer token and does not inherit GH_TOKEN" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_ENV_FILE="$TEST_ROOT/claude-env"
+  export RALPH_CI_POLICY=none
+  unset RALPH_REVIEWER_GH_TOKEN
+  export RALPH_REQUIRE_REVIEWER_TOKEN=0
+  export RALPH_REQUIRE_PROTECTION=0
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_CLAUDE_ENV_FILE")" = "" ]
+}
+
 @test "workspace-write gives codex exec an absolute writable .git root" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
