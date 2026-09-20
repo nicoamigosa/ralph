@@ -182,6 +182,17 @@ load test_helper
   [ "$effective_seconds" -lt "$RALPH_AGENT_TIMEOUT_SECONDS" ]
 }
 
+@test "manual timeout does not wait for the full kill grace after TERM" {
+  started_at="$(date +%s)"
+
+  run "$PROJECT_ROOT/tests/fakes/timeout" --kill-after=30s 1 \
+    bash -c 'trap "exit 143" TERM; while :; do :; done'
+
+  [ "$status" -eq 124 ]
+  elapsed_seconds=$(( $(date +%s) - started_at ))
+  [ "$elapsed_seconds" -lt 5 ]
+}
+
 @test "preflight rejects claude when auth status JSON is not logged in" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CLAUDE_AUTH_STATUS_OUTPUT='{"loggedIn":false,"authMethod":"none"}'
@@ -2109,7 +2120,7 @@ load test_helper
   [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
   ! grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
   ! grep -Fq 'issue close 2' "$GH_MUTATION_LOG"
-  ! grep -Fq '^post_merge ' "$GH_MUTATION_LOG"
+  ! grep -q '^post_merge ' "$GH_MUTATION_LOG"
 }
 
 @test "merge queue confirma MERGED antes de borrar rama, hook y issue" {
