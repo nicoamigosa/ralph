@@ -240,6 +240,36 @@ load test_helper
   [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
 }
 
+@test "a completed run writes linked summaries and issue/PR events" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .run_id | type == "string" and length > 0
+  ' "$RUN_DIR/summary.json"
+  jq -e '
+    (.stop_reason | type == "string" and length > 0) and
+    (.merged | type == "array") and
+    (.open_prs | type == "array") and
+    (.needs_human | type == "array") and
+    (.blocked | type == "array") and
+    (.errors | type == "array") and
+    (.elapsed_seconds | type == "number") and
+    (.usage.codex_tokens | type == "number") and
+    (.usage.claude_estimated_usd | type == "number") and
+    any(.merged[]; .issue == 1 and .pr == 101)
+  ' "$RUN_DIR/summary.json"
+  [ -s "$RUN_DIR/summary.md" ]
+  grep -Fq '[Issue #1](https://github.com/nicoamigosa/ralph/issues/1)' "$RUN_DIR/summary.md"
+  grep -Fq '[PR #101](https://github.com/nicoamigosa/ralph/pull/101)' "$RUN_DIR/summary.md"
+  jq -s -e 'any(.[]; .event == "pr_state" and .issue == 1 and .pr == 101)' \
+    "$RUN_DIR/events.jsonl"
+}
+
 @test "a normal run defaults to a timestamped directory under runs" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
@@ -293,6 +323,91 @@ load test_helper
     .stop_reason == "issues_failed" and
     any(.issues[]; .number == 1 and .status == "failed" and .reason == "no_pull_request")
   ' "$RUN_DIR/summary.json"
+}
+
+@test "summary records issues needing a human with their issue and PR links" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/needs-human-pr.json"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    any(.needs_human[]; .issue == 1 and .pr == 101 and
+      .issue_url == "https://github.com/nicoamigosa/ralph/issues/1" and
+      .pr_url == "https://github.com/nicoamigosa/ralph/pull/101")
+  ' "$RUN_DIR/summary.json"
+  grep -Fq 'Needs human' "$RUN_DIR/summary.md"
+  jq -s -e 'any(.[]; .event == "issue_failure" and .issue == 1 and
+    .pr == 101 and .status == "needs_human")' "$RUN_DIR/events.jsonl"
+}
+
+@test "summary records open blockers as blocked issues" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e 'any(.blocked[]; .issue == 10 and .blockers == [4] and
+    .issue_url == "https://github.com/nicoamigosa/ralph/issues/10")' \
+    "$RUN_DIR/summary.json"
+  jq -s -e 'any(.[]; .event == "issue_blocked" and .issue == 10 and
+    .blockers == [4])' "$RUN_DIR/events.jsonl"
+}
+
+@test "missing provider cost is null and never inferred from subscription" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_STDOUT='{"type":"result","subtype":"success","is_error":false,"result":"<verdict>PASS</verdict>"}'
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.usage.codex_tokens == 2 and .usage.claude_estimated_usd == null' \
+    "$RUN_DIR/summary.json"
+  grep -Fq 'Actual billing is not inferred' "$RUN_DIR/summary.md"
+}
+
+@test "missing codex token fields are null rather than zero" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_STDOUT='{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n{"type":"turn.completed","usage":{}}'
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.usage.codex_tokens == null and .usage.claude_estimated_usd == null' \
+    "$RUN_DIR/summary.json"
+}
+
+@test "summary trap preserves the original failure exit code" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=42
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 42 ]
+  jq -e '.stop_reason == "issue_failed" and .exit_code == 42 and
+    any(.errors[]; contains("agent failed"))' \
+    "$RUN_DIR/summary.json"
+  [ -s "$RUN_DIR/summary.md" ]
+}
+
+@test "usage limit stop is recorded by the exit summary" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT=__rate_limit__
+  export RALPH_MAX_LIMIT_RETRIES=0
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.stop_reason == "usage_limit" and .exit_code == 0' \
+    "$RUN_DIR/summary.json"
+  grep -Fq 'usage_limit' "$RUN_DIR/summary.md"
 }
 
 @test "an issue that exhausts review rounds is recorded as failed" {
@@ -877,6 +992,8 @@ load test_helper
   [ "$(git -C "$TEST_REPO" rev-parse HEAD)" = "$before_sha" ]
   [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
   ! git --git-dir="$TEST_ORIGIN" show-ref --verify --quiet refs/ralph/lock
+  jq -e '.stop_reason == "signal:TERM" and .exit_code == 143' "$RUN_DIR/summary.json"
+  [ -s "$RUN_DIR/summary.md" ]
 }
 
 @test "TERM does not modify a repo summary.json before RUN_DIR exists" {

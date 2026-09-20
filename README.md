@@ -189,6 +189,16 @@ terminar. `runs/` está ignorado por el `.gitignore` distribuido, y el dry-run
 no crea ese directorio. El resumen siempre termina con un `stop_reason`
 explícito; un fallo de issue no se reporta como `no_ready_issues`.
 
+Al salir, el trap conserva el código original y finaliza `summary.json` y
+`summary.md`. El JSON incluye `run_id`, `stop_reason`, `merged`, `open_prs`,
+`needs_human`, `blocked`, `errors`, `elapsed_seconds` y `usage` con
+`codex_tokens` y `claude_estimated_usd`. Los cuatro estados de trabajo son
+listas con números y enlaces a issues/PRs; `events.jsonl` conserva un evento
+JSON por línea asociado al issue y, cuando existe, al PR. Un dato de uso que
+el proveedor no entrega es `null`, nunca `0`. `claude_estimated_usd` es sólo
+el coste estimado reportado por el proveedor: Ralph no calcula coste marginal
+de una suscripción ni lo presenta como facturación real.
+
 ## Exclusión entre hosts
 
 Cada corrida normal adquiere atómicamente `refs/ralph/lock` en `origin` con un
@@ -364,7 +374,7 @@ Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
 | `RALPH_REVIEW_IDENTITY` | vacío (sin identidad revisora separada) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
-| `RUN_DIR` | `$SCRIPT_DIR/runs/<RUN_ID>` (capturas, eventos y contratos de agentes; override explícito conservado para pruebas) |
+| `RUN_DIR` | `$SCRIPT_DIR/runs/<RUN_ID>` (capturas, eventos, `summary.json`/`.md` y contratos de agentes; override explícito conservado para pruebas) |
 | `RALPH_CHECKPOINT_FILE` | `$SCRIPT_DIR/last_run.md` |
 | `RALPH_HOST_CONFIG` | `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env` |
 
