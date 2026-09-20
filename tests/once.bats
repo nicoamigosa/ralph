@@ -215,6 +215,71 @@ load test_helper
   [ ! -s "$FAKE_AGENT_LOG" ]
 }
 
+@test "a normal run keeps its complete log and agent artifacts under RUN_DIR" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ -s "$RUN_DIR/run.log" ]
+  [ -f "$RUN_DIR/events.log" ]
+  [ -s "$RUN_DIR/last-message.txt" ]
+  [ -s "$RUN_DIR/codex-1.stdout.jsonl" ]
+  [ -f "$RUN_DIR/codex-1.stderr.log" ]
+  [ -s "$RUN_DIR/claude-2.stdout.json" ]
+  [ -f "$RUN_DIR/claude-2.stderr.log" ]
+  [ -s "$RUN_DIR/summary.json" ]
+  grep -Fq '════ Issue #1' "$RUN_DIR/run.log"
+  grep -Fq -- 'agent=codex' "$RUN_DIR/events.log"
+  grep -Fq -- 'agent=reviewer' "$RUN_DIR/events.log"
+  mkdir -p "$TEST_REPO/runs/ignored"
+  : > "$TEST_REPO/runs/ignored/artifact.log"
+  [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
+}
+
+@test "a normal run defaults to a timestamped directory under runs" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  unset RUN_DIR
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  run_dir="$(printf '%s\n' "$output" | sed -n 's/^📁 Corrida [^:]*: artefactos en //p' | tail -n 1)"
+  [[ "$run_dir" == "$PROJECT_ROOT/runs/"* ]]
+  [[ "$run_dir" =~ /[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]]
+  [ -s "$run_dir/run.log" ]
+  [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
+}
+
+@test "dry-run does not create a run directory" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_DRY_RUN=1
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$RUN_DIR" ]
+}
+
+@test "a failed issue records a stop reason instead of no_ready_issues" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=1
+  export RALPH_CI_POLICY=none
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.stop_reason' "$RUN_DIR/summary.json")" = issue_failed ]
+  [ "$(jq -r '.stop_reason' "$RUN_DIR/summary.json")" != no_ready_issues ]
+}
+
 @test "normal run acquires the remote lock before the agent and releases it" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
