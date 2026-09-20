@@ -1,7 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf 'codex %s\n' "$*" >> "$FAKE_AGENT_LOG"
+fake_codex_log="$FAKE_AGENT_LOG"
+case "${1:-}" in
+  --version|login) fake_codex_log="${FAKE_PREFLIGHT_LOG:-$FAKE_AGENT_LOG}" ;;
+esac
+printf 'codex %s\n' "$*" >> "$fake_codex_log"
+
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' "${FAKE_CODEX_VERSION:-codex-cli 0.154.0}"
+  exit "${FAKE_CODEX_VERSION_EXIT:-0}"
+fi
+
+if [ "${1:-}" = "login" ] && [ "${2:-}" = "status" ]; then
+  [ -n "${FAKE_CODEX_LOGIN_STATUS_OUTPUT:-}" ] && printf '%b\n' "$FAKE_CODEX_LOGIN_STATUS_OUTPUT"
+  exit "${FAKE_CODEX_LOGIN_STATUS_EXIT:-0}"
+fi
+
+if [ "${FAKE_CODEX_SMOKE_EXIT+x}" = x ] && printf '%s' "$*" | grep -Fq -- 'RALPH preflight smoke test'; then
+  exit "$FAKE_CODEX_SMOKE_EXIT"
+fi
 
 if [ "${1:-}" = "sandbox" ]; then
   if printf '%s\n' "$*" | grep -Fq -- '--help'; then

@@ -117,7 +117,15 @@ head_ref_oid() {
 
 case "${1:-}" in
   auth)
+    if [ "${2:-}" = "status" ] && [ "${FAKE_GH_AUTH_STATUS_EXIT:-0}" -ne 0 ]; then
+      printf '%s\n' "${FAKE_GH_AUTH_STATUS_OUTPUT:-Not logged in}" >&2
+      exit "$FAKE_GH_AUTH_STATUS_EXIT"
+    fi
     exit 0
+    ;;
+  --version)
+    printf '%s\n' "${FAKE_GH_VERSION:-gh version 2.45.0 (fake)}"
+    exit "${FAKE_GH_VERSION_EXIT:-0}"
     ;;
   repo)
     [ "${2:-}" = "view" ] || exit 2
@@ -130,6 +138,7 @@ case "${1:-}" in
   issue)
     case "${2:-}" in
       list)
+        [ -n "${FAKE_ISSUE_LIST_LOG:-}" ] && printf '%s\n' issue-list >> "$FAKE_ISSUE_LIST_LOG"
         label=""
         state="open"
         issue_limit=30
