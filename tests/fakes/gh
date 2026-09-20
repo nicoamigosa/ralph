@@ -370,7 +370,16 @@ case "${1:-}" in
   run)
     case "${2:-}" in
       list)
-        printf '%s\n' "${FAKE_CI_RUN_URL:-https://github.com/nicoamigosa/ralph/actions/runs/123}"
+        if printf '%s\n' "$*" | grep -q -- '--json' &&
+           ! printf '%s\n' "$*" | grep -q -- '--jq'; then
+          if [ -n "${FAKE_BASE_RUN_JSON:-}" ]; then
+            printf '%s\n' "$FAKE_BASE_RUN_JSON"
+          else
+            printf '%s\n' '[{"databaseId":123,"headSha":"base-sha","status":"completed","conclusion":"success","url":"https://github.com/nicoamigosa/ralph/actions/runs/123"}]'
+          fi
+        else
+          printf '%s\n' "${FAKE_CI_RUN_URL:-https://github.com/nicoamigosa/ralph/actions/runs/123}"
+        fi
         ;;
       *)
         exit 2
@@ -408,6 +417,23 @@ case "${1:-}" in
       : > "${GH_MUTATION_LOG}.head-changed"
     fi
     case "$api_endpoint" in
+      */actions/runs/*/jobs\?*)
+        if [ -n "${FAKE_BASE_JOBS_JSON:-}" ]; then
+          printf '{"jobs":%s}\n' "$FAKE_BASE_JOBS_JSON"
+        else
+          printf '%s\n' '{"jobs":[{"id":901,"name":"test","status":"completed","conclusion":"success","steps":[{"name":"test","status":"completed","conclusion":"success"}]}]}'
+        fi
+        ;;
+      */actions/jobs/*)
+        if [ -n "${FAKE_CHECK_JOB_JSON:-}" ]; then
+          printf '%s\n' "$FAKE_CHECK_JOB_JSON"
+        else
+          exit 1
+        fi
+        ;;
+      */check-runs/*/annotations)
+        printf '%s\n' "${FAKE_CHECK_ANNOTATIONS_JSON:-[]}"
+        ;;
       */pulls/*/reviews)
         printf '%s\n' "${FAKE_REVIEWS_JSON:-[]}"
         ;;
@@ -456,6 +482,9 @@ case "${1:-}" in
             ;;
           pending)
             printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"in_progress","conclusion":null}]}\n' "$fake_sha"
+            ;;
+          ci_infra)
+            printf '{"check_runs":[{"id":801,"name":"CI","head_sha":"%s","status":"completed","conclusion":"failure"}]}\n' "$fake_sha"
             ;;
           infra)
             printf '%s\n' 'failed to connect to GitHub API' >&2
