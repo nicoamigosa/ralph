@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"integration-fixture"}
+{"type":"item.completed","item":{"id":"integration-message","type":"agent_message","text":"fake codex completed"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}

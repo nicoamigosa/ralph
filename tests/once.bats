@@ -37,6 +37,17 @@ load test_helper
   ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
 }
 
+@test "integration harness rejects a slug outside the allowlist before any GitHub mutation" {
+  export REPO_SLUG=example/not-allowed
+  export RALPH_SANDBOX_SLUGS=nicoamigosa/ralph-sandbox
+
+  run bash "$PROJECT_ROOT/tests/integration/run.sh"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"allowlist"* ]]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
 @test "preflight fails when no usable timeout command exists and explains the installation" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_TIMEOUT_UNAVAILABLE=1
