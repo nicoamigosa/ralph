@@ -843,6 +843,7 @@ load test_helper
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
   export RALPH_DRY_RUN=1
   export RALPH_ISSUE_ORDER="6 10 5 2 4"
+  export FAKE_UNAME_SYSTEM=Linux
 
   run_once
 
@@ -936,6 +937,7 @@ load test_helper
 @test "more than 30 issues and parents with children outside candidates: full selection" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/complete-selection.json"
   export RALPH_DRY_RUN=1
+  export FAKE_UNAME_SYSTEM=Linux
 
   run_once
 
@@ -988,6 +990,7 @@ load test_helper
 @test "a blocker reopened during the pass blocks later candidates again" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/blocker-reopened.json"
   export RALPH_DRY_RUN=1
+  export FAKE_UNAME_SYSTEM=Linux
   export FAKE_STATE_SEQUENCE_ISSUE=2
   export FAKE_STATE_SEQUENCE='CLOSED|OPEN'
   export FAKE_STATE_SEQUENCE_FILE="$TEST_ROOT/blocker-state-calls"
@@ -1057,6 +1060,7 @@ load test_helper
 @test "section references stop at the next heading" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/section-refs.json"
   export RALPH_DRY_RUN=1
+  export FAKE_UNAME_SYSTEM=Linux
 
   run_once
 
@@ -1069,6 +1073,7 @@ load test_helper
 @test "section references require one documented reference per line" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/section-format.json"
   export RALPH_DRY_RUN=1
+  export FAKE_UNAME_SYSTEM=Linux
 
   run_once
 
