@@ -1153,6 +1153,99 @@ load test_helper
   [[ "$run_output" == *"PR #101 espera revisión humana"* ]]
 }
 
+@test "sólo rama remota: recuperar su trabajo y revisar el PR sin Codex" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_PR_STATE="$TEST_ROOT/codex-created-pr"
+  export FAKE_CLAUDE_RESULT='<verdict>CHANGES_REQUESTED</verdict>'
+  export RALPH_MAX_ROUNDS=1
+
+  git -C "$TEST_REPO" switch -q -c ralph/issue-1
+  printf '%s\n' 'trabajo recuperado' > "$TEST_REPO/remote-work.txt"
+  git -C "$TEST_REPO" add remote-work.txt
+  git -C "$TEST_REPO" commit -q -m 'remote work for issue 1'
+  git -C "$TEST_REPO" push -q -u origin ralph/issue-1
+  git -C "$TEST_REPO" switch -q main
+  git -C "$TEST_REPO" branch -D -q ralph/issue-1
+  : > "$FAKE_CODEX_PR_STATE"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Fq 'codex exec' "$FAKE_AGENT_LOG"
+  grep -Eq '^claude ' "$FAKE_AGENT_LOG"
+  [ "$(git -C "$TEST_REPO" config --get branch.ralph/issue-1.remote)" = origin ]
+  [ "$(git -C "$TEST_REPO" config --get branch.ralph/issue-1.merge)" = refs/heads/ralph/issue-1 ]
+  [[ "$output" == *"rama remota 'ralph/issue-1' recuperada"* ]]
+}
+
+@test "PR mergeado con issue abierto se reconcilia sin crear rama ni invocar agentes" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/merged-pr-open-issue.json"
+
+  run_once
+  run_output="$output"
+
+  [ "$status" -eq 0 ]
+  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  run git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  [ "$status" -eq 1 ]
+  grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [[ "$run_output" == *"PR #101 ya estaba mergeado; reconcilio el issue #1"* ]]
+}
+
+@test "reconciliar un PR mergeado sin cierre marca el issue para humano" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/merged-pr-open-issue-part-of.json"
+  export RALPH_CLOSE_POLICY=never
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  grep -Fq 'api repos/nicoamigosa/ralph/issues/1/labels -f labels[]=ralph-needs-human' "$GH_MUTATION_LOG"
+  grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
+}
+
+@test "PR mergeado de otra rama que menciona el issue no impide implementarlo" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/foreign-merged-pr-mention.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Eq '^codex exec ' "$FAKE_AGENT_LOG"
+  ! grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
+}
+
+@test "rama local divergente de origin queda para humano sin invocar agentes" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_PR_STATE="$TEST_ROOT/codex-created-pr"
+
+  git -C "$TEST_REPO" switch -q -c ralph/issue-1
+  printf '%s\n' 'trabajo remoto' > "$TEST_REPO/remote-work.txt"
+  git -C "$TEST_REPO" add remote-work.txt
+  git -C "$TEST_REPO" commit -q -m 'remote work for issue 1'
+  git -C "$TEST_REPO" push -q -u origin ralph/issue-1
+  git -C "$TEST_REPO" switch -q main
+  git -C "$TEST_REPO" branch -D -q ralph/issue-1
+  git -C "$TEST_REPO" switch -q -c ralph/issue-1
+  printf '%s\n' 'trabajo local distinto' > "$TEST_REPO/local-work.txt"
+  git -C "$TEST_REPO" add local-work.txt
+  git -C "$TEST_REPO" commit -q -m 'divergent local work for issue 1'
+  : > "$FAKE_CODEX_PR_STATE"
+
+  run_once
+  run_output="$output"
+
+  [ "$status" -eq 0 ]
+  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  grep -Fq 'ralph-needs-human' "$GH_MUTATION_LOG"
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  [[ "$run_output" == *"divergente"* ]]
+  [[ "$run_output" == *"PR #101 queda para un humano"* ]]
+}
+
 @test "claude PASS with a nonzero exit never merges the issue" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
