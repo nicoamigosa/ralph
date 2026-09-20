@@ -209,9 +209,12 @@ LAST_MSG=""
 RUN_ID=""
 RUN_DIR="${RUN_DIR:-}"
 RUN_INITIALIZED=0
+RUN_STARTED_EPOCH=""
 RUN_STOP_REASON="running"
 RUN_FAILED_ISSUES=0
 RUN_SEQUENCE=0
+RUN_CODEX_TOKENS=""
+RUN_CLAUDE_ESTIMATED_USD=""
 AGENT_STDOUT=""
 AGENT_STDERR=""
 ADAPTER_RESULT_FILE=""
@@ -226,6 +229,7 @@ PROTECTION_RULESET_IDS=""
 MERGED_SHA=""
 
 CURRENT_ISSUE=""
+CURRENT_PR=""
 CURRENT_PHASE="preflight"
 CURRENT_AGENT_PID=""
 CURRENT_AGENT_PGID=""
@@ -305,6 +309,77 @@ terminate_agent_processes() {
   fi
 }
 
+record_run_event() {
+  local event="$1" issue="${2:-}" pr="${3:-}" status="${4:-}" detail="${5:-}" blockers="${6:-}"
+  local issue_json=null pr_json=null blockers_json event_json timestamp
+  [ "$RUN_INITIALIZED" -eq 1 ] || return 0
+  timestamp="$(lock_epoch_now 2>/dev/null)" || timestamp=""
+  [ -n "$issue" ] && printf '%s' "$issue" | grep -Eq '^[0-9]+$' && issue_json="$issue"
+  [ -n "$pr" ] && printf '%s' "$pr" | grep -Eq '^[0-9]+$' && pr_json="$pr"
+  blockers_json="$(printf '%s\n' "$blockers" | jq -Rsc '
+    split("\n") | map(select(length > 0) | tonumber)
+  ')" || return 70
+  event_json="$(jq -cn \
+    --arg event "$event" \
+    --arg timestamp "$timestamp" \
+    --arg phase "$CURRENT_PHASE" \
+    --arg status "$status" \
+    --arg detail "$detail" \
+    --argjson issue "$issue_json" \
+    --argjson pr "$pr_json" \
+    --argjson blockers "$blockers_json" \
+    '{event: $event, timestamp: (if $timestamp == "" then null else $timestamp end),
+      issue: $issue, pr: $pr, phase: $phase,
+      status: (if $status == "" then null else $status end),
+      detail: (if $detail == "" then null else $detail end),
+      blockers: $blockers}')" || return 70
+  printf '%s\n' "$event_json" >> "$RUN_DIR/events.jsonl" || return 70
+}
+
+record_codex_usage() {
+  local stdout_file="$1" tokens
+  tokens="$(jq -s -r '
+    [ .[] | select(.type == "turn.completed" and (.usage | type == "object")) |
+      if (.usage.total_tokens | type) == "number" then .usage.total_tokens
+      elif ([.usage.input_tokens, .usage.output_tokens]
+            | any(type == "number")) then
+        [.usage.input_tokens, .usage.output_tokens]
+        | map(select(type == "number")) | add
+      else empty
+      end
+    ] | if length == 0 then empty else add end
+  ' "$stdout_file" 2>/dev/null)" || tokens=""
+  case "$tokens" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ -n "$RUN_CODEX_TOKENS" ]; then
+        RUN_CODEX_TOKENS=$((RUN_CODEX_TOKENS + tokens))
+      else
+        RUN_CODEX_TOKENS="$tokens"
+      fi
+      ;;
+  esac
+}
+
+record_claude_usage() {
+  local stdout_file="$1" cost
+  cost="$(jq -s -r '
+    if length == 1 and (.[0] | type == "object") and
+       (.[0].total_cost_usd | type == "number") then .[0].total_cost_usd
+    else empty end
+  ' "$stdout_file" 2>/dev/null)" || cost=""
+  case "$cost" in
+    ''|*[!0-9.-]*) ;;
+    *)
+      if [ -n "$RUN_CLAUDE_ESTIMATED_USD" ]; then
+        RUN_CLAUDE_ESTIMATED_USD="$(awk -v left="$RUN_CLAUDE_ESTIMATED_USD" -v right="$cost" 'BEGIN { printf "%.10f", left + right }')"
+      else
+        RUN_CLAUDE_ESTIMATED_USD="$cost"
+      fi
+      ;;
+  esac
+}
+
 record_signal_in_summary() {
   local signal="$1" exit_code="$2" summary_file
   local summary_tmp message issue_json
@@ -343,6 +418,8 @@ initialize_run_storage() {
     printf '❌ No pude generar el identificador de la corrida.\n' >&2
     return 70
   }
+  RUN_STARTED_EPOCH="$(lock_epoch_now 2>/dev/null)" || RUN_STARTED_EPOCH=""
+  case "$RUN_STARTED_EPOCH" in *[!0-9]*|'') RUN_STARTED_EPOCH="" ;; esac
   [ -n "$RUN_DIR" ] || RUN_DIR="$SCRIPT_DIR/runs/$RUN_ID"
   mkdir -p "$RUN_DIR" || {
     printf "❌ No pude crear el directorio de corrida '%s'.\n" "$RUN_DIR" >&2
@@ -355,6 +432,7 @@ initialize_run_storage() {
   AGENT_LOG="$RUN_DIR/events.log"
   LAST_MSG="$RUN_DIR/last-message.txt"
   : > "$AGENT_LOG" || return 70
+  : > "$RUN_DIR/events.jsonl" || return 70
   : > "$LAST_MSG" || return 70
   summary_tmp="$RUN_DIR/summary.json.tmp.$$"
   if ! jq -cn \
@@ -364,18 +442,64 @@ initialize_run_storage() {
       --arg stop_reason "$RUN_STOP_REASON" \
       '{schema: 1, run_id: $run_id, started_at: $started_at,
         base_branch: $base_branch, stop_reason: $stop_reason,
-        exit_code: null, issues: [], errors: []}' > "$summary_tmp"; then
+        exit_code: null, issues: [], merged: [], open_prs: [],
+        needs_human: [], blocked: [], errors: [], elapsed_seconds: null,
+        usage: {codex_tokens: null, claude_estimated_usd: null}}' > "$summary_tmp"; then
     rm -f "$summary_tmp"
     return 70
   fi
   mv -f "$summary_tmp" "$RUN_DIR/summary.json" || return 70
   RUN_INITIALIZED=1
+  record_run_event "run_started" "" "" "running" "$RUN_ID" || return 70
   exec > >(tee -a "$RUN_DIR/run.log") 2>&1
   echo "📁 Corrida $RUN_ID: artefactos en $RUN_DIR"
 }
 
+write_summary_markdown() {
+  local markdown_tmp="$RUN_DIR/summary.md.tmp.$$"
+  jq -r --arg repo "https://github.com/$REPO_SLUG" '
+    def item_link($url; $label):
+      if $url == null then $label else "[" + $label + "](" + $url + ")" end;
+    def issue_link:
+      if .issue == null then "Issue desconocido"
+      else item_link(.issue_url; "Issue #" + (.issue | tostring)) end;
+    def pr_link:
+      if .pr == null then "PR desconocido"
+      else item_link(.pr_url; "PR #" + (.pr | tostring)) end;
+    def section($title; $items):
+      "## " + $title + "\n\n" +
+      (if ($items | length) == 0 then "- Ninguno\n"
+       else ($items | map("- " + issue_link + " — " +
+         (if .pr == null then "" else pr_link end)) | join("\n") + "\n") end);
+    "# Ralph — corrida " + .run_id + "\n\n" +
+    "- Stop reason: `" + (.stop_reason | tostring) + "`\n" +
+    "- Exit code: `" + (.exit_code | tostring) + "`\n" +
+    "- Elapsed seconds: `" + (.elapsed_seconds | tostring) + "`\n\n" +
+    section("Merged"; .merged) + "\n" +
+    section("Open PRs"; .open_prs) + "\n" +
+    "## Needs human\n\n" +
+    (if (.needs_human | length) == 0 then "- Ninguno\n"
+     else (.needs_human | map("- " + issue_link + " — " + (if .reason == null then "sin motivo" else .reason end) +
+       (if .pr == null then "" else " (" + pr_link + ")" end)) | join("\n") + "\n") end) + "\n" +
+    "## Blocked\n\n" +
+    (if (.blocked | length) == 0 then "- Ninguno\n"
+     else (.blocked | map("- " + issue_link + " — blockers: " + ((.blockers // []) | map("#" + tostring) | join(", "))) | join("\n") + "\n") end) + "\n" +
+    "## Errors\n\n" +
+    (if (.errors | length) == 0 then "- Ninguno\n"
+     else (.errors | map("- " + tostring) | join("\n") + "\n") end) + "\n" +
+    "## Usage\n\n" +
+    "- Codex tokens: `" + (if .usage.codex_tokens == null then "unknown" else (.usage.codex_tokens | tostring) end) + "`\n" +
+    "- Claude estimated USD: `" + (if .usage.claude_estimated_usd == null then "unknown" else (.usage.claude_estimated_usd | tostring) end) + "`\n\n" +
+    "Claude cost is an estimate reported by the provider. Actual billing is not inferred, and a subscription does not imply marginal cost.\n"
+  ' "$RUN_DIR/summary.json" > "$markdown_tmp" 2>/dev/null || {
+    rm -f "$markdown_tmp"
+    return 70
+  }
+  mv -f "$markdown_tmp" "$RUN_DIR/summary.md"
+}
+
 finalize_run_summary() {
-  local exit_code="$1" reason="$RUN_STOP_REASON" summary_tmp issue_json
+  local exit_code="$1" reason="$RUN_STOP_REASON" summary_tmp issue_json elapsed_json now
   [ "$RUN_INITIALIZED" -eq 1 ] || return 0
   [ -f "$RUN_DIR/summary.json" ] || return 0
   if [ "$reason" = "running" ]; then
@@ -392,20 +516,61 @@ finalize_run_summary() {
   else
     issue_json=null
   fi
+  elapsed_json=null
+  if [ -n "$RUN_STARTED_EPOCH" ]; then
+    now="$(lock_epoch_now 2>/dev/null)" || now=""
+    if printf '%s' "$now" | grep -Eq '^[0-9]+$' && [ "$now" -ge "$RUN_STARTED_EPOCH" ]; then
+      elapsed_json=$((now - RUN_STARTED_EPOCH))
+    fi
+  fi
   summary_tmp="$RUN_DIR/summary.json.tmp.$$"
   if jq --arg stop_reason "$reason" \
       --argjson exit_code "$exit_code" \
       --argjson issue "$issue_json" \
+      --argjson elapsed "$elapsed_json" \
+      --arg repo "https://github.com/$REPO_SLUG" \
+      --arg codex_tokens "$RUN_CODEX_TOKENS" \
+      --arg claude_estimated_usd "$RUN_CLAUDE_ESTIMATED_USD" \
+      --slurpfile events "$RUN_DIR/events.jsonl" \
       '.stop_reason = $stop_reason | .exit_code = $exit_code |
-       .current_issue = $issue' "$RUN_DIR/summary.json" > "$summary_tmp" 2>/dev/null; then
+       .current_issue = $issue | .elapsed_seconds = $elapsed |
+       .errors = ((.errors // []) +
+         [$events[] | select(.event == "error" and .detail != null) | .detail] | unique) |
+       (.usage = {
+         codex_tokens: (if $codex_tokens == "" then null else ($codex_tokens | tonumber) end),
+         claude_estimated_usd: (if $claude_estimated_usd == "" then null else ($claude_estimated_usd | tonumber) end)
+       }) |
+       (reduce ($events[] | select((.event == "pr_associated" or .event == "pr_state") and .pr != null)) as $event
+         ({}; .[($event.pr | tostring)] = $event) | [.[]]) as $latest_prs |
+       (reduce ($events[] | select(.event == "issue_failure" and .status == "needs_human" and .issue != null)) as $event
+         ({}; .[($event.issue | tostring)] = $event) | [.[]]) as $human_events |
+       (reduce ($events[] | select(.event == "issue_blocked" and .issue != null)) as $event
+         ({}; .[($event.issue | tostring)] = $event) | [.[]]) as $blocked_events |
+       .merged = [$latest_prs[] | select(.status == "merged") |
+         {issue: .issue, pr: .pr,
+          issue_url: (if .issue == null then null else ($repo + "/issues/" + (.issue | tostring)) end),
+          pr_url: ($repo + "/pull/" + (.pr | tostring))}] |
+       .open_prs = [$latest_prs[] | select(.status != "merged") |
+         {issue: .issue, pr: .pr,
+          issue_url: (if .issue == null then null else ($repo + "/issues/" + (.issue | tostring)) end),
+          pr_url: ($repo + "/pull/" + (.pr | tostring))}] |
+       .needs_human = [$human_events[] |
+         {issue: .issue, pr: .pr, reason: .detail,
+          issue_url: (if .issue == null then null else ($repo + "/issues/" + (.issue | tostring)) end),
+          pr_url: (if .pr == null then null else ($repo + "/pull/" + (.pr | tostring)) end)}] |
+       .blocked = [$blocked_events[] |
+         {issue: .issue, blockers: .blockers,
+          issue_url: (if .issue == null then null else ($repo + "/issues/" + (.issue | tostring)) end)}]' \
+      "$RUN_DIR/summary.json" > "$summary_tmp" 2>/dev/null; then
     mv -f "$summary_tmp" "$RUN_DIR/summary.json"
   else
     rm -f "$summary_tmp"
   fi
+  write_summary_markdown || true
 }
 
 record_issue_failure() {
-  local issue="$1" reason="$2" summary_tmp
+  local issue="$1" reason="$2" summary_tmp event_status pr="${3-$CURRENT_PR}"
   [ "$RUN_INITIALIZED" -eq 1 ] || return 0
   RUN_FAILED_ISSUES=1
   summary_tmp="$RUN_DIR/summary.json.tmp.$$"
@@ -418,6 +583,9 @@ record_issue_failure() {
     return 70
   fi
   mv -f "$summary_tmp" "$RUN_DIR/summary.json" || return 70
+  event_status=failed
+  [ "$reason" = "needs_human" ] && event_status=needs_human
+  record_run_event "issue_failure" "$issue" "$pr" "$event_status" "$reason" || return $?
 }
 
 signal_number() {
@@ -438,6 +606,7 @@ handle_signal() {
   message="corrida terminada por señal $signal durante $CURRENT_PHASE del issue #${CURRENT_ISSUE:-?}"
   printf '⚠️  %s\n' "$message"
   [ -n "$AGENT_LOG" ] && printf '%s\n' "$message" >> "$AGENT_LOG"
+  record_run_event "signal" "$CURRENT_ISSUE" "$CURRENT_PR" "signal:$signal" "$message" || true
   record_signal_in_summary "$signal" "$exit_code"
   terminate_agent_processes
   exit "$exit_code"
@@ -450,6 +619,7 @@ cleanup_on_exit() {
   finalize_run_summary "$exit_code"
   [ -n "$CURRENT_AGENT_FIFO" ] && rm -f "$CURRENT_AGENT_FIFO"
   [ -n "$CURRENT_AGENT_ERR_FIFO" ] && rm -f "$CURRENT_AGENT_ERR_FIFO"
+  return "$exit_code"
 }
 
 trap 'handle_signal TERM' TERM
@@ -1656,6 +1826,7 @@ run_codex() {
   local prompt="$1" process_rc
   AGENT_ROLE="codex"
   : > "$LAST_MSG"
+  record_run_event "agent_started" "$CURRENT_ISSUE" "$CURRENT_PR" "codex" "$CURRENT_PHASE" || return $?
   prepare_agent_capture codex stdout.jsonl
   build_codex_sandbox_config || return $?
   AGENT_COMMAND=(
@@ -1681,15 +1852,21 @@ run_codex() {
     ADAPTER_EXIT_CODE="$process_rc"
     ADAPTER_ERROR="agent capture failed"
     write_adapter_result
+    record_run_event "agent_finished" "$CURRENT_ISSUE" "$CURRENT_PR" "failed" "codex" || return $?
+    record_run_event "error" "$CURRENT_ISSUE" "$CURRENT_PR" "failed" "$ADAPTER_ERROR" || return $?
     return "$process_rc"
   fi
   parse_codex_result "$AGENT_STDOUT" "$AGENT_STDERR" "$LAST_MSG" "$process_rc"
+  record_codex_usage "$AGENT_STDOUT"
+  record_run_event "agent_finished" "$CURRENT_ISSUE" "$CURRENT_PR" "$ADAPTER_STATUS" "codex" || return $?
+  [ -z "$ADAPTER_ERROR" ] || record_run_event "error" "$CURRENT_ISSUE" "$CURRENT_PR" "$ADAPTER_STATUS" "$ADAPTER_ERROR" || return $?
   finish_adapter
 }
 
 run_claude() {
   local prompt="$1" process_rc
   AGENT_ROLE="reviewer"
+  record_run_event "agent_started" "$CURRENT_ISSUE" "$CURRENT_PR" "reviewer" "$CURRENT_PHASE" || return $?
   prepare_agent_capture claude stdout.json
   AGENT_COMMAND=(
     claude
@@ -1712,9 +1889,14 @@ run_claude() {
     ADAPTER_EXIT_CODE="$process_rc"
     ADAPTER_ERROR="agent capture failed"
     write_adapter_result
+    record_run_event "agent_finished" "$CURRENT_ISSUE" "$CURRENT_PR" "failed" "reviewer" || return $?
+    record_run_event "error" "$CURRENT_ISSUE" "$CURRENT_PR" "failed" "$ADAPTER_ERROR" || return $?
     return "$process_rc"
   fi
   parse_claude_result "$AGENT_STDOUT" "$AGENT_STDERR" "$process_rc"
+  record_claude_usage "$AGENT_STDOUT"
+  record_run_event "agent_finished" "$CURRENT_ISSUE" "$CURRENT_PR" "$ADAPTER_STATUS" "reviewer" || return $?
+  [ -z "$ADAPTER_ERROR" ] || record_run_event "error" "$CURRENT_ISSUE" "$CURRENT_PR" "$ADAPTER_STATUS" "$ADAPTER_ERROR" || return $?
   finish_adapter
 }
 
@@ -1818,6 +2000,7 @@ publish_pr_state() {
     return 70
   fi
   PR_STATE_COMMENT_ID="$comment_id"
+  record_run_event "pr_state" "$issue" "$pr" "$status" "$merge_status" || return $?
 }
 
 resolve_merge_identity() {
@@ -1960,6 +2143,7 @@ reconcile_merged_pr() {
     gh issue comment "$issue" --body "🤖 PR #$pr ya estaba mergeado; el issue queda abierto (política de cierre: $CLOSE_POLICY)." >/dev/null 2>&1 || true
     echo "✅ PR #$pr ya estaba mergeado; reconcilio el issue #$issue y lo dejo abierto según la política '$CLOSE_POLICY'."
   fi
+  record_run_event "pr_state" "$issue" "$pr" "merged" "merged" || return $?
 }
 
 checkout_or_fail() {
@@ -2435,8 +2619,10 @@ process_issue() {
   local remote_delete_error
 
   CURRENT_ISSUE="$num"
+  CURRENT_PR=""
   CURRENT_PHASE="preparación"
   pr=""
+  record_run_event "issue_started" "$num" "" "started" "" || return $?
   echo ""
   echo "════ Issue #$num ($branch) ════"
 
@@ -2454,6 +2640,7 @@ process_issue() {
   if [ -n "$open_pr_record" ]; then
     pr="$(jq -r '.number' <<<"$open_pr_record")"
     branch="$(jq -r --arg fallback "$branch" '.headRefName // $fallback' <<<"$open_pr_record")"
+    CURRENT_PR="$pr"
   else
     merged_pr="$(jq -r '
       map(select(((.state // "") | ascii_upcase) == "MERGED" or (.mergedAt // null) != null)) |
@@ -2521,6 +2708,10 @@ process_issue() {
     rc=$?
     [ "$rc" -eq 0 ] || return "$rc"
   fi
+  CURRENT_PR="$pr"
+  if [ -n "$pr" ]; then
+    record_run_event "pr_associated" "$num" "$pr" "open" "$branch" || return $?
+  fi
 
   # Un PR ya marcado para humano no se vuelve a tocar: agotó sus rondas.
   if [ -n "$pr" ]; then
@@ -2529,7 +2720,7 @@ process_issue() {
     [ "$rc" -eq 70 ] && return "$rc"
     if [ "$rc" -eq 0 ]; then
       echo "🙋 PR #$pr espera revisión humana; no lo toco."
-      record_issue_failure "$num" "needs_human" || return $?
+      record_issue_failure "$num" "needs_human" "$pr" || return $?
       checkout_or_fail "$BASE_BRANCH" || return 70
       return 0
     fi
@@ -2624,6 +2815,7 @@ $PROMPT_IMPLEMENT"
     esac
     if [ "$PR_STATE_MERGE_STATUS" = "merged" ]; then
       echo "✅ PR #$pr ya figura como mergeado en el estado remoto."
+      record_run_event "pr_state" "$num" "$pr" "merged" "merged" || return $?
       checkout_or_fail "$BASE_BRANCH" || return 70
       return 0
     fi
@@ -2806,6 +2998,7 @@ $PROMPT_REVIEW"
           if [ "$MERGE_PENDING_POLICY" = "stop" ]; then
             checkout_or_fail "$BASE_BRANCH" || return 70
             write_checkpoint "merge_pending para el PR #$pr; la corrida se detiene sin borrar la rama ni cerrar el issue."
+            RUN_STOP_REASON="merge_pending"
             exit 0
           fi
           checkout_or_fail "$BASE_BRANCH" || return 70
@@ -2843,6 +3036,7 @@ $PROMPT_REVIEW"
             add_label "$num" "$NEEDS_HUMAN_LABEL"
             gh issue comment "$num" --body "🤖 PR #$pr mergeado como $merged_sha pero la verificación de producción falló. Ralph se detiene." >/dev/null 2>&1 || true
             write_checkpoint "producción no verificada tras mergear PR #$pr como \`$merged_sha\`."
+            RUN_STOP_REASON="production_unverified"
             exit 1
           fi
         fi
@@ -3010,7 +3204,7 @@ validate_issue_for_agent() {
   fi
   if issue_has_label "$ISSUE_LABELS" "$NEEDS_HUMAN_LABEL"; then
     echo "🙋 #$num marcado con $NEEDS_HUMAN_LABEL; no invoco agentes."
-    record_issue_failure "$num" "needs_human" || return $?
+    record_issue_failure "$num" "needs_human" "$pr" || return $?
     return 1
   fi
 
@@ -3049,7 +3243,7 @@ validate_issue_for_agent() {
     [ "$rc" -eq 70 ] && return "$rc"
     if [ "$rc" -eq 0 ]; then
       echo "🙋 PR #$pr espera revisión humana; no invoco agentes."
-      record_issue_failure "$num" "needs_human" || return $?
+      record_issue_failure "$num" "needs_human" "$pr" || return $?
       return 1
     fi
   fi
@@ -3213,7 +3407,7 @@ select_issues() {
       fi
       if issue_has_label "${ISSUE_LABELS_BY_ISSUE[$num]}" "$NEEDS_HUMAN_LABEL"; then
         echo "🙋 #$num marcado con $NEEDS_HUMAN_LABEL; no lo toco."
-        record_issue_failure "$num" "needs_human" || return $?
+        record_issue_failure "$num" "needs_human" "$pr" || return $?
         continue
       fi
 
@@ -3227,11 +3421,12 @@ select_issues() {
       # acabamos de cerrar.
       if [ -n "$open_blockers" ]; then
         echo "⏭️  #$num bloqueado por dependencias abiertas, lo salto por ahora."
+        record_run_event "issue_blocked" "$num" "$pr" "blocked" "open blockers" "$open_blockers" || return $?
         continue
       fi
       if [ "$needs_human" = yes ]; then
         echo "🙋 PR #$pr espera revisión humana; no lo toco."
-        record_issue_failure "$num" "needs_human" || return $?
+        record_issue_failure "$num" "needs_human" "$pr" || return $?
         continue
       fi
 
@@ -3246,6 +3441,7 @@ select_issues() {
           if [ "$limit_retries" -ge "$MAX_LIMIT_RETRIES" ]; then
             echo "🛑 Tope del proveedor: máximo $MAX_LIMIT_RETRIES reintentos para #$num; guardo contexto."
             write_checkpoint "tope del proveedor agotó el máximo de $MAX_LIMIT_RETRIES reintentos para #$num (${LIMIT_ERROR:-sin detalle})."
+            RUN_STOP_REASON="usage_limit"
             exit 0
           fi
           limit_retries=$((limit_retries + 1))
@@ -3254,6 +3450,7 @@ select_issues() {
             if [ "$now" -ge "$DEADLINE_EPOCH" ]; then
               echo "🛑 Deadline global alcanzado; no reintento #$num."
               write_checkpoint "deadline global alcanzado antes del reintento de #$num."
+              RUN_STOP_REASON="deadline"
               exit 0
             fi
           fi
@@ -3261,6 +3458,7 @@ select_issues() {
           wait_rc=$?
           if [ "$wait_rc" -eq 2 ]; then
             write_checkpoint "deadline global alcanzado antes del reset del proveedor para #$num."
+            RUN_STOP_REASON="deadline"
             exit 0
           elif [ "$wait_rc" -ne 0 ]; then
             echo "❌ No pude esperar el reset del proveedor; detengo la corrida."
