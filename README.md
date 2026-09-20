@@ -20,7 +20,10 @@ fallo de `tee` devuelve 70 y detiene la corrida.
 
 La revisión, los checks y el merge quedan ligados al mismo SHA: Ralph compara el
 `HEAD` local con `headRefOid` antes y después de revisar, exige un árbol limpio y
-usa `--match-head-commit` al mergear. `RALPH_MERGE_METHOD` sólo admite
+usa `--match-head-commit` al mergear. Si GitHub tarda en reflejar un push recién
+hecho, sólo reintenta `headRefOid` hasta 5 veces, esperando 2 segundos entre
+lecturas; un `HEAD` local distinto falla de inmediato y nunca se revisa ni
+mergea un SHA que el PR no confirme. `RALPH_MERGE_METHOD` sólo admite
 `--squash`, `--merge` o `--rebase`; cualquier otro valor detiene el preflight.
 
 La política de CI es `required` por defecto. Si GitHub todavía no reporta checks,

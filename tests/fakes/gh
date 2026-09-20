@@ -108,6 +108,21 @@ merge_state() {
 head_ref_oid() {
   if [ "${FAKE_HEAD_CHANGED:-0}" = "1" ] && [ -f "${GH_MUTATION_LOG}.head-changed" ]; then
     printf '%s\n' "head_changed"
+  elif [ -n "${FAKE_HEAD_REF_OID_SEQUENCE:-}" ]; then
+    head_ref_oid_call=0
+    if [ -n "${FAKE_HEAD_REF_OID_SEQUENCE_FILE:-}" ] \
+        && [ -f "$FAKE_HEAD_REF_OID_SEQUENCE_FILE" ]; then
+      read -r head_ref_oid_call < "$FAKE_HEAD_REF_OID_SEQUENCE_FILE"
+    fi
+    IFS='|' read -r -a head_ref_oid_sequence <<< "$FAKE_HEAD_REF_OID_SEQUENCE"
+    head_ref_oid_index="$head_ref_oid_call"
+    if [ "$head_ref_oid_index" -ge "${#head_ref_oid_sequence[@]}" ]; then
+      head_ref_oid_index=$((${#head_ref_oid_sequence[@]} - 1))
+    fi
+    if [ -n "${FAKE_HEAD_REF_OID_SEQUENCE_FILE:-}" ]; then
+      printf '%s\n' "$((head_ref_oid_call + 1))" > "$FAKE_HEAD_REF_OID_SEQUENCE_FILE"
+    fi
+    printf '%s\n' "${head_ref_oid_sequence[$head_ref_oid_index]}"
   elif [ -n "${FAKE_HEAD_REF_OID:-}" ]; then
     printf '%s\n' "$FAKE_HEAD_REF_OID"
   else

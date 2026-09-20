@@ -2218,12 +2218,50 @@ load test_helper
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
   export FAKE_HEAD_REF_OID=remote-head-changed
+  export FAKE_SLEEP_NOOP=1
 
   run_once
 
   [ "$status" -eq 70 ]
   ! grep -Eq '^claude ' "$FAKE_AGENT_LOG"
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [ "$(grep -c '^2$' "$FAKE_SLEEP_LOG")" -eq 4 ]
+  [[ "$output" == *"head_changed"* ]]
+}
+
+@test "headRefOid obsoleto converge antes de revisar el SHA correcto" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_HEAD_REF_OID=stale-head
+  export FAKE_HEAD_REF_OID_SEQUENCE="stale-head|$reviewed_sha"
+  export FAKE_HEAD_REF_OID_SEQUENCE_FILE="$TEST_ROOT/head-ref-oid-calls"
+  printf '0\n' > "$FAKE_HEAD_REF_OID_SEQUENCE_FILE"
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  grep -Fq "pr merge 101 --squash --match-head-commit $reviewed_sha" "$GH_MUTATION_LOG"
+  grep -Fxq '2' "$FAKE_SLEEP_LOG"
+}
+
+@test "HEAD local distinto del SHA esperado falla sin reintentar headRefOid" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_GIT_REV_PARSE_HEAD_SEQUENCE="$reviewed_sha|local-head-changed"
+  export FAKE_GIT_REV_PARSE_HEAD_SEQUENCE_FILE="$TEST_ROOT/rev-parse-head-calls"
+  printf '0\n' > "$FAKE_GIT_REV_PARSE_HEAD_SEQUENCE_FILE"
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  ! grep -Eq '^claude ' "$FAKE_AGENT_LOG"
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [ ! -s "$FAKE_SLEEP_LOG" ]
   [[ "$output" == *"head_changed"* ]]
 }
 
