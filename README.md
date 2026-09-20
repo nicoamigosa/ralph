@@ -94,6 +94,59 @@ RALPH_MAX_ROUNDS=2 ./ralph/once.sh               # menos rondas, menos gasto
 RALPH_DRY_RUN=1 ./ralph/once.sh                  # plan de solo lectura
 ```
 
+## Integración real con GitHub
+
+La suite que usa GitHub real no forma parte de `bats tests/` ni de la CI normal.
+Se lanza explícitamente con `make integration` o desde el workflow manual
+`.github/workflows/integration.yml`. El destino por defecto es
+`nicoamigosa/ralph-sandbox`; para otro sandbox se debe configurar el slug exacto
+en ambos valores antes de ejecutar:
+
+```bash
+export REPO_SLUG=nicoamigosa/ralph-sandbox
+export RALPH_SANDBOX_SLUGS=nicoamigosa/ralph-sandbox
+export GH_TOKEN='token-con-contents-issues-y-pull-requests-write'
+export RALPH_REVIEWER_GH_TOKEN='token-distinto-de-solo-lectura'
+make integration
+```
+
+El harness compara `REPO_SLUG` con la allowlist antes de ejecutar `gh auth
+setup-git`, clonar, crear issues o hacer cualquier otra escritura. Un slug fuera
+de la allowlist termina con código 2. `GH_TOKEN` y
+`RALPH_REVIEWER_GH_TOKEN` deben ser credenciales distintas; no se escriben en
+archivos `.env`.
+
+### Preparar `ralph-sandbox`
+
+El sandbox debe tener el label `ready-for-agent` y un workflow de pull request
+cuyo job se llame `test`. La prueba mínima puede ser:
+
+```yaml
+name: Sandbox CI
+on: [pull_request, push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: test ! -e .ralph-integration-fail
+```
+
+En Settings → Rules → Rulesets, crear un ruleset activo para `main` que exija
+el status check `test` y no tenga bypass actors. No exigir aprobaciones humanas:
+la identidad que ejecuta la suite debe poder mergear cuando `test` está verde,
+pero no debe saltarse el ruleset. El workflow debe estar en `main` antes de
+lanzar la suite para que GitHub ejecute el check en cada PR.
+
+La suite crea un issue por escenario, sustituye Codex y Claude por fixtures bajo
+`tests/integration/`, y comprueba el estado remoto. Ejecuta, en orden, PASS con
+CI verde (merge), PASS con CI rojo (PR abierto), rechazo (PR abierto con
+comentario) y error del agente (sin merge). Al finalizar cierra los issues,
+cierra los PR no mergeados y borra sus ramas. El PR mergeado permanece como
+historial inmutable de GitHub; la limpieza garantiza que no queden PR abiertos
+ni ramas de los escenarios. Se puede limitar la corrida, por ejemplo,
+`RALPH_INTEGRATION_SCENARIOS=pass-green make integration`.
+
 La base **nunca** es la rama en la que estés parado: es el trunk del repo,
 detectado con `gh repo view` (`main` o `master`, según el repo). Ahí
 se mergea cada PR aprobado, y de ahí sale la rama del siguiente issue.

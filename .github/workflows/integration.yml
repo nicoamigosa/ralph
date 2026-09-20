@@ -1,0 +1,25 @@
+name: Integration
+
+on:
+  workflow_dispatch:
+
+jobs:
+  github-sandbox:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: read
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out Ralph
+        uses: actions/checkout@v4
+
+      - name: Run GitHub sandbox integration suite
+        env:
+          GH_TOKEN: ${{ secrets.RALPH_INTEGRATION_GH_TOKEN }}
+          RALPH_REVIEWER_GH_TOKEN: ${{ secrets.RALPH_INTEGRATION_REVIEWER_TOKEN }}
+          REPO_SLUG: nicoamigosa/ralph-sandbox
+          RALPH_SANDBOX_SLUGS: nicoamigosa/ralph-sandbox
+        run: make integration

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+case "${1:-}" in
+  --version)
+    printf '%s\n' '2.1.277 (Claude Code)'
+    exit 0
+    ;;
+  auth)
+    [ "${2:-}" = status ] || exit 2
+    if [ "${3:-}" = --json ]; then
+      printf '%s\n' '{"loggedIn":true,"authMethod":"integration-fixture"}'
+    else
+      printf '%s\n' 'Logged in'
+    fi
+    exit 0
+    ;;
+esac
+
+fixture_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../fixtures"
+case "${RALPH_INTEGRATION_SCENARIO:?missing integration scenario}" in
+  pass-green|pass-red) cat "$fixture_dir/claude-pass.json" ;;
+  rejection) cat "$fixture_dir/claude-rejection.json" ;;
+  agent-error)
+    cat "$fixture_dir/claude-error.json"
+    exit 1
+    ;;
+  *) printf 'unknown integration scenario\n' >&2; exit 2 ;;
+esac
