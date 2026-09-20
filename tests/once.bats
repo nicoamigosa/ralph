@@ -63,6 +63,183 @@ load test_helper
   ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
 }
 
+@test "preflight rejects codex when login status is not authenticated" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_LOGIN_STATUS_EXIT=1
+  export FAKE_CODEX_LOGIN_STATUS_OUTPUT='Not logged in'
+
+  run_once
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"codex login status"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+  ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight rejects codex status output that says not logged in" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_LOGIN_STATUS_OUTPUT='Not logged in'
+
+  run_once
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"codex login status"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight requires a readable SKILL.md for the implementer" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  unset RALPH_TDD_SKILL
+
+  run_once
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"RALPH_TDD_SKILL"* ]]
+  [[ "$output" == *"SKILL.md"* ]]
+  ! grep -Fq -- 'codex login status' "$FAKE_AGENT_LOG"
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight rejects a skill path that is not a regular SKILL.md file" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  mkdir -p "$TEST_ROOT/not-a-skill/SKILL.md"
+  export RALPH_TDD_SKILL="$TEST_ROOT/not-a-skill/SKILL.md"
+
+  run_once
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"RALPH_TDD_SKILL"* ]]
+  ! grep -Fq -- 'codex login status' "$FAKE_PREFLIGHT_LOG"
+}
+
+@test "preflight records supported tool versions in the log and summary" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .versions.codex == "0.154.0" and
+    .versions.claude == "2.1.277" and
+    .versions.gh == "2.45.0"
+  ' "$RUN_DIR/summary.json"
+  grep -Fq 'Preflight versions: codex=0.154.0 claude=2.1.277 gh=2.45.0' \
+    "$RUN_DIR/run.log"
+  grep -Fq 'Codex version: `0.154.0`' "$RUN_DIR/summary.md"
+  grep -Fq 'Claude version: `2.1.277`' "$RUN_DIR/summary.md"
+  grep -Fq 'gh version: `2.45.0`' "$RUN_DIR/summary.md"
+}
+
+@test "preflight rejects claude when auth status JSON is not logged in" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CLAUDE_AUTH_STATUS_OUTPUT='{"loggedIn":false,"authMethod":"none"}'
+
+  run_once
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"claude auth status"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight rejects gh when auth status fails" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_GH_AUTH_STATUS_EXIT=1
+  export FAKE_GH_AUTH_STATUS_OUTPUT='You are not logged into any GitHub hosts'
+
+  run_once
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"gh no está autenticado"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "preflight rejects an unsupported provider version" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CLAUDE_VERSION='2.1.276 (Claude Code)'
+
+  run_once
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Versión de claude no soportada"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+}
+
+@test "dry-run does not require codex or claude authentication" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_DRY_RUN=1
+  export FAKE_CODEX_LOGIN_STATUS_EXIT=1
+  export FAKE_CLAUDE_AUTH_STATUS_EXIT=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Ralph dry-run plan"* ]]
+  ! grep -Fq -- 'codex login status' "$FAKE_AGENT_LOG"
+  ! grep -Fq -- 'claude auth status' "$FAKE_AGENT_LOG"
+}
+
+@test "the required skill is added to codex context but not claude review context" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_PROMPT_FILE="$TEST_ROOT/claude-prompt"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq -- 'Use a failing test before changing behavior.' "$FAKE_AGENT_LOG"
+  run grep -F -- 'Use a failing test before changing behavior.' "$FAKE_CLAUDE_PROMPT_FILE"
+  [ "$status" -eq 1 ]
+}
+
+@test "an inaccessible smoke-test model fails configuration before issues are touched" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_SMOKE_TEST=1
+  export FAKE_CODEX_SMOKE_EXIT=23
+  export FAKE_ISSUE_LIST_LOG="$TEST_ROOT/issue-list.log"
+
+  run_once
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Smoke test"* ]]
+  [[ "$output" == *"configuración"* ]]
+  [ ! -e "$FAKE_ISSUE_LIST_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "an inaccessible claude smoke-test model is configuration failure" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_SMOKE_TEST=1
+  export FAKE_CLAUDE_SMOKE_EXIT=23
+  export FAKE_ISSUE_LIST_LOG="$TEST_ROOT/issue-list.log"
+
+  run_once
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"modelo de claude"* ]]
+  [ ! -e "$FAKE_ISSUE_LIST_LOG" ]
+}
+
+@test "the optional smoke test calls both configured models before selection" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_SMOKE_TEST=1
+  export FAKE_ISSUE_LIST_LOG="$TEST_ROOT/issue-list.log"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Smoke test: codex y claude accesibles."* ]]
+  grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+  grep -Fq -- 'claude --model' "$FAKE_AGENT_LOG"
+  jq -s -e 'any(.[]; .type == "turn.completed")' \
+    "$RUN_DIR/preflight-codex.stdout.jsonl"
+  jq -e '.type == "result" and .subtype == "success"' \
+    "$RUN_DIR/preflight-claude.stdout.json"
+  [ -s "$FAKE_ISSUE_LIST_LOG" ]
+}
+
 @test "read-only reviewer credentials cannot publish a pull request comment" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1

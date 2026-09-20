@@ -89,11 +89,23 @@ para inspeccionar una corrida sin modificar el repositorio ni GitHub.
 
 Requisitos para una corrida completa: Bash **5 o superior**, `git`, `gh`
 (autenticado, scope `repo`), `jq`, `codex`, `claude`, remoto `origin`, y
-**working tree limpio** — el script salta entre ramas y mergea. En macOS,
+**working tree limpio** — el script salta entre ramas y mergea. Además,
+`RALPH_TDD_SKILL` debe apuntar a un `SKILL.md` legible; Ralph lo agrega sólo al
+contexto de Codex. Antes de consultar issues, el preflight valida las sesiones
+de Codex (`codex login status`), Claude (`claude auth status --json`) y GitHub
+(`gh auth status`), comprueba `jq` y verifica las versiones mínimas soportadas:
+Codex `0.154.0`, Claude `2.1.277` y gh `2.45.0`. Las versiones quedan en
+`run.log`, `summary.json` y `summary.md`.
+
+`RALPH_SMOKE_TEST=1` habilita una llamada mínima a ambos modelos después del
+preflight. Un modelo inaccesible detiene la corrida como error de configuración,
+antes de listar o tocar issues; queda desactivado por defecto porque consume
+presupuesto. El dry-run sigue sin exigir login de Codex o Claude, aunque sí
+necesita `git`, `gh` y `jq` para construir el plan. En macOS,
 instalá Bash con `brew install bash` y anteponé `$(brew --prefix bash)/bin` al
 `PATH`. `once.sh` usa los formatos nativos de `date` para Darwin y Linux y
 temporales bajo `${TMPDIR:-/tmp}`, sin requerir utilidades GNU adicionales. El
-dry-run sólo necesita las herramientas de lectura (`git` y `gh`).
+plan dry-run usa únicamente esas herramientas de lectura.
 
 ## Cómo elige los issues
 
@@ -192,8 +204,10 @@ explícito; un fallo de issue no se reporta como `no_ready_issues`.
 Al salir, el trap conserva el código original y finaliza `summary.json` y
 `summary.md`. El JSON incluye `run_id`, `stop_reason`, `merged`, `open_prs`,
 `needs_human`, `blocked`, `errors`, `elapsed_seconds` y `usage` con
-`codex_tokens` y `claude_estimated_usd`. Los cuatro estados de trabajo son
-listas con números y enlaces a issues/PRs; `events.jsonl` conserva un evento
+`codex_tokens` y `claude_estimated_usd`. `versions.codex`,
+`versions.claude` y `versions.gh` conservan las versiones observadas en el
+preflight. Los cuatro estados de trabajo son listas con números y enlaces a
+issues/PRs; `events.jsonl` conserva un evento
 JSON por línea asociado al issue y, cuando existe, al PR. Un dato de uso que
 el proveedor no entrega es `null`, nunca `0`. `claude_estimated_usd` es sólo
 el coste estimado reportado por el proveedor: Ralph no calcula coste marginal
@@ -345,7 +359,8 @@ proyecto sin modificar los prompts distribuidos.
 
 ## Configuración
 
-Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
+Salvo `RALPH_TDD_SKILL`, que es obligatorio, todo es opcional; puede venir del
+entorno, `.ralph/config.env` o `host.env`:
 
 | Variable | Default |
 |---|---|
@@ -357,6 +372,8 @@ Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
 | `RALPH_CODEX_EFFORT` | `xhigh` |
 | `RALPH_CODEX_SANDBOX` | `workspace-write` (en este modo Codex monta `.git` como sólo lectura; ralph lo habilita como `writable_root` y ejecuta una sonda de preflight; `danger-full-access` no se recomienda) |
 | `RALPH_CLAUDE_MODEL` | `opus` |
+| `RALPH_TDD_SKILL` | obligatorio: ruta a un `SKILL.md` legible para Codex |
+| `RALPH_SMOKE_TEST` | `0` (con `1`, prueba ambos modelos antes de consultar issues) |
 | `RALPH_REVIEWER_GH_TOKEN` | obligatorio para el revisor: token fine-grained de GitHub, limitado a este repositorio y con permisos de lectura |
 | `RALPH_REQUIRE_REVIEWER_TOKEN` | `1` (sólo `0` junto con `RALPH_REQUIRE_PROTECTION=0` en el sandbox) |
 | `RALPH_MERGE_METHOD` | `--squash` |

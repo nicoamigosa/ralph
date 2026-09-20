@@ -1,10 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf 'claude %s\n' "$*" >> "$FAKE_AGENT_LOG"
+fake_claude_log="$FAKE_AGENT_LOG"
+case "${1:-}" in
+  --version|auth) fake_claude_log="${FAKE_PREFLIGHT_LOG:-$FAKE_AGENT_LOG}" ;;
+esac
+printf 'claude %s\n' "$*" >> "$fake_claude_log"
+
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' "${FAKE_CLAUDE_VERSION:-2.1.277 (Claude Code)}"
+  exit "${FAKE_CLAUDE_VERSION_EXIT:-0}"
+fi
+
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
+  if [ "${3:-}" = "--json" ]; then
+    if [ -n "${FAKE_CLAUDE_AUTH_STATUS_OUTPUT:-}" ]; then
+      printf '%b\n' "$FAKE_CLAUDE_AUTH_STATUS_OUTPUT"
+    else
+      jq -cn '{loggedIn: true, authMethod: "fake", apiProvider: "firstParty"}'
+    fi
+  else
+    printf '%s\n' "${FAKE_CLAUDE_AUTH_STATUS_TEXT:-Logged in}"
+  fi
+  exit "${FAKE_CLAUDE_AUTH_STATUS_EXIT:-0}"
+fi
 
 if [ -n "${FAKE_CLAUDE_ENV_FILE:-}" ]; then
   printf '%s\n' "${GH_TOKEN:-}" > "$FAKE_CLAUDE_ENV_FILE"
+fi
+if [ -n "${FAKE_CLAUDE_PROMPT_FILE:-}" ]; then
+  printf '%s\n' "$*" > "$FAKE_CLAUDE_PROMPT_FILE"
+fi
+
+if [ "${FAKE_CLAUDE_SMOKE_EXIT+x}" = x ] && printf '%s' "$*" | grep -Fq -- 'RALPH preflight smoke test'; then
+  exit "$FAKE_CLAUDE_SMOKE_EXIT"
 fi
 
 if [ "${FAKE_CLAUDE_ATTEMPT_COMMENT:-0}" = "1" ]; then

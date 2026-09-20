@@ -53,6 +53,8 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #                           ejecuta una sonda de preflight y reemplaza writable_roots
 #                           configurado; danger-full-access no se recomienda)
 #   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus)
+#   RALPH_TDD_SKILL      ruta obligatoria a SKILL.md para Codex
+#   RALPH_SMOKE_TEST     smoke test de ambos modelos      (default: 0)
 #   RALPH_REVIEWER_GH_TOKEN token fine-grained read-only para Claude (required)
 #   RALPH_REQUIRE_REVIEWER_TOKEN exige el token; sólo puede ser 0 en sandbox
 #   RALPH_MERGE_METHOD   método de merge del PR          (default: --squash)
@@ -167,6 +169,14 @@ LOCK_TTL_SECONDS="${RALPH_LOCK_TTL_SECONDS:-}"
 LOCK_HEARTBEAT_SECONDS="${RALPH_LOCK_HEARTBEAT_SECONDS:-}"
 LOCK_HOST="${RALPH_LOCK_HOST:-$(uname -n 2>/dev/null || printf '%s' unknown)}"
 CLOSE_POLICY="${RALPH_CLOSE_POLICY:-verified}"
+TDD_SKILL="${RALPH_TDD_SKILL:-}"
+SMOKE_TEST="${RALPH_SMOKE_TEST:-0}"
+
+# These are the versions represented by the checked-in provider contract
+# fixtures. Newer patch/minor releases are accepted; older releases are not.
+SUPPORTED_CODEX_VERSION="0.154.0"
+SUPPORTED_CLAUDE_VERSION="2.1.277"
+SUPPORTED_GH_VERSION="2.45.0"
 
 HOST_SYSTEM="$(uname -s 2>/dev/null)" || fail "No pude detectar el sistema operativo con uname -s."
 case "$HOST_SYSTEM" in
@@ -194,6 +204,13 @@ validate_file_path() {
   [ -d "$parent" ] || fail "$variable_name='$path' apunta a un directorio inexistente."
 }
 
+validate_tdd_skill() {
+  if [ -z "$TDD_SKILL" ] || [ "${TDD_SKILL##*/}" != "SKILL.md" ] \
+      || [ ! -f "$TDD_SKILL" ] || [ ! -r "$TDD_SKILL" ]; then
+    fail "Configura RALPH_TDD_SKILL con la ruta a un SKILL.md legible."
+  fi
+}
+
 validate_non_negative_integer RALPH_MAX_ROUNDS "$MAX_ROUNDS"
 validate_non_negative_integer RALPH_MAX_INFRA_RETRIES "$MAX_INFRA_RETRIES"
 validate_non_negative_integer RALPH_MAX_LIMIT_RETRIES "$MAX_LIMIT_RETRIES"
@@ -203,6 +220,7 @@ case "$DEADLINE_EPOCH" in
   *) validate_non_negative_integer RALPH_DEADLINE_EPOCH "$DEADLINE_EPOCH" ;;
 esac
 validate_file_path RALPH_CHECKPOINT_FILE "$CHECKPOINT_FILE"
+validate_tdd_skill
 
 AGENT_LOG=""
 LAST_MSG=""
@@ -215,6 +233,9 @@ RUN_FAILED_ISSUES=0
 RUN_SEQUENCE=0
 RUN_CODEX_TOKENS=""
 RUN_CLAUDE_ESTIMATED_USD=""
+CODEX_VERSION=""
+CLAUDE_VERSION=""
+GH_VERSION=""
 AGENT_STDOUT=""
 AGENT_STDERR=""
 ADAPTER_RESULT_FILE=""
@@ -238,6 +259,7 @@ CURRENT_AGENT_ERR_FIFO=""
 CURRENT_TEE_PID=""
 CURRENT_TEE_ERR_PID=""
 AGENT_ROLE=""
+CODEX_SKILL_CONTEXT=""
 SIGNAL_EXITING=0
 LOCK_HELD=0
 LOCK_COMMIT=""
@@ -444,6 +466,7 @@ initialize_run_storage() {
         base_branch: $base_branch, stop_reason: $stop_reason,
         exit_code: null, issues: [], merged: [], open_prs: [],
         needs_human: [], blocked: [], errors: [], elapsed_seconds: null,
+        versions: {codex: null, claude: null, gh: null},
         usage: {codex_tokens: null, claude_estimated_usd: null}}' > "$summary_tmp"; then
     rm -f "$summary_tmp"
     return 70
@@ -475,6 +498,10 @@ write_summary_markdown() {
     "- Stop reason: `" + (.stop_reason | tostring) + "`\n" +
     "- Exit code: `" + (.exit_code | tostring) + "`\n" +
     "- Elapsed seconds: `" + (.elapsed_seconds | tostring) + "`\n\n" +
+    "## Tool versions\n\n" +
+    "- Codex version: `" + (if .versions.codex == null then "unknown" else (.versions.codex | tostring) end) + "`\n" +
+    "- Claude version: `" + (if .versions.claude == null then "unknown" else (.versions.claude | tostring) end) + "`\n" +
+    "- gh version: `" + (if .versions.gh == null then "unknown" else (.versions.gh | tostring) end) + "`\n\n" +
     section("Merged"; .merged) + "\n" +
     section("Open PRs"; .open_prs) + "\n" +
     "## Needs human\n\n" +
@@ -686,6 +713,10 @@ esac
 case "$REQUIRE_REVIEWER_TOKEN" in
   0|1) ;;
   *) fail "RALPH_REQUIRE_REVIEWER_TOKEN debe ser exactamente 0 o 1." ;;
+esac
+case "$SMOKE_TEST" in
+  0|1) ;;
+  *) fail "RALPH_SMOKE_TEST debe ser exactamente 0 o 1." ;;
 esac
 if [ "$DRY_RUN" != "1" ]; then
   if [ "$REQUIRE_REVIEWER_TOKEN" = "0" ] && [ "$REQUIRE_PROTECTION" != "0" ]; then
@@ -928,12 +959,9 @@ acquire_remote_lock() {
   return 70
 }
 
-for cmd in git gh; do
+for cmd in git gh jq; do
   command -v "$cmd" >/dev/null 2>&1 || fail "Falta '$cmd' en el PATH."
 done
-if [ "$DRY_RUN" != "1" ]; then
-  command -v jq >/dev/null 2>&1 || fail "Falta 'jq' en el PATH para leer los resultados de CI."
-fi
 if [ -n "$REQUIRED_CHECKS_JSON" ]; then
   if ! jq -e 'type == "array" and all(.[]; type == "string" and length > 0)' \
       >/dev/null 2>&1 <<<"$REQUIRED_CHECKS_JSON"; then
@@ -1222,6 +1250,8 @@ PROMPT_IMPLEMENT+="$CLOSE_POLICY_INSTRUCTIONS"
 PROMPT_REVIEW="$(load_prompt prompt_review)"
 PROMPT_REVISE="$(load_prompt prompt_revise)"
 PROMPT_CONFLICTS="$(load_prompt prompt_conflicts)"
+CODEX_SKILL_CONTEXT=$'\n\n## Required implementation skill\n\n'
+CODEX_SKILL_CONTEXT+="$(cat "$TDD_SKILL")"
 
 # Un PR necesita que su base exista en el remoto.
 if ! git ls-remote --exit-code --heads origin "$BASE_BRANCH" >/dev/null 2>&1; then
@@ -1231,12 +1261,6 @@ if ! git ls-remote --exit-code --heads origin "$BASE_BRANCH" >/dev/null 2>&1; th
     echo "📤 La base '$BASE_BRANCH' no existe en origin; la publico."
     git push -u origin "$BASE_BRANCH" >/dev/null 2>&1 || fail "No pude publicar '$BASE_BRANCH'."
   fi
-fi
-
-# Label con el que marcamos los PRs que agotaron las rondas.
-if [ "$DRY_RUN" != "1" ]; then
-  gh label create "$NEEDS_HUMAN_LABEL" --color B60205 \
-    --description "Ralph agotó las rondas de revisión; necesita un humano" >/dev/null 2>&1 || true
 fi
 
 echo "🔧 base=$BASE_BRANCH · label=$LABEL · rondas=$MAX_ROUNDS · $CODEX_MODEL($CODEX_EFFORT) → $CLAUDE_MODEL"
@@ -1845,6 +1869,7 @@ finish_adapter() {
 
 run_codex() {
   local prompt="$1" process_rc
+  prompt+="$CODEX_SKILL_CONTEXT"
   AGENT_ROLE="codex"
   : > "$LAST_MSG"
   record_run_event "agent_started" "$CURRENT_ISSUE" "$CURRENT_PR" "codex" "$CURRENT_PHASE" || return $?
@@ -1950,6 +1975,185 @@ run_sandbox_preflight() {
     "$CODEX_SANDBOX" >&2
   [ -n "$probe_error" ] && printf '   Detalle: %s\n' "$probe_error" >&2
   return 1
+}
+
+extract_tool_version() {
+  local output="$1" line
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ([0-9]+([.][0-9]+){1,2}) ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done <<< "$output"
+  return 1
+}
+
+version_at_least() {
+  local actual="$1" required="$2" i a r
+  local -a actual_parts=() required_parts=()
+  IFS=. read -r -a actual_parts <<< "$actual"
+  IFS=. read -r -a required_parts <<< "$required"
+  for i in 0 1 2; do
+    a="${actual_parts[$i]:-0}"
+    r="${required_parts[$i]:-0}"
+    case "$a:$r" in
+      *[!0-9:]*|:*) return 1 ;;
+    esac
+    if (( 10#$a > 10#$r )); then
+      return 0
+    elif (( 10#$a < 10#$r )); then
+      return 1
+    fi
+  done
+  return 0
+}
+
+record_tool_versions() {
+  local summary_tmp="$RUN_DIR/summary.json.tmp.$$"
+  jq --arg codex "$CODEX_VERSION" --arg claude "$CLAUDE_VERSION" \
+    --arg gh "$GH_VERSION" \
+    '.versions = {codex: $codex, claude: $claude, gh: $gh}' \
+    "$RUN_DIR/summary.json" > "$summary_tmp" 2>/dev/null || {
+    rm -f "$summary_tmp"
+    return 70
+  }
+  mv -f "$summary_tmp" "$RUN_DIR/summary.json"
+}
+
+run_provider_preflight() {
+  local codex_login_output claude_auth_output version
+  [ "$DRY_RUN" = "1" ] && return 0
+
+  if ! codex_login_output="$(codex login status 2>&1)"; then
+    printf '❌ Preflight de autenticación falló: codex login status no confirma una sesión válida.\n' >&2
+    [ -n "$codex_login_output" ] && printf '   Detalle: %s\n' "$codex_login_output" >&2
+    return "$CONFIG_ERROR_RC"
+  fi
+  if printf '%s\n' "$codex_login_output" | grep -Eqi \
+      'not[[:space:]]+logged[[:space:]]+in|not[[:space:]]+authenticated|logged[[:space:]]+out'; then
+    printf '❌ Preflight de autenticación falló: codex login status indica que no hay sesión válida.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  fi
+  if jq -e 'type == "object" and (.loggedIn == false or .authenticated == false)' \
+      >/dev/null 2>&1 <<< "$codex_login_output"; then
+    printf '❌ Preflight de autenticación falló: codex login status indica que no hay sesión válida.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  fi
+  if ! claude_auth_output="$(claude auth status --json 2>&1)"; then
+    printf '❌ Preflight de autenticación falló: claude auth status no confirma una sesión válida.\n' >&2
+    [ -n "$claude_auth_output" ] && printf '   Detalle: %s\n' "$claude_auth_output" >&2
+    return "$CONFIG_ERROR_RC"
+  fi
+  if ! jq -e '.loggedIn == true' >/dev/null 2>&1 <<< "$claude_auth_output"; then
+    printf '❌ Preflight de autenticación falló: claude auth status indica que no hay sesión válida.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    printf '❌ Preflight de autenticación falló: gh auth status no confirma una sesión válida.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  fi
+  command -v jq >/dev/null 2>&1 || {
+    printf '❌ Preflight de herramientas falló: falta jq en el PATH.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  }
+
+  version="$(codex --version 2>&1)" || {
+    printf '❌ Preflight de herramientas falló: no pude obtener la versión de codex.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  }
+  CODEX_VERSION="$(extract_tool_version "$version")" || {
+    printf '❌ Preflight de herramientas falló: versión de codex ilegible.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  }
+  version="$(claude --version 2>&1)" || {
+    printf '❌ Preflight de herramientas falló: no pude obtener la versión de claude.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  }
+  CLAUDE_VERSION="$(extract_tool_version "$version")" || {
+    printf '❌ Preflight de herramientas falló: versión de claude ilegible.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  }
+  version="$(gh --version 2>&1)" || {
+    printf '❌ Preflight de herramientas falló: no pude obtener la versión de gh.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  }
+  GH_VERSION="$(extract_tool_version "$version")" || {
+    printf '❌ Preflight de herramientas falló: versión de gh ilegible.\n' >&2
+    return "$CONFIG_ERROR_RC"
+  }
+
+  if ! version_at_least "$CODEX_VERSION" "$SUPPORTED_CODEX_VERSION"; then
+    printf '❌ Versión de codex no soportada: %s (mínima %s).\n' \
+      "$CODEX_VERSION" "$SUPPORTED_CODEX_VERSION" >&2
+    return "$CONFIG_ERROR_RC"
+  fi
+  if ! version_at_least "$CLAUDE_VERSION" "$SUPPORTED_CLAUDE_VERSION"; then
+    printf '❌ Versión de claude no soportada: %s (mínima %s).\n' \
+      "$CLAUDE_VERSION" "$SUPPORTED_CLAUDE_VERSION" >&2
+    return "$CONFIG_ERROR_RC"
+  fi
+  if ! version_at_least "$GH_VERSION" "$SUPPORTED_GH_VERSION"; then
+    printf '❌ Versión de gh no soportada: %s (mínima %s).\n' \
+      "$GH_VERSION" "$SUPPORTED_GH_VERSION" >&2
+    return "$CONFIG_ERROR_RC"
+  fi
+
+  record_tool_versions || return $?
+  printf 'Preflight versions: codex=%s claude=%s gh=%s jq=present\n' \
+    "$CODEX_VERSION" "$CLAUDE_VERSION" "$GH_VERSION"
+  record_run_event "preflight" "" "" "ok" \
+    "versions codex=$CODEX_VERSION claude=$CLAUDE_VERSION gh=$GH_VERSION jq=present" || return $?
+}
+
+run_smoke_test() {
+  local codex_stdout="$RUN_DIR/preflight-codex.stdout.jsonl"
+  local codex_stderr="$RUN_DIR/preflight-codex.stderr.log"
+  local codex_message="$RUN_DIR/preflight-codex.message.txt"
+  local claude_stdout="$RUN_DIR/preflight-claude.stdout.json"
+  local claude_stderr="$RUN_DIR/preflight-claude.stderr.log"
+  local smoke_rc
+
+  if [ "$DRY_RUN" = "1" ] || [ "$SMOKE_TEST" = "0" ]; then
+    return 0
+  fi
+  build_codex_sandbox_config || return $?
+
+  if codex exec --json --model "$CODEX_MODEL" \
+      "${CODEX_SANDBOX_CONFIG_ARGS[@]}" --sandbox "$CODEX_SANDBOX" \
+      --skip-git-repo-check -o "$codex_message" \
+      'RALPH preflight smoke test: reply with OK.' \
+      >"$codex_stdout" 2>"$codex_stderr"; then
+    smoke_rc=0
+  else
+    smoke_rc=$?
+  fi
+  if [ "$smoke_rc" -ne 0 ] || [ ! -s "$codex_message" ] || \
+      ! jq -s -e 'any(.[]; .type == "turn.completed" and
+        (.usage | type == "object"))' "$codex_stdout" >/dev/null 2>&1; then
+    printf '❌ Smoke test: el modelo de codex no es accesible; error de configuración.\n' >&2
+    record_run_event "error" "" "" "config_error" \
+      "Smoke test de codex falló (modelo no accesible)" || return $?
+    return "$CONFIG_ERROR_RC"
+  fi
+
+  if claude --model "$CLAUDE_MODEL" --print --output-format json \
+      'RALPH preflight smoke test: reply with OK.' \
+      >"$claude_stdout" 2>"$claude_stderr"; then
+    smoke_rc=0
+  else
+    smoke_rc=$?
+  fi
+  if [ "$smoke_rc" -ne 0 ] || ! jq -s -e \
+      'length == 1 and .[0].type == "result" and
+       .[0].subtype == "success" and .[0].is_error == false and
+       (.[0].result | type == "string" and length > 0)' \
+      "$claude_stdout" >/dev/null 2>&1; then
+    printf '❌ Smoke test: el modelo de claude no es accesible; error de configuración.\n' >&2
+    record_run_event "error" "" "" "config_error" \
+      "Smoke test de claude falló (modelo no accesible)" || return $?
+    return "$CONFIG_ERROR_RC"
+  fi
+  echo "Smoke test: codex y claude accesibles."
 }
 
 # 'gh pr edit --add-label' revienta en versiones de gh que aún consultan
@@ -3532,7 +3736,12 @@ if [ "$DRY_RUN" = "1" ]; then
   esac
   print_plan
 else
+  run_provider_preflight || exit $?
   run_sandbox_preflight || exit $?
+  run_smoke_test || exit $?
+  # Label con el que marcamos los PRs que agotaron las rondas.
+  gh label create "$NEEDS_HUMAN_LABEL" --color B60205 \
+    --description "Ralph agotó las rondas de revisión; necesita un humano" >/dev/null 2>&1 || true
   select_issues run
   rc=$?
   [ "$rc" -eq 0 ] || exit "$rc"

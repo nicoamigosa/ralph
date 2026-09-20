@@ -55,6 +55,7 @@ setup() {
   export PATH="$PROJECT_ROOT/tests/fakes:$PATH"
   export GH_MUTATION_LOG="$TEST_ROOT/mutations.log"
   export FAKE_AGENT_LOG="$TEST_ROOT/agents.log"
+  export FAKE_PREFLIGHT_LOG="$TEST_ROOT/preflight.log"
   export FAKE_CODEX_PR_STATE="$TEST_ROOT/codex-created-pr"
   export FAKE_CODEX_CALL_COUNT_FILE="$TEST_ROOT/codex-calls"
   export FAKE_CLAUDE_CALL_COUNT_FILE="$TEST_ROOT/claude-calls"
@@ -68,6 +69,7 @@ setup() {
   # tests opt back into the production default explicitly.
   export RALPH_REQUIRE_PROTECTION=0
   export RALPH_REVIEWER_GH_TOKEN=fake-reviewer-token
+  export RALPH_TDD_SKILL="$PROJECT_ROOT/tests/fixtures/SKILL.md"
   export GH_TOKEN=fake-orchestrator-token
   export FAKE_REVIEWER_GH_TOKEN=fake-reviewer-token
   unset FAKE_CODEX_SIGNAL_GROUP FAKE_CODEX_SIGNAL_MARKER \
