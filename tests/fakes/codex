@@ -29,6 +29,10 @@ if [ "${1:-}" = "sandbox" ]; then
   exit "${FAKE_CODEX_SANDBOX_EXIT:-0}"
 fi
 
+if [ "${1:-}" = "exec" ] && [ -n "${FAKE_CODEX_ENV_FILE:-}" ]; then
+  env | sort > "$FAKE_CODEX_ENV_FILE"
+fi
+
 if [ -n "${FAKE_CODEX_PID_FILE:-}" ]; then
   printf '%s\n' "$$" > "$FAKE_CODEX_PID_FILE"
 fi

@@ -500,6 +500,13 @@ y permisos de lectura para `Metadata` (obligatorio en GitHub), `Contents`,
 sólo se acepta junto con `RALPH_REQUIRE_PROTECTION=0`, reservado para el
 sandbox; en ese caso el revisor no hereda `GH_TOKEN`.
 
+Los procesos de Codex, Claude y `RALPH_POST_MERGE_CHECK` heredan el entorno
+normal del host —incluidos `PATH`, credenciales y `TMPDIR`— excepto las
+variables `RALPH_*`: la configuración de `once.sh` no se exporta a los agentes
+ni al hook. `RALPH_POST_MERGE_CHECK` recibe el SHA del merge confirmado como
+su primer y único argumento posicional (`$1`); cualquier dato adicional debe
+provenir de su propio entorno no-`RALPH_*` o de archivos externos.
+
 ## Distribución y versión
 
 `ralph/` se distribuye como **release etiquetada** del repo

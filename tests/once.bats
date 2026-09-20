@@ -74,6 +74,82 @@ load test_helper
   [ "$(cat "$FAKE_CLAUDE_ENV_FILE")" != "fake-orchestrator-token" ]
 }
 
+@test "codex does not inherit the ralph configuration environment" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_ENV_FILE="$TEST_ROOT/codex-env"
+  export RALPH_CI_POLICY=none
+  export RALPH_REQUIRED_CHECKS_JSON='["not-for-codex"]'
+  export RALPH_ISSUE_ORDER=999
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ -s "$FAKE_CODEX_ENV_FILE" ]
+  grep -Fq 'RALPH_TEST_REAL_GIT=' "$FAKE_CODEX_ENV_FILE"
+  run bash -c 'grep -E "^RALPH_" "$1" | grep -v "^RALPH_TEST_REAL_"' _ \
+    "$FAKE_CODEX_ENV_FILE"
+  [ "$status" -eq 1 ]
+}
+
+@test "claude does not inherit the ralph configuration environment" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_FULL_ENV_FILE="$TEST_ROOT/claude-env"
+  export RALPH_CI_POLICY=none
+  export RALPH_REQUIRED_CHECKS_JSON='["not-for-claude"]'
+  export RALPH_ISSUE_ORDER=999
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ -s "$FAKE_CLAUDE_FULL_ENV_FILE" ]
+  grep -Fq 'RALPH_TEST_REAL_GIT=' "$FAKE_CLAUDE_FULL_ENV_FILE"
+  run bash -c 'grep -E "^RALPH_" "$1" | grep -v "^RALPH_TEST_REAL_"' _ \
+    "$FAKE_CLAUDE_FULL_ENV_FILE"
+  [ "$status" -eq 1 ]
+}
+
+@test "post-merge hook receives a clean environment and the merge SHA as its argument" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_POST_MERGE_ENV_FILE="$TEST_ROOT/post-merge-env"
+  export RALPH_POST_MERGE_CHECK="$PROJECT_ROOT/tests/fakes/post-merge-check"
+  export RALPH_CI_POLICY=none
+  export RALPH_REQUIRED_CHECKS_JSON='["not-for-hook"]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ -s "$FAKE_POST_MERGE_ENV_FILE" ]
+  grep -Fq 'RALPH_TEST_REAL_GIT=' "$FAKE_POST_MERGE_ENV_FILE"
+  run bash -c 'grep -E "^RALPH_" "$1" | grep -v "^RALPH_TEST_REAL_"' _ \
+    "$FAKE_POST_MERGE_ENV_FILE"
+  [ "$status" -eq 1 ]
+  grep -Fq 'post_merge 1111111111111111111111111111111111111111' "$GH_MUTATION_LOG"
+}
+
+@test "smoke-test agents do not inherit the ralph configuration environment" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_ENV_FILE="$TEST_ROOT/smoke-codex-env"
+  export FAKE_CLAUDE_FULL_ENV_FILE="$TEST_ROOT/smoke-claude-env"
+  export RALPH_CI_POLICY=none
+  export RALPH_MAX_ISSUES=0
+  export RALPH_SMOKE_TEST=1
+  export RALPH_REQUIRED_CHECKS_JSON='["not-for-smoke"]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  for env_file in "$FAKE_CODEX_ENV_FILE" "$FAKE_CLAUDE_FULL_ENV_FILE"; do
+    [ -s "$env_file" ]
+    grep -Fq 'RALPH_TEST_REAL_GIT=' "$env_file"
+    run bash -c 'grep -E "^RALPH_" "$1" | grep -v "^RALPH_TEST_REAL_"' _ \
+      "$env_file"
+    [ "$status" -eq 1 ]
+  done
+}
+
 @test "preflight rejects reusing the orchestrator token for the reviewer" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export RALPH_REVIEWER_GH_TOKEN=fake-orchestrator-token

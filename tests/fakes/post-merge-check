@@ -5,4 +5,8 @@ if [ -n "${FAKE_POST_MERGE_SLEEP_SECONDS:-}" ]; then
   sleep "$FAKE_POST_MERGE_SLEEP_SECONDS"
 fi
 
+if [ -n "${FAKE_POST_MERGE_ENV_FILE:-}" ]; then
+  env | sort > "$FAKE_POST_MERGE_ENV_FILE"
+fi
+
 printf 'post_merge %s\n' "$1" >> "$GH_MUTATION_LOG"

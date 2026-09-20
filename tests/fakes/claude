@@ -25,6 +25,10 @@ if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
   exit "${FAKE_CLAUDE_AUTH_STATUS_EXIT:-0}"
 fi
 
+if [ -n "${FAKE_CLAUDE_FULL_ENV_FILE:-}" ]; then
+  env | sort > "$FAKE_CLAUDE_FULL_ENV_FILE"
+fi
+
 if [ -n "${FAKE_CLAUDE_ENV_FILE:-}" ]; then
   printf '%s\n' "${GH_TOKEN:-}" > "$FAKE_CLAUDE_ENV_FILE"
 fi
