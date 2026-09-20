@@ -46,6 +46,8 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #   RALPH_BASE_BRANCH    branch base                     (default: trunk del repo)
 #   RALPH_BRANCH_PREFIX  prefijo de branches por issue   (default: ralph/issue-)
 #   RALPH_MAX_ROUNDS     revisiones de Claude por PR     (default: 3)
+#   RALPH_MAX_ISSUES     issues únicos iniciados por corrida (default: 5)
+#   RALPH_MAX_RUN_SECONDS duración máxima de la corrida (default: 14400)
 #   RALPH_CODEX_MODEL    modelo del implementador        (default: gpt-5.6-luna)
 #   RALPH_CODEX_EFFORT   reasoning effort de Codex       (default: xhigh)
 #   RALPH_CODEX_SANDBOX  sandbox de Codex                (default: workspace-write; .git
@@ -141,6 +143,8 @@ BASE_BRANCH="${RALPH_BASE_BRANCH:-$DEFAULT_BRANCH}"
 BASE_BRANCH="${BASE_BRANCH:-main}"
 BRANCH_PREFIX="${RALPH_BRANCH_PREFIX:-ralph/issue-}"
 MAX_ROUNDS="${RALPH_MAX_ROUNDS:-3}"
+MAX_ISSUES="${RALPH_MAX_ISSUES:-5}"
+MAX_RUN_SECONDS="${RALPH_MAX_RUN_SECONDS:-14400}"
 CODEX_MODEL="${RALPH_CODEX_MODEL:-gpt-5.6-luna}"
 CODEX_EFFORT="${RALPH_CODEX_EFFORT:-xhigh}"
 CODEX_SANDBOX="${RALPH_CODEX_SANDBOX:-workspace-write}"
@@ -212,6 +216,8 @@ validate_tdd_skill() {
 }
 
 validate_non_negative_integer RALPH_MAX_ROUNDS "$MAX_ROUNDS"
+validate_non_negative_integer RALPH_MAX_ISSUES "$MAX_ISSUES"
+validate_non_negative_integer RALPH_MAX_RUN_SECONDS "$MAX_RUN_SECONDS"
 validate_non_negative_integer RALPH_MAX_INFRA_RETRIES "$MAX_INFRA_RETRIES"
 validate_non_negative_integer RALPH_MAX_LIMIT_RETRIES "$MAX_LIMIT_RETRIES"
 validate_non_negative_integer RALPH_CI_TIMEOUT_SECONDS "$CI_TIMEOUT_SECONDS"
@@ -228,6 +234,8 @@ RUN_ID=""
 RUN_DIR="${RUN_DIR:-}"
 RUN_INITIALIZED=0
 RUN_STARTED_EPOCH=""
+RUN_DEADLINE=""
+RUN_ISSUES_STARTED=0
 RUN_STOP_REASON="running"
 RUN_FAILED_ISSUES=0
 RUN_SEQUENCE=0
@@ -442,6 +450,14 @@ initialize_run_storage() {
   }
   RUN_STARTED_EPOCH="$(lock_epoch_now 2>/dev/null)" || RUN_STARTED_EPOCH=""
   case "$RUN_STARTED_EPOCH" in *[!0-9]*|'') RUN_STARTED_EPOCH="" ;; esac
+  if [ -z "$RUN_STARTED_EPOCH" ]; then
+    printf '❌ No pude fijar el inicio de la corrida para calcular el deadline.\n' >&2
+    return 70
+  fi
+  RUN_DEADLINE=$((RUN_STARTED_EPOCH + MAX_RUN_SECONDS))
+  if [ -n "$DEADLINE_EPOCH" ] && [ "$DEADLINE_EPOCH" -lt "$RUN_DEADLINE" ]; then
+    RUN_DEADLINE="$DEADLINE_EPOCH"
+  fi
   [ -n "$RUN_DIR" ] || RUN_DIR="$SCRIPT_DIR/runs/$RUN_ID"
   mkdir -p "$RUN_DIR" || {
     printf "❌ No pude crear el directorio de corrida '%s'.\n" "$RUN_DIR" >&2
@@ -464,7 +480,7 @@ initialize_run_storage() {
       --arg stop_reason "$RUN_STOP_REASON" \
       '{schema: 1, run_id: $run_id, started_at: $started_at,
         base_branch: $base_branch, stop_reason: $stop_reason,
-        exit_code: null, issues: [], merged: [], open_prs: [],
+        exit_code: null, issues_started: 0, issues: [], merged: [], open_prs: [],
         needs_human: [], blocked: [], errors: [], elapsed_seconds: null,
         versions: {codex: null, claude: null, gh: null},
         usage: {codex_tokens: null, claude_estimated_usd: null}}' > "$summary_tmp"; then
@@ -555,12 +571,14 @@ finalize_run_summary() {
       --argjson exit_code "$exit_code" \
       --argjson issue "$issue_json" \
       --argjson elapsed "$elapsed_json" \
+      --argjson issues_started "$RUN_ISSUES_STARTED" \
       --arg repo "https://github.com/$REPO_SLUG" \
       --arg codex_tokens "$RUN_CODEX_TOKENS" \
       --arg claude_estimated_usd "$RUN_CLAUDE_ESTIMATED_USD" \
       --slurpfile events "$RUN_DIR/events.jsonl" \
       '.stop_reason = $stop_reason | .exit_code = $exit_code |
        .current_issue = $issue | .elapsed_seconds = $elapsed |
+       .issues_started = $issues_started |
        .errors = ((.errors // []) +
          [$events[] | select(.event == "error" and .detail != null) | .detail] | unique) |
        (.usage = {
@@ -1482,25 +1500,32 @@ classify_provider_signal() {
 # Espera hasta el instante fiable entregado por el proveedor, en bloques de
 # <=10min. Devuelve 2 si el deadline global vence antes del reset.
 wait_for_reset() {
-  local issue="$1" target now remaining heartbeat_remaining sleep_for
+  local issue="$1" target now remaining heartbeat_remaining sleep_for global_remaining
+  check_run_deadline "la espera del reset del proveedor" || return $?
   [ -n "$RESET_EPOCH" ] || {
     echo "⏭️  Tope sin retry_at fiable; reintento de #$issue sin espera."
     return 0
   }
   now="$(date +%s)"
   target="$RESET_EPOCH"
-  if [ -n "$DEADLINE_EPOCH" ] && [ "$target" -gt "$DEADLINE_EPOCH" ]; then
+  if [ -n "$RUN_DEADLINE" ] && [ "$target" -gt "$RUN_DEADLINE" ]; then
     echo "🛑 El reset del proveedor excede el deadline global; no reintento #$issue."
     return 2
   fi
   [ "$target" -gt "$now" ] || return 0
   echo "⏳ Tope $LIMIT_KIND. Reintento de #$issue ~$(format_epoch "$target" '+%H:%M') (en $(((target - now) / 60)) min)..."
   while :; do
+    check_run_deadline "la espera del reset del proveedor" || return $?
     heartbeat_remote_lock_if_due || return 70
     now="$(date +%s)"
     remaining=$((target - now))
     [ "$remaining" -le 0 ] && break
     sleep_for=$(( remaining > 600 ? 600 : remaining ))
+    if [ -n "$RUN_DEADLINE" ]; then
+      global_remaining=$((RUN_DEADLINE - now))
+      [ "$global_remaining" -gt 0 ] || stop_for_deadline "la espera del reset del proveedor"
+      [ "$global_remaining" -lt "$sleep_for" ] && sleep_for="$global_remaining"
+    fi
     if [ "$LOCK_HELD" -eq 1 ]; then
       heartbeat_remaining=$((LOCK_NEXT_HEARTBEAT_MONOTONIC - SECONDS))
       [ "$heartbeat_remaining" -gt 0 ] && [ "$heartbeat_remaining" -lt "$sleep_for" ] && sleep_for="$heartbeat_remaining"
@@ -1537,6 +1562,43 @@ write_checkpoint() {
     echo '```'
   } > "$CHECKPOINT_FILE"
   echo "💾 Contexto guardado en $CHECKPOINT_FILE"
+}
+
+run_deadline_expired() {
+  local now
+  [ -n "$RUN_DEADLINE" ] || return 1
+  now="$(lock_epoch_now 2>/dev/null)" || return 70
+  [ "$now" -ge "$RUN_DEADLINE" ]
+}
+
+stop_for_deadline() {
+  local context="${1:-la siguiente operación}"
+  echo "🛑 Deadline global alcanzado durante $context; detengo la corrida sin continuar."
+  RUN_STOP_REASON="deadline"
+  write_checkpoint "deadline global alcanzado durante $context."
+  exit 0
+}
+
+check_run_deadline() {
+  run_deadline_expired
+  case "$?" in
+    0) stop_for_deadline "$1" ;;
+    1) return 0 ;;
+    *) return 70 ;;
+  esac
+}
+
+start_next_issue() {
+  local max_issues_message
+  check_run_deadline "el inicio de un issue" || return $?
+  if [ "$RUN_ISSUES_STARTED" -ge "$MAX_ISSUES" ]; then
+    max_issues_message="máximo de $MAX_ISSUES issues únicos iniciados alcanzado."
+    echo "🛑 $max_issues_message"
+    RUN_STOP_REASON="max_issues"
+    write_checkpoint "$max_issues_message"
+    exit 0
+  fi
+  RUN_ISSUES_STARTED=$((RUN_ISSUES_STARTED + 1))
 }
 
 # Corre un agente en su propia sesión/grupo y conserva stdout y stderr en
@@ -1869,6 +1931,7 @@ finish_adapter() {
 
 run_codex() {
   local prompt="$1" process_rc
+  check_run_deadline "la invocación de Codex" || return $?
   prompt+="$CODEX_SKILL_CONTEXT"
   AGENT_ROLE="codex"
   : > "$LAST_MSG"
@@ -1911,6 +1974,7 @@ run_codex() {
 
 run_claude() {
   local prompt="$1" process_rc
+  check_run_deadline "la invocación de Claude" || return $?
   AGENT_ROLE="reviewer"
   record_run_event "agent_started" "$CURRENT_ISSUE" "$CURRENT_PR" "reviewer" "$CURRENT_PHASE" || return $?
   prepare_agent_capture claude stdout.json
@@ -2117,6 +2181,7 @@ run_smoke_test() {
     return 0
   fi
   build_codex_sandbox_config || return $?
+  check_run_deadline "la invocación de Codex del smoke test" || return $?
 
   if codex exec --json --model "$CODEX_MODEL" \
       "${CODEX_SANDBOX_CONFIG_ARGS[@]}" --sandbox "$CODEX_SANDBOX" \
@@ -2136,6 +2201,7 @@ run_smoke_test() {
     return "$CONFIG_ERROR_RC"
   fi
 
+  check_run_deadline "la invocación de Claude del smoke test" || return $?
   if claude --model "$CLAUDE_MODEL" --print --output-format json \
       'RALPH preflight smoke test: reply with OK.' \
       >"$claude_stdout" 2>"$claude_stderr"; then
@@ -2725,7 +2791,7 @@ verify_distinct_review() {
 # pasan, 1 si hay un fallo real (tras dejar en el PR el ítem que Codex debe
 # corregir), y 2 si la ausencia o el estado de CI sigue pendiente.
 wait_for_ci() {
-  local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining heartbeat_remaining
+  local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining heartbeat_remaining global_remaining
 
   CI_FAILURE_BODY=""
 
@@ -2737,6 +2803,7 @@ wait_for_ci() {
   started="$(date +%s 2>/dev/null)" || return 2
   deadline=$((started + CI_TIMEOUT_SECONDS))
   while :; do
+    check_run_deadline "la espera de CI" || return $?
     heartbeat_remote_lock_if_due || return 70
     check_required_checks "$reviewed_sha"
     checks_rc=$?
@@ -2779,6 +2846,10 @@ wait_for_ci() {
     fi
 
     now="$(date +%s 2>/dev/null)" || return 2
+    if [ -n "$RUN_DEADLINE" ]; then
+      global_remaining=$((RUN_DEADLINE - now))
+      [ "$global_remaining" -gt 0 ] || stop_for_deadline "la espera de CI"
+    fi
     if [ "$now" -ge "$deadline" ]; then
       echo "⚠️  $pending_reason en PR #$pr; estado ci_pending, sin merge."
       return 2
@@ -2787,6 +2858,7 @@ wait_for_ci() {
     if [ "$remaining" -gt 30 ]; then
       remaining=30
     fi
+    [ -n "$RUN_DEADLINE" ] && [ "$global_remaining" -lt "$remaining" ] && remaining="$global_remaining"
     if [ "$LOCK_HELD" -eq 1 ]; then
       heartbeat_remaining=$((LOCK_NEXT_HEARTBEAT_MONOTONIC - SECONDS))
       [ "$heartbeat_remaining" -gt 0 ] && [ "$heartbeat_remaining" -lt "$remaining" ] && remaining="$heartbeat_remaining"
@@ -2800,12 +2872,13 @@ wait_for_ci() {
 # Sólo un estado MERGED con un OID SHA válido habilita borrar la rama y avanzar.
 # Devuelve 0 confirmado · 2 merge_pending · 70 fallo de infraestructura.
 wait_for_merge() {
-  local pr="$1" started now deadline remaining merge_result merge_state merge_oid
+  local pr="$1" started now deadline remaining global_remaining merge_result merge_state merge_oid
 
   MERGED_SHA=""
   started="$(date +%s 2>/dev/null)" || return 70
   deadline=$((started + MERGE_TIMEOUT_SECONDS))
   while :; do
+    check_run_deadline "la espera de confirmación del merge" || return $?
     merge_result="$(gh pr view "$pr" --json state,mergeCommit \
       --jq '.state + "\t" + (.mergeCommit.oid // "")' 2>/dev/null)" || {
       echo "❌ No pude consultar el estado de merge del PR #$pr; detengo la corrida."
@@ -2820,12 +2893,18 @@ wait_for_merge() {
     fi
 
     now="$(date +%s 2>/dev/null)" || return 70
+    if [ -n "$RUN_DEADLINE" ]; then
+      global_remaining=$((RUN_DEADLINE - now))
+      [ "$global_remaining" -gt 0 ] || stop_for_deadline "la espera de confirmación del merge"
+    fi
     if [ "$now" -ge "$deadline" ]; then
       echo "⚠️  PR #$pr sigue sin merge confirmado; estado merge_pending, sin borrar rama ni cerrar issue."
       return 2
     fi
     remaining=$((deadline - now))
-    sleep $(( remaining > 30 ? 30 : remaining ))
+    [ "$remaining" -gt 30 ] && remaining=30
+    [ -n "$RUN_DEADLINE" ] && [ "$global_remaining" -lt "$remaining" ] && remaining="$global_remaining"
+    sleep "$remaining"
   done
 }
 
@@ -2838,7 +2917,7 @@ process_issue() {
   local num="$1"
   local branch="${BRANCH_PREFIX}${num}"
   local rc issue_ctx commits pr round verdict review_body prior_work reviewed_sha
-  local state_status state_phase infra_retries merged_sha ci_ok ci_rc backoff
+  local state_status state_phase infra_retries merged_sha ci_ok ci_rc backoff deadline_remaining deadline_now
   local pr_body prs open_pr_record merged_pr merged_pr_body
   local review_rc
   local remote_delete_error
@@ -3158,6 +3237,13 @@ $PROMPT_REVIEW"
         infra_retries=$((infra_retries + 1))
         backoff=$((60 * 3 ** (infra_retries - 1)))
         echo "🔁 El revisor no dejó un veredicto válido; reintento $infra_retries/$MAX_INFRA_RETRIES sin consumir ronda."
+        check_run_deadline "la espera del reintento del revisor" || return $?
+        if [ -n "$RUN_DEADLINE" ]; then
+          deadline_now="$(date +%s 2>/dev/null)" || return 70
+          deadline_remaining=$((RUN_DEADLINE - deadline_now))
+          [ "$deadline_remaining" -gt 0 ] || stop_for_deadline "la espera del reintento del revisor"
+          [ "$deadline_remaining" -lt "$backoff" ] && backoff="$deadline_remaining"
+        fi
         sleep "$backoff"
         continue
       fi
@@ -3215,6 +3301,7 @@ $PROMPT_REVIEW"
       publish_pr_state "$pr" "$num" "merge" "$round" "$reviewed_sha" \
         "merge_pending" "open" "$review_body" || return $?
       checkout_or_fail "$BASE_BRANCH" || return 70
+      check_run_deadline "la solicitud de merge" || return $?
       if gh pr merge "$pr" "$MERGE_METHOD" \
           --match-head-commit "$reviewed_sha" >/dev/null 2>&1; then
         wait_for_merge "$pr"
@@ -3655,6 +3742,8 @@ select_issues() {
         continue
       fi
 
+      start_next_issue || return $?
+
       # Los topes sólo reintentan este issue y tienen un techo global por issue.
       # Un reset fiable puede demorar el reintento, pero nunca se inventa una
       # espera cuando el proveedor no entregó retry_at.
@@ -3670,15 +3759,7 @@ select_issues() {
             exit 0
           fi
           limit_retries=$((limit_retries + 1))
-          if [ -n "$DEADLINE_EPOCH" ]; then
-            now="$(date +%s)" || exit 1
-            if [ "$now" -ge "$DEADLINE_EPOCH" ]; then
-              echo "🛑 Deadline global alcanzado; no reintento #$num."
-              write_checkpoint "deadline global alcanzado antes del reintento de #$num."
-              RUN_STOP_REASON="deadline"
-              exit 0
-            fi
-          fi
+          check_run_deadline "el reintento por tope del issue #$num" || exit $?
           wait_for_reset "$num"
           wait_rc=$?
           if [ "$wait_rc" -eq 2 ]; then

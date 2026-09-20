@@ -1,0 +1,20 @@
+{
+  "host": "github.com",
+  "nameWithOwner": "nicoamigosa/ralph",
+  "defaultBranch": "main",
+  "issues": [
+    {"number": 1, "title": "Candidate 1", "state": "OPEN", "labels": ["ready-for-agent"], "body": "No dependencies.\n", "comments": []},
+    {"number": 2, "title": "Candidate 2", "state": "OPEN", "labels": ["ready-for-agent"], "body": "No dependencies.\n", "comments": []},
+    {"number": 3, "title": "Candidate 3", "state": "OPEN", "labels": ["ready-for-agent"], "body": "No dependencies.\n", "comments": []},
+    {"number": 4, "title": "Candidate 4", "state": "OPEN", "labels": ["ready-for-agent"], "body": "No dependencies.\n", "comments": []},
+    {"number": 5, "title": "Candidate 5", "state": "OPEN", "labels": ["ready-for-agent"], "body": "No dependencies.\n", "comments": []}
+  ],
+  "pull_requests": [
+    {"number": 101, "head": "ralph/issue-1", "available_before_codex": false, "body": "Closes #1", "labels": [], "comments": [], "mergeCommit": {"oid": "1111111111111111111111111111111111111111"}},
+    {"number": 102, "head": "ralph/issue-2", "available_before_codex": false, "body": "Closes #2", "labels": [], "comments": [], "mergeCommit": {"oid": "2222222222222222222222222222222222222222"}},
+    {"number": 103, "head": "ralph/issue-3", "available_before_codex": false, "body": "Closes #3", "labels": [], "comments": [], "mergeCommit": {"oid": "3333333333333333333333333333333333333333"}},
+    {"number": 104, "head": "ralph/issue-4", "available_before_codex": false, "body": "Closes #4", "labels": [], "comments": [], "mergeCommit": {"oid": "4444444444444444444444444444444444444444"}},
+    {"number": 105, "head": "ralph/issue-5", "available_before_codex": false, "body": "Closes #5", "labels": [], "comments": [], "mergeCommit": {"oid": "5555555555555555555555555555555555555555"}}
+  ],
+  "checks": "pass"
+}
