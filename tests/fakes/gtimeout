@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${FAKE_TIMEOUT_UNAVAILABLE:-0}" = "1" ]; then
+  exit 127
+fi
+
+if [ -n "${FAKE_TIMEOUT_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_TIMEOUT_LOG"
+fi
+
+if [ "${FAKE_PS_DELAY_AGENT_PGID:-0}" = "1" ] &&
+    printf '%s\n' "$*" | grep -Fq -- 'codex exec' &&
+    [ -n "${FAKE_PS_AGENT_PGID_SEEN_FILE:-}" ]; then
+  : > "${FAKE_PS_AGENT_PGID_SEEN_FILE}.timeout-started"
+fi
+
+if [ -n "${RALPH_TEST_REAL_TIMEOUT:-}" ]; then
+  exec "$RALPH_TEST_REAL_TIMEOUT" "$@"
+fi
+
+if [ "${1:-}" = "--help" ]; then
+  printf '%s\n' 'fake GNU timeout for tests'
+  exit 0
+fi
+
+case "${1:-}" in
+  --kill-after=30s) ;;
+  *) exit 125 ;;
+esac
+duration="${2:-}"
+shift 2
+timed_out_file="${TMPDIR:-/tmp}/ralph-fake-timeout.$$"
+completed_file="${timed_out_file}.completed"
+rm -f "$timed_out_file"
+rm -f "$completed_file"
+"$@" &
+command_pid=$!
+(
+  duration_ticks=$((duration * 10))
+  elapsed_ticks=0
+  while [ "$elapsed_ticks" -lt "$duration_ticks" ] && [ ! -f "$completed_file" ]; do
+    "$RALPH_TEST_REAL_SLEEP" 0.1
+    elapsed_ticks=$((elapsed_ticks + 1))
+  done
+  if kill -0 "$command_pid" 2>/dev/null; then
+    : > "$timed_out_file"
+    kill -TERM "$command_pid" 2>/dev/null || true
+    grace_ticks=0
+    while [ ! -f "$completed_file" ] && [ "$grace_ticks" -lt 300 ]; do
+      "$RALPH_TEST_REAL_SLEEP" 0.1
+      grace_ticks=$((grace_ticks + 1))
+    done
+    [ -f "$completed_file" ] || kill -KILL "$command_pid" 2>/dev/null || true
+  fi
+) &
+watcher_pid=$!
+if wait "$command_pid"; then
+  command_rc=0
+else
+  command_rc=$?
+fi
+: > "$completed_file"
+kill "$watcher_pid" 2>/dev/null || true
+wait "$watcher_pid" 2>/dev/null || true
+if [ -f "$timed_out_file" ]; then
+  rm -f "$timed_out_file"
+  rm -f "$completed_file"
+  exit 124
+fi
+rm -f "$timed_out_file"
+rm -f "$completed_file"
+exit "$command_rc"

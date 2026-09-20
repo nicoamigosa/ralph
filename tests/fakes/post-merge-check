@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -n "${FAKE_POST_MERGE_SLEEP_SECONDS:-}" ]; then
+  sleep "$FAKE_POST_MERGE_SLEEP_SECONDS"
+fi
+
 printf 'post_merge %s\n' "$1" >> "$GH_MUTATION_LOG"

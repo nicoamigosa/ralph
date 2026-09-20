@@ -34,7 +34,10 @@ Cada corrida calcula un deadline global al comenzar: `RALPH_MAX_RUN_SECONDS`
 issues únicos iniciados; los reintentos por tope no consumen otro cupo. Al vencer
 cualquiera de esos límites, Ralph guarda checkpoint, termina sin iniciar otro
 agente ni merge, y registra `stop_reason=deadline` o `stop_reason=max_issues`.
-Las esperas de CI y de reset del proveedor se acotan al mismo deadline.
+Las esperas de CI y de reset del proveedor se acotan al mismo deadline. El
+preflight requiere una implementación GNU de `timeout`: elige `gtimeout` cuando
+está disponible (Homebrew `coreutils` en macOS) y luego `timeout` en Linux; si
+ninguna es usable, detiene la corrida con instrucciones de instalación.
 
 El proyecto puede declarar sus gates con
 `RALPH_REQUIRED_CHECKS_JSON='["CI / test","ShellCheck"]'`. Ralph consulta los
@@ -267,6 +270,13 @@ conserva el árbol y la rama en el estado en que estaban y sale con `128 + seña
 no hace checkout ni reset destructivo. También guarda el motivo y los datos de
 la señal en el `summary.json` de la corrida.
 
+Cada invocación de Codex o Claude, el hook `RALPH_POST_MERGE_CHECK` y las
+esperas de CI/confirmación de merge pasan por un límite GNU `timeout --kill-after=30s`.
+El límite efectivo nunca supera el tiempo restante de la corrida. Si vence una
+orden, el estado es `timeout` —no un tope del proveedor—, se conserva la rama
+cuando todavía existe y la corrida se detiene; un hook post-merge vencido también
+impide encadenar otro issue.
+
 ## Adaptadores JSON de agentes
 
 Codex se ejecuta con `codex exec --json -o "$LAST_MSG"` y Claude con
@@ -277,7 +287,7 @@ Codex se ejecuta con `codex exec --json -o "$LAST_MSG"` y Claude con
 El contrato interno de ambos adaptadores es:
 
 ```json
-{"status":"ok|rate_limited|auth_error|config_error|failed|unknown","retry_at":null,"limit_scope":"session|weekly|unknown","retryable":false,"exit_code":0,"final_message":null,"error":null}
+{"status":"ok|rate_limited|auth_error|config_error|timeout|failed|unknown","retry_at":null,"limit_scope":"session|weekly|unknown","retryable":false,"exit_code":0,"final_message":null,"error":null}
 ```
 
 `ok` exige exit code cero y una salida terminal válida: `turn.completed` para

@@ -175,6 +175,7 @@ LOCK_HOST="${RALPH_LOCK_HOST:-$(uname -n 2>/dev/null || printf '%s' unknown)}"
 CLOSE_POLICY="${RALPH_CLOSE_POLICY:-verified}"
 TDD_SKILL="${RALPH_TDD_SKILL:-}"
 SMOKE_TEST="${RALPH_SMOKE_TEST:-0}"
+TIMEOUT_COMMAND=""
 
 # These are the versions represented by the checked-in provider contract
 # fixtures. Newer patch/minor releases are accepted; older releases are not.
@@ -634,21 +635,25 @@ publish_summary_report() {
 }
 
 record_issue_failure() {
-  local issue="$1" reason="$2" summary_tmp event_status pr="${3-$CURRENT_PR}"
+  local issue="$1" reason="$2" summary_tmp event_status issue_status=failed pr="${3-$CURRENT_PR}"
   [ "$RUN_INITIALIZED" -eq 1 ] || return 0
   RUN_FAILED_ISSUES=1
+  [ "$reason" = "timeout" ] && issue_status=timeout
   summary_tmp="$RUN_DIR/summary.json.tmp.$$"
-  if ! jq --argjson issue "$issue" --arg reason "$reason" \
+  if ! jq --argjson issue "$issue" --arg reason "$reason" --arg status "$issue_status" \
       '.issues = ((.issues // []) |
         map(select(.number != $issue)) +
-        [{number: $issue, status: "failed", reason: $reason}])' \
+        [{number: $issue, status: $status, reason: $reason}])' \
       "$RUN_DIR/summary.json" > "$summary_tmp" 2>/dev/null; then
     rm -f "$summary_tmp"
     return 70
   fi
   mv -f "$summary_tmp" "$RUN_DIR/summary.json" || return 70
   event_status=failed
-  [ "$reason" = "needs_human" ] && event_status=needs_human
+  case "$reason" in
+    needs_human) event_status=needs_human ;;
+    timeout) event_status=timeout ;;
+  esac
   record_run_event "issue_failure" "$issue" "$pr" "$event_status" "$reason" || return $?
 }
 
@@ -703,6 +708,7 @@ LIMIT_ERROR=""
 LIMIT_RETRY_RC=8
 AUTH_ERROR_RC=65
 CONFIG_ERROR_RC=66
+TIMEOUT_RC=67
 
 # ---------------------------------------------------------------- preflight --
 
@@ -793,6 +799,18 @@ case "$LOCK_HEARTBEAT_SECONDS" in
   ''|*[!0-9]*) fail "RALPH_LOCK_HEARTBEAT_SECONDS debe ser un entero positivo." ;;
 esac
 [ "$LOCK_HEARTBEAT_SECONDS" -gt 0 ] || fail "RALPH_LOCK_HEARTBEAT_SECONDS debe ser un entero positivo."
+
+select_timeout_command() {
+  local candidate
+  for candidate in gtimeout timeout; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+        "$candidate" --help >/dev/null 2>&1; then
+      TIMEOUT_COMMAND="$(command -v "$candidate")"
+      return 0
+    fi
+  done
+  fail "Falta un timeout GNU usable. En macOS instalá 'brew install coreutils' (gtimeout); en Linux instalá el paquete 'coreutils'."
+}
 
 load_prompt() {
   local name="$1" common_prompt local_prompt
@@ -987,6 +1005,7 @@ if [ -n "$REQUIRED_CHECKS_JSON" ]; then
   fi
 fi
 if [ "$DRY_RUN" != "1" ]; then
+  select_timeout_command
   for cmd in codex claude; do
     command -v "$cmd" >/dev/null 2>&1 || fail "Falta '$cmd' en el PATH."
   done
@@ -1571,12 +1590,59 @@ run_deadline_expired() {
   [ "$now" -ge "$RUN_DEADLINE" ]
 }
 
+is_bounded_timeout_rc() {
+  case "$1" in
+    124|137) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Ejecuta una orden con el límite solicitado, recortándolo al tiempo que queda
+# de la corrida. La variante GNU de timeout garantiza que un proceso que no
+# responde a TERM reciba KILL después de la gracia fija.
+run_bounded() {
+  local requested_seconds="$1" now remaining effective_seconds rc
+  shift
+  BOUNDED_TIMED_OUT=0
+  [ -n "$TIMEOUT_COMMAND" ] || return 70
+  case "$requested_seconds" in
+    ''|*[!0-9]*) return 70 ;;
+  esac
+  effective_seconds="$requested_seconds"
+  if [ -n "$RUN_DEADLINE" ]; then
+    now="$(lock_epoch_now 2>/dev/null)" || return 70
+    remaining=$((RUN_DEADLINE - now))
+    if [ "$remaining" -le 0 ]; then
+      BOUNDED_TIMED_OUT=1
+      return 124
+    fi
+    [ "$remaining" -lt "$effective_seconds" ] && effective_seconds="$remaining"
+  fi
+  if [ "${RUN_BOUNDED_ISOLATE:-0}" = "1" ] &&
+      command -v setsid >/dev/null 2>&1; then
+    exec setsid "$TIMEOUT_COMMAND" --kill-after=30s "$effective_seconds" "$@"
+  fi
+  "$TIMEOUT_COMMAND" --kill-after=30s "$effective_seconds" "$@"
+  rc=$?
+  is_bounded_timeout_rc "$rc" && BOUNDED_TIMED_OUT=1
+  return "$rc"
+}
+
 stop_for_deadline() {
   local context="${1:-la siguiente operación}"
   echo "🛑 Deadline global alcanzado durante $context; detengo la corrida sin continuar."
   RUN_STOP_REASON="deadline"
   write_checkpoint "deadline global alcanzado durante $context."
   exit 0
+}
+
+stop_for_timeout() {
+  local context="${1:-la orden acotada}"
+  echo "⏱️  timeout durante $context; conservo la rama y detengo la corrida."
+  record_issue_failure "$CURRENT_ISSUE" "timeout" "$CURRENT_PR" || exit 70
+  RUN_STOP_REASON="timeout"
+  write_checkpoint "timeout durante $context para #$CURRENT_ISSUE."
+  exit 1
 }
 
 check_run_deadline() {
@@ -1629,10 +1695,7 @@ run_agent_group() {
         unset GH_TOKEN
       fi
     fi
-    if command -v setsid >/dev/null 2>&1; then
-      exec setsid "${AGENT_COMMAND[@]}"
-    fi
-    exec "${AGENT_COMMAND[@]}"
+    RUN_BOUNDED_ISOLATE=1 run_bounded "$AGENT_TIMEOUT_SECONDS" "${AGENT_COMMAND[@]}"
   }
   if command -v setsid >/dev/null 2>&1; then
     launch_agent_process > "$stdout_fifo" 2> "$stderr_fifo" &
@@ -1909,6 +1972,7 @@ parse_claude_result() {
 finish_adapter() {
   case "$ADAPTER_STATUS" in
     ok) return 0 ;;
+    timeout) return "$TIMEOUT_RC" ;;
     rate_limited)
       RESET_EPOCH=""
       [ "$ADAPTER_RETRY_AT" != "null" ] && RESET_EPOCH="$ADAPTER_RETRY_AT"
@@ -1927,6 +1991,22 @@ finish_adapter() {
       return 70
       ;;
   esac
+}
+
+record_agent_timeout() {
+  local provider="$1" process_rc="$2"
+  ADAPTER_STATUS="timeout"
+  ADAPTER_RETRY_AT="null"
+  ADAPTER_LIMIT_SCOPE="unknown"
+  ADAPTER_RETRYABLE=false
+  ADAPTER_FINAL_MESSAGE=""
+  ADAPTER_FINAL_MESSAGE_SET=0
+  ADAPTER_EXIT_CODE="$process_rc"
+  ADAPTER_ERROR="$provider excedió RALPH_AGENT_TIMEOUT_SECONDS"
+  write_adapter_result || return 70
+  record_run_event "agent_finished" "$CURRENT_ISSUE" "$CURRENT_PR" "timeout" "$provider" || return $?
+  record_run_event "error" "$CURRENT_ISSUE" "$CURRENT_PR" "timeout" "$ADAPTER_ERROR" || return $?
+  return "$TIMEOUT_RC"
 }
 
 run_codex() {
@@ -1951,6 +2031,10 @@ run_codex() {
   run_agent_group "$AGENT_STDOUT" "$AGENT_STDERR"
   process_rc=$?
   record_agent_log
+  if is_bounded_timeout_rc "$process_rc"; then
+    record_agent_timeout "Codex" "$process_rc"
+    return $?
+  fi
   if [ "$process_rc" -eq 70 ]; then
     ADAPTER_STATUS="failed"
     ADAPTER_RETRY_AT="null"
@@ -1989,6 +2073,10 @@ run_claude() {
   run_agent_group "$AGENT_STDOUT" "$AGENT_STDERR"
   process_rc=$?
   record_agent_log
+  if is_bounded_timeout_rc "$process_rc"; then
+    record_agent_timeout "Claude" "$process_rc"
+    return $?
+  fi
   if [ "$process_rc" -eq 70 ]; then
     ADAPTER_STATUS="failed"
     ADAPTER_RETRY_AT="null"
@@ -2183,7 +2271,7 @@ run_smoke_test() {
   build_codex_sandbox_config || return $?
   check_run_deadline "la invocación de Codex del smoke test" || return $?
 
-  if codex exec --json --model "$CODEX_MODEL" \
+  if run_bounded "$AGENT_TIMEOUT_SECONDS" codex exec --json --model "$CODEX_MODEL" \
       "${CODEX_SANDBOX_CONFIG_ARGS[@]}" --sandbox "$CODEX_SANDBOX" \
       --skip-git-repo-check -o "$codex_message" \
       'RALPH preflight smoke test: reply with OK.' \
@@ -2202,7 +2290,7 @@ run_smoke_test() {
   fi
 
   check_run_deadline "la invocación de Claude del smoke test" || return $?
-  if claude --model "$CLAUDE_MODEL" --print --output-format json \
+  if run_bounded "$AGENT_TIMEOUT_SECONDS" claude --model "$CLAUDE_MODEL" --print --output-format json \
       'RALPH preflight smoke test: reply with OK.' \
       >"$claude_stdout" 2>"$claude_stderr"; then
     smoke_rc=0
@@ -2791,7 +2879,7 @@ verify_distinct_review() {
 # pasan, 1 si hay un fallo real (tras dejar en el PR el ítem que Codex debe
 # corregir), y 2 si la ausencia o el estado de CI sigue pendiente.
 wait_for_ci() {
-  local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining heartbeat_remaining global_remaining
+  local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining heartbeat_remaining global_remaining sleep_rc
 
   CI_FAILURE_BODY=""
 
@@ -2864,7 +2952,12 @@ wait_for_ci() {
       [ "$heartbeat_remaining" -gt 0 ] && [ "$heartbeat_remaining" -lt "$remaining" ] && remaining="$heartbeat_remaining"
     fi
     [ "$remaining" -gt 0 ] || remaining=1
-    sleep "$remaining"
+    run_bounded "$remaining" sleep "$remaining"
+    sleep_rc=$?
+    if [ "$BOUNDED_TIMED_OUT" -eq 1 ]; then
+      stop_for_deadline "la espera de CI"
+    fi
+    [ "$sleep_rc" -eq 0 ] || return 70
   done
 }
 
@@ -2872,7 +2965,7 @@ wait_for_ci() {
 # Sólo un estado MERGED con un OID SHA válido habilita borrar la rama y avanzar.
 # Devuelve 0 confirmado · 2 merge_pending · 70 fallo de infraestructura.
 wait_for_merge() {
-  local pr="$1" started now deadline remaining global_remaining merge_result merge_state merge_oid
+  local pr="$1" started now deadline remaining global_remaining merge_result merge_state merge_oid sleep_rc
 
   MERGED_SHA=""
   started="$(date +%s 2>/dev/null)" || return 70
@@ -2904,7 +2997,12 @@ wait_for_merge() {
     remaining=$((deadline - now))
     [ "$remaining" -gt 30 ] && remaining=30
     [ -n "$RUN_DEADLINE" ] && [ "$global_remaining" -lt "$remaining" ] && remaining="$global_remaining"
-    sleep "$remaining"
+    run_bounded "$remaining" sleep "$remaining"
+    sleep_rc=$?
+    if [ "$BOUNDED_TIMED_OUT" -eq 1 ]; then
+      stop_for_deadline "la espera de confirmación del merge"
+    fi
+    [ "$sleep_rc" -eq 0 ] || return 70
   done
 }
 
@@ -3073,6 +3171,9 @@ $resume_note
 ## Working instructions
 $PROMPT_IMPLEMENT"
     rc=$?
+    if [ "$rc" -eq "$TIMEOUT_RC" ] && [ "$ADAPTER_STATUS" = "timeout" ]; then
+      stop_for_timeout "la implementación de Codex"
+    fi
     if [ "$rc" -ge 128 ]; then
       echo "❌ Codex terminó por señal (rc=$rc): fallo de infraestructura del issue #$num."
     fi
@@ -3175,6 +3276,9 @@ $PROMPT_IMPLEMENT"
       [ "$rc" -eq 0 ] || return "$rc"
       run_codex_correction "$pr" "$branch" "$issue_ctx" "$review_body" "$num"
       rc=$?
+      if [ "$rc" -eq "$TIMEOUT_RC" ] && [ "$ADAPTER_STATUS" = "timeout" ]; then
+        stop_for_timeout "la corrección de Codex"
+      fi
       [ "$rc" -ne 0 ] && return "$rc"
       round=$((round + 1))
       reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
@@ -3225,6 +3329,9 @@ $issue_ctx
 ## Review instructions
 $PROMPT_REVIEW"
       rc=$?
+      if [ "$rc" -eq "$TIMEOUT_RC" ] && [ "$ADAPTER_STATUS" = "timeout" ]; then
+        stop_for_timeout "la revisión de Claude"
+      fi
       if [ "$rc" -ne 0 ] && [ "$rc" -ne 8 ] && [ "$rc" -ne 9 ]; then
         echo "❌ Claude terminó con rc=$rc; #$num queda abierto sin merge."
       fi
@@ -3344,7 +3451,13 @@ $PROMPT_REVIEW"
         # Producción rota no admite otro despliegue encima: si el hook falla, para toda la corrida.
         if [ -n "$POST_MERGE_CHECK" ]; then
           echo "🩺 Verifico producción con $POST_MERGE_CHECK $merged_sha..."
-          if ! "$POST_MERGE_CHECK" "$merged_sha"; then
+          run_bounded "$AGENT_TIMEOUT_SECONDS" "$POST_MERGE_CHECK" "$merged_sha"
+          rc=$?
+          if [ "$BOUNDED_TIMED_OUT" -eq 1 ]; then
+            add_label "$num" "$NEEDS_HUMAN_LABEL"
+            gh issue comment "$num" --body "🤖 PR #$pr mergeado como $merged_sha pero el hook post-merge excedió el timeout. Ralph se detiene." >/dev/null 2>&1 || true
+            stop_for_timeout "el hook post-merge"
+          elif [ "$rc" -ne 0 ]; then
             add_label "$num" "$NEEDS_HUMAN_LABEL"
             gh issue comment "$num" --body "🤖 PR #$pr mergeado como $merged_sha pero la verificación de producción falló. Ralph se detiene." >/dev/null 2>&1 || true
             write_checkpoint "producción no verificada tras mergear PR #$pr como \`$merged_sha\`."

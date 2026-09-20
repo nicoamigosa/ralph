@@ -5,6 +5,7 @@ TEST_REAL_TEE="$(command -v tee)"
 TEST_REAL_GIT="$(command -v git)"
 TEST_REAL_DATE="$(command -v date)"
 TEST_REAL_SLEEP="$(command -v sleep)"
+TEST_REAL_TIMEOUT="$(command -v gtimeout || command -v timeout || true)"
 TEST_REAL_MKTEMP="$(command -v mktemp)"
 TEST_REAL_UNAME="$(command -v uname)"
 TEST_REAL_PS="$(command -v ps)"
@@ -47,6 +48,7 @@ setup() {
   export RALPH_TEST_REAL_GIT="$TEST_REAL_GIT"
   export RALPH_TEST_REAL_DATE="$TEST_REAL_DATE"
   export RALPH_TEST_REAL_SLEEP="$TEST_REAL_SLEEP"
+  export RALPH_TEST_REAL_TIMEOUT="$TEST_REAL_TIMEOUT"
   export RALPH_TEST_REAL_MKTEMP="$TEST_REAL_MKTEMP"
   export RALPH_TEST_REAL_UNAME="$TEST_REAL_UNAME"
   export RALPH_TEST_REAL_PS="$TEST_REAL_PS"
@@ -78,6 +80,7 @@ setup() {
     FAKE_CODEX_PID_FILE FAKE_PS_DELAY_AGENT_PGID \
     FAKE_PS_AGENT_PGID_SEEN_FILE FAKE_SLEEP_DISCOVERY_GATE_FILE \
     FAKE_SLEEP_DISCOVERY_RELEASE_FILE
+  unset FAKE_TIMEOUT_UNAVAILABLE FAKE_TIMEOUT_LOG
   : > "$GH_MUTATION_LOG"
   : > "$FAKE_API_LOG"
   printf '%s\n' '{"next_id":9001,"comments":[]}' > "$FAKE_GH_STATE_FILE"
