@@ -652,6 +652,68 @@ load test_helper
   grep -Fq 'Actual billing is not inferred' "$RUN_DIR/summary.md"
 }
 
+@test "configured claude budget is passed to every claude invocation" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CLAUDE_MAX_BUDGET_USD=0.75
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq -- 'claude --model opus --max-budget-usd 0.75' "$FAKE_AGENT_LOG"
+}
+
+@test "configured claude budget is passed to the claude smoke invocation" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CLAUDE_MAX_BUDGET_USD=0.75
+  export RALPH_SMOKE_TEST=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -F -- 'claude --model opus --max-budget-usd 0.75' "$FAKE_AGENT_LOG")" -eq 2 ]
+}
+
+@test "run budget stops before another agent after claude cost reaches the cap" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/two-issues.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_EXITS='0|0'
+  export FAKE_CLAUDE_RESULTS='first|second'
+  export FAKE_CLAUDE_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/claude-2.1.277-success.json"
+  export RALPH_RUN_BUDGET_USD=0.10
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_CODEX_CALL_COUNT_FILE")" = 1 ]
+  [ "$(cat "$FAKE_CLAUDE_CALL_COUNT_FILE")" = 1 ]
+  jq -e '.stop_reason == "budget" and .usage.claude_estimated_usd == 0.1823155' \
+    "$RUN_DIR/summary.json"
+  grep -Fq 'not a joint Codex/Claude budget' "$RUN_DIR/summary.md"
+  grep -Fq 'Configure Codex hard ceiling at its provider' "$RUN_DIR/summary.md"
+}
+
+@test "run budget stops before Codex for an issue without a prior PR" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/two-issues-second-without-pr.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_EXITS='0|0'
+  export FAKE_CLAUDE_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/claude-2.1.277-success.json"
+  export RALPH_RUN_BUDGET_USD=0.10
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(cat "$FAKE_CODEX_CALL_COUNT_FILE")" = 1 ]
+  jq -e '.stop_reason == "budget" and .usage.claude_estimated_usd == 0.1823155' \
+    "$RUN_DIR/summary.json"
+}
+
 @test "missing codex token fields are null rather than zero" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_STDOUT='{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n{"type":"turn.completed","usage":{}}'
@@ -2782,6 +2844,8 @@ load test_helper
     .retryable == false and .exit_code == 0' "$RUN_DIR"/claude-*.result.json
   [ "$(jq -r '.final_message' "$RUN_DIR"/codex-*.result.json)" = 'implementation complete' ]
   [ "$(jq -r '.final_message' "$RUN_DIR"/claude-*.result.json)" = '<verdict>PASS</verdict>' ]
+  jq -e '.usage.codex_tokens == 14895 and
+    .usage.claude_estimated_usd == 0.1823155' "$RUN_DIR/summary.json"
 }
 
 @test "claude JSON without a final result is failed and never merges" {

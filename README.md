@@ -39,6 +39,13 @@ preflight requiere una implementación GNU de `timeout`: elige `gtimeout` cuando
 está disponible (Homebrew `coreutils` en macOS) y luego `timeout` en Linux; si
 ninguna es usable, detiene la corrida con instrucciones de instalación.
 
+`RALPH_CLAUDE_MAX_BUDGET_USD` agrega `--max-budget-usd` a cada invocación de
+Claude, incluido el smoke test. `RALPH_RUN_BUDGET_USD` es un tope estimado de
+coste de Claude para toda la corrida: cuando el coste acumulado reportado por
+Claude alcanza o supera ese valor, Ralph no inicia otro agente y registra
+`stop_reason=budget`. No es una medición exacta de facturación ni un presupuesto
+conjunto de Claude y Codex; el techo duro de Codex se configura en su proveedor.
+
 El proyecto puede declarar sus gates con
 `RALPH_REQUIRED_CHECKS_JSON='["CI / test","ShellCheck"]'`. Ralph consulta los
 `check-runs` y `statuses` del SHA exacto que revisó Claude: cada nombre declarado
@@ -222,7 +229,9 @@ issues/PRs; `events.jsonl` conserva un evento
 JSON por línea asociado al issue y, cuando existe, al PR. Un dato de uso que
 el proveedor no entrega es `null`, nunca `0`. `claude_estimated_usd` es sólo
 el coste estimado reportado por el proveedor: Ralph no calcula coste marginal
-de una suscripción ni lo presenta como facturación real.
+de una suscripción ni lo presenta como facturación real. El presupuesto de
+corrida sólo cubre ese coste estimado de Claude; no es un presupuesto conjunto
+con Codex.
 
 Al terminar una corrida normal, Ralph imprime en stdout la ruta de
 `summary.md`. Si `RALPH_REPORT_ISSUE` contiene un número de issue, publica ese
