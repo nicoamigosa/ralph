@@ -569,6 +569,25 @@ finalize_run_summary() {
   write_summary_markdown || true
 }
 
+print_summary_path() {
+  [ "$RUN_INITIALIZED" -eq 1 ] || return 0
+  [ -f "$RUN_DIR/summary.md" ] || return 0
+  printf '📄 Resumen: %s/summary.md\n' "$RUN_DIR"
+}
+
+publish_summary_report() {
+  local report_issue="${RALPH_REPORT_ISSUE:-}"
+  [ "$RUN_INITIALIZED" -eq 1 ] || return 0
+  [ -n "$report_issue" ] || return 0
+  [ -f "$RUN_DIR/summary.md" ] || return 0
+  if gh issue comment "$report_issue" --body "$(cat "$RUN_DIR/summary.md")" >/dev/null 2>&1; then
+    echo "📣 Resumen publicado en issue #$report_issue."
+  else
+    printf '⚠️  No pude publicar el resumen en issue #%s; conservo %s/summary.md.\n' \
+      "$report_issue" "$RUN_DIR" >&2
+  fi
+}
+
 record_issue_failure() {
   local issue="$1" reason="$2" summary_tmp event_status pr="${3-$CURRENT_PR}"
   [ "$RUN_INITIALIZED" -eq 1 ] || return 0
@@ -617,6 +636,8 @@ cleanup_on_exit() {
   [ "$SIGNAL_EXITING" -eq 1 ] || terminate_agent_processes
   release_remote_lock
   finalize_run_summary "$exit_code"
+  print_summary_path
+  publish_summary_report
   [ -n "$CURRENT_AGENT_FIFO" ] && rm -f "$CURRENT_AGENT_FIFO"
   [ -n "$CURRENT_AGENT_ERR_FIFO" ] && rm -f "$CURRENT_AGENT_ERR_FIFO"
   return "$exit_code"

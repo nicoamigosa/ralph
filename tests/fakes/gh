@@ -40,6 +40,26 @@ pr_comment() {
   printf 'https://github.com/nicoamigosa/ralph/pull/%s#issuecomment-%s\n' "$number" "$comment_id"
 }
 
+issue_comment() {
+  local number="${2:?missing issue number}" body="" previous=""
+  local arg
+  for arg in "$@"; do
+    if [ "$previous" = "--body" ]; then
+      body="$arg"
+      break
+    fi
+    previous="$arg"
+  done
+  if [ "${FAKE_ISSUE_COMMENT_EXIT:-0}" -ne 0 ]; then
+    printf '%s\n' 'fake issue comment failure' >&2
+    return "$FAKE_ISSUE_COMMENT_EXIT"
+  fi
+  mutation "$*"
+  if [ -n "${FAKE_ISSUE_COMMENT_BODY_FILE:-}" ]; then
+    printf '%s' "$body" > "$FAKE_ISSUE_COMMENT_BODY_FILE"
+  fi
+}
+
 issue_filter=".issues[] | select(.number == \$number)"
 issue_list_filter='.issues | map(select(($state == "all" or .state == ($state | ascii_upcase)) and ($label == "" or ((.labels // []) | index($label))))) | map(.number) | sort | .[]'
 issue_list_with_body_filter='.issues | map(select(($state == "all" or .state == ($state | ascii_upcase)) and ($label == "" or ((.labels // []) | index($label))))) | sort_by(.number) | .[] | @json'
@@ -187,8 +207,11 @@ case "${1:-}" in
           fixture_jq --argjson number "$number" "$issue_filter"
         fi
         ;;
-      close|comment)
+      close)
         mutation "$*"
+        ;;
+      comment)
+        issue_comment "$@"
         ;;
       *)
         exit 2
