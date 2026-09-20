@@ -210,8 +210,7 @@ RUN_ID=""
 RUN_DIR="${RUN_DIR:-}"
 RUN_INITIALIZED=0
 RUN_STOP_REASON="running"
-RUN_SCRATCH_AGENT=""
-RUN_SCRATCH_MESSAGE=""
+RUN_FAILED_ISSUES=0
 RUN_SEQUENCE=0
 AGENT_STDOUT=""
 AGENT_STDERR=""
@@ -405,6 +404,22 @@ finalize_run_summary() {
   fi
 }
 
+record_issue_failure() {
+  local issue="$1" reason="$2" summary_tmp
+  [ "$RUN_INITIALIZED" -eq 1 ] || return 0
+  RUN_FAILED_ISSUES=1
+  summary_tmp="$RUN_DIR/summary.json.tmp.$$"
+  if ! jq --argjson issue "$issue" --arg reason "$reason" \
+      '.issues = ((.issues // []) |
+        map(select(.number != $issue)) +
+        [{number: $issue, status: "failed", reason: $reason}])' \
+      "$RUN_DIR/summary.json" > "$summary_tmp" 2>/dev/null; then
+    rm -f "$summary_tmp"
+    return 70
+  fi
+  mv -f "$summary_tmp" "$RUN_DIR/summary.json" || return 70
+}
+
 signal_number() {
   case "$1" in
     HUP) printf '%s\n' 1 ;;
@@ -433,8 +448,6 @@ cleanup_on_exit() {
   [ "$SIGNAL_EXITING" -eq 1 ] || terminate_agent_processes
   release_remote_lock
   finalize_run_summary "$exit_code"
-  [ -n "$RUN_SCRATCH_AGENT" ] && rm -f "$RUN_SCRATCH_AGENT"
-  [ -n "$RUN_SCRATCH_MESSAGE" ] && rm -f "$RUN_SCRATCH_MESSAGE"
   [ -n "$CURRENT_AGENT_FIFO" ] && rm -f "$CURRENT_AGENT_FIFO"
   [ -n "$CURRENT_AGENT_ERR_FIFO" ] && rm -f "$CURRENT_AGENT_ERR_FIFO"
 }
@@ -999,12 +1012,6 @@ if [ "$DRY_RUN" != "1" ] && [ -n "$(git status --porcelain)" ]; then
 fi
 
 initialize_run_storage || exit $?
-if [ "$DRY_RUN" != "1" ]; then
-  RUN_SCRATCH_AGENT="$(mktemp "${TMPDIR:-/tmp}/ralph-agent.XXXXXX")" \
-    || fail "No pude crear el temporal para el log del agente."
-  RUN_SCRATCH_MESSAGE="$(mktemp "${TMPDIR:-/tmp}/ralph-lastmsg.XXXXXX")" \
-    || fail "No pude crear el temporal para el último mensaje."
-fi
 write_protection_summary "$PROTECTION_STATUS" "$PROTECTION_FAILURES"
 
 if [ "$DRY_RUN" != "1" ]; then
@@ -2522,6 +2529,7 @@ process_issue() {
     [ "$rc" -eq 70 ] && return "$rc"
     if [ "$rc" -eq 0 ]; then
       echo "🙋 PR #$pr espera revisión humana; no lo toco."
+      record_issue_failure "$num" "needs_human" || return $?
       checkout_or_fail "$BASE_BRANCH" || return 70
       return 0
     fi
@@ -2585,6 +2593,7 @@ $PROMPT_IMPLEMENT"
     pr="$(pr_for_branch "$branch" "$num")"
     if [ -z "$pr" ]; then
       echo "⚠️  Codex no dejó PR abierto para #$num. Branch preservado, sin merge."
+      record_issue_failure "$num" "no_pull_request" || return $?
       checkout_or_fail "$BASE_BRANCH" || return 70
       return 0
     fi
@@ -2649,6 +2658,7 @@ $PROMPT_IMPLEMENT"
     if [ "$state_status" = "changes_requested" ] || [ "$state_status" = "correction_pending" ]; then
       if [ "$round" -eq "$MAX_ROUNDS" ]; then
         echo "🙋 #$num agotó las $MAX_ROUNDS rondas sin PASS. PR #$pr queda abierto para revisión humana."
+        record_issue_failure "$num" "max_rounds" || return $?
         add_label "$pr" "$NEEDS_HUMAN_LABEL"
         gh pr comment "$pr" --body "🤖 Ralph agotó las $MAX_ROUNDS rondas de revisión sin alcanzar PASS. Sin merge: necesita un humano." >/dev/null 2>&1 || true
         checkout_or_fail "$BASE_BRANCH" || return 70
@@ -2857,6 +2867,7 @@ $PROMPT_REVIEW"
     if [ "$state_status" = "changes_requested" ]; then
       if [ "$round" -eq "$MAX_ROUNDS" ]; then
         echo "🙋 #$num agotó las $MAX_ROUNDS rondas sin PASS. PR #$pr queda abierto para revisión humana."
+        record_issue_failure "$num" "max_rounds" || return $?
         add_label "$pr" "$NEEDS_HUMAN_LABEL"
         gh pr comment "$pr" --body "🤖 Ralph agotó las $MAX_ROUNDS rondas de revisión sin alcanzar PASS. Sin merge: necesita un humano." >/dev/null 2>&1 || true
         checkout_or_fail "$BASE_BRANCH" || return 70
@@ -2999,6 +3010,7 @@ validate_issue_for_agent() {
   fi
   if issue_has_label "$ISSUE_LABELS" "$NEEDS_HUMAN_LABEL"; then
     echo "🙋 #$num marcado con $NEEDS_HUMAN_LABEL; no invoco agentes."
+    record_issue_failure "$num" "needs_human" || return $?
     return 1
   fi
 
@@ -3037,6 +3049,7 @@ validate_issue_for_agent() {
     [ "$rc" -eq 70 ] && return "$rc"
     if [ "$rc" -eq 0 ]; then
       echo "🙋 PR #$pr espera revisión humana; no invoco agentes."
+      record_issue_failure "$num" "needs_human" || return $?
       return 1
     fi
   fi
@@ -3200,6 +3213,7 @@ select_issues() {
       fi
       if issue_has_label "${ISSUE_LABELS_BY_ISSUE[$num]}" "$NEEDS_HUMAN_LABEL"; then
         echo "🙋 #$num marcado con $NEEDS_HUMAN_LABEL; no lo toco."
+        record_issue_failure "$num" "needs_human" || return $?
         continue
       fi
 
@@ -3217,6 +3231,7 @@ select_issues() {
       fi
       if [ "$needs_human" = yes ]; then
         echo "🙋 PR #$pr espera revisión humana; no lo toco."
+        record_issue_failure "$num" "needs_human" || return $?
         continue
       fi
 
@@ -3302,6 +3317,10 @@ else
   select_issues run
   rc=$?
   [ "$rc" -eq 0 ] || exit "$rc"
-  RUN_STOP_REASON="no_ready_issues"
+  if [ "$RUN_FAILED_ISSUES" -gt 0 ]; then
+    RUN_STOP_REASON="issues_failed"
+  else
+    RUN_STOP_REASON="no_ready_issues"
+  fi
   echo "🏁 No quedan issues '$LABEL' listos para procesar."
 fi

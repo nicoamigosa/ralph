@@ -29,6 +29,7 @@ setup() {
   clear_ralph_env
   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ralph-tests.XXXXXX")"
   TEST_ROOT="$(cd "$TEST_ROOT" && pwd -P)"
+  export RUN_DIR="$TEST_ROOT/run"
   export RALPH_HOST_CONFIG="$TEST_ROOT/host.env"
   : > "$RALPH_HOST_CONFIG"
   TEST_ORIGIN="$TEST_ROOT/origin.git"
