@@ -377,8 +377,21 @@ load test_helper
   run_once
 
   [ "$status" -eq 0 ]
-  jq -e '.usage.codex_tokens == null and .usage.claude_estimated_usd == null' \
+  jq -e '(.usage | type == "object") and
+    .usage.codex_tokens == null and .usage.claude_estimated_usd == null' \
     "$RUN_DIR/summary.json"
+}
+
+@test "codex usage counts input and output tokens without cached input twice" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/codex-0.154.0-success.jsonl"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.usage.codex_tokens == 14895' "$RUN_DIR/summary.json"
 }
 
 @test "summary trap preserves the original failure exit code" {

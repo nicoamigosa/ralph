@@ -341,9 +341,9 @@ record_codex_usage() {
   tokens="$(jq -s -r '
     [ .[] | select(.type == "turn.completed" and (.usage | type == "object")) |
       if (.usage.total_tokens | type) == "number" then .usage.total_tokens
-      elif ([.usage.input_tokens, .usage.cached_input_tokens, .usage.output_tokens]
+      elif ([.usage.input_tokens, .usage.output_tokens]
             | any(type == "number")) then
-        [.usage.input_tokens, .usage.cached_input_tokens, .usage.output_tokens]
+        [.usage.input_tokens, .usage.output_tokens]
         | map(select(type == "number")) | add
       else empty
       end
@@ -2994,12 +2994,12 @@ $PROMPT_REVIEW"
           --match-head-commit "$reviewed_sha" >/dev/null 2>&1; then
         wait_for_merge "$pr"
         rc=$?
-          if [ "$rc" -eq 2 ]; then
-            if [ "$MERGE_PENDING_POLICY" = "stop" ]; then
-              checkout_or_fail "$BASE_BRANCH" || return 70
-              write_checkpoint "merge_pending para el PR #$pr; la corrida se detiene sin borrar la rama ni cerrar el issue."
-              RUN_STOP_REASON="merge_pending"
-              exit 0
+        if [ "$rc" -eq 2 ]; then
+          if [ "$MERGE_PENDING_POLICY" = "stop" ]; then
+            checkout_or_fail "$BASE_BRANCH" || return 70
+            write_checkpoint "merge_pending para el PR #$pr; la corrida se detiene sin borrar la rama ni cerrar el issue."
+            RUN_STOP_REASON="merge_pending"
+            exit 0
           fi
           checkout_or_fail "$BASE_BRANCH" || return 70
           return 0
