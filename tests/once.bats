@@ -2250,8 +2250,7 @@ load test_helper
   [[ "$output" == *"was not started"* ]]
   [[ "$output" == *"gh api repos/"*"/check-runs/801/annotations"* ]]
   [[ "$output" == *"reintento 2/2"* ]]
-  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
-  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [ "$(grep -c 'CI en rojo' "$GH_MUTATION_LOG")" -eq 0 ]
   [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
   jq -e '.stop_reason == "ci_infrastructure" and any(.errors[]; contains("was not started"))' "$RUN_DIR/summary.json"
 }
@@ -2270,7 +2269,10 @@ load test_helper
 
   [ "$status" -eq 0 ]
   grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
-  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  [ "$(grep -c 'CI en rojo' "$GH_MUTATION_LOG")" -eq 0 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [[ "$output" == *"reintento 1/2"* ]]
+  [[ "$output" != *"CI en rojo"* ]]
   [ "$(cat "$FAKE_CI_CALL_COUNT_FILE")" -eq 2 ]
 }
 
