@@ -204,12 +204,13 @@ case "$DEADLINE_EPOCH" in
 esac
 validate_file_path RALPH_CHECKPOINT_FILE "$CHECKPOINT_FILE"
 
-AGENT_LOG="$(mktemp "${TMPDIR:-/tmp}/ralph-agent.XXXXXX")" \
-  || fail "No pude crear el temporal para el log del agente."
-LAST_MSG="$(mktemp "${TMPDIR:-/tmp}/ralph-lastmsg.XXXXXX")" \
-  || fail "No pude crear el temporal para el último mensaje."
-RUN_DIR="${RUN_DIR:-${TMPDIR:-/tmp}/ralph-run-$$}"
-mkdir -p "$RUN_DIR" || fail "No pude crear el directorio de corrida '$RUN_DIR'."
+AGENT_LOG=""
+LAST_MSG=""
+RUN_ID=""
+RUN_DIR="${RUN_DIR:-}"
+RUN_INITIALIZED=0
+RUN_STOP_REASON="running"
+RUN_FAILED_ISSUES=0
 RUN_SEQUENCE=0
 AGENT_STDOUT=""
 AGENT_STDERR=""
@@ -333,6 +334,92 @@ record_signal_in_summary() {
   fi
 }
 
+initialize_run_storage() {
+  local summary_tmp
+  [ "$DRY_RUN" = "1" ] && return 0
+
+  umask 077
+  RUN_ID="$(date -u '+%Y%m%dT%H%M%SZ')-$$" || {
+    printf '❌ No pude generar el identificador de la corrida.\n' >&2
+    return 70
+  }
+  [ -n "$RUN_DIR" ] || RUN_DIR="$SCRIPT_DIR/runs/$RUN_ID"
+  mkdir -p "$RUN_DIR" || {
+    printf "❌ No pude crear el directorio de corrida '%s'.\n" "$RUN_DIR" >&2
+    return 70
+  }
+  : > "$RUN_DIR/run.log" || {
+    printf "❌ No pude crear el log de corrida '%s/run.log'.\n" "$RUN_DIR" >&2
+    return 70
+  }
+  AGENT_LOG="$RUN_DIR/events.log"
+  LAST_MSG="$RUN_DIR/last-message.txt"
+  : > "$AGENT_LOG" || return 70
+  : > "$LAST_MSG" || return 70
+  summary_tmp="$RUN_DIR/summary.json.tmp.$$"
+  if ! jq -cn \
+      --arg run_id "$RUN_ID" \
+      --arg started_at "$RUN_ID" \
+      --arg base_branch "$BASE_BRANCH" \
+      --arg stop_reason "$RUN_STOP_REASON" \
+      '{schema: 1, run_id: $run_id, started_at: $started_at,
+        base_branch: $base_branch, stop_reason: $stop_reason,
+        exit_code: null, issues: [], errors: []}' > "$summary_tmp"; then
+    rm -f "$summary_tmp"
+    return 70
+  fi
+  mv -f "$summary_tmp" "$RUN_DIR/summary.json" || return 70
+  RUN_INITIALIZED=1
+  exec > >(tee -a "$RUN_DIR/run.log") 2>&1
+  echo "📁 Corrida $RUN_ID: artefactos en $RUN_DIR"
+}
+
+finalize_run_summary() {
+  local exit_code="$1" reason="$RUN_STOP_REASON" summary_tmp issue_json
+  [ "$RUN_INITIALIZED" -eq 1 ] || return 0
+  [ -f "$RUN_DIR/summary.json" ] || return 0
+  if [ "$reason" = "running" ]; then
+    if [ "$exit_code" -eq 0 ]; then
+      reason="completed"
+    elif [ -n "$CURRENT_ISSUE" ]; then
+      reason="issue_failed"
+    else
+      reason="run_failed"
+    fi
+  fi
+  if [ -n "$CURRENT_ISSUE" ] && printf '%s' "$CURRENT_ISSUE" | grep -Eq '^[0-9]+$'; then
+    issue_json="$CURRENT_ISSUE"
+  else
+    issue_json=null
+  fi
+  summary_tmp="$RUN_DIR/summary.json.tmp.$$"
+  if jq --arg stop_reason "$reason" \
+      --argjson exit_code "$exit_code" \
+      --argjson issue "$issue_json" \
+      '.stop_reason = $stop_reason | .exit_code = $exit_code |
+       .current_issue = $issue' "$RUN_DIR/summary.json" > "$summary_tmp" 2>/dev/null; then
+    mv -f "$summary_tmp" "$RUN_DIR/summary.json"
+  else
+    rm -f "$summary_tmp"
+  fi
+}
+
+record_issue_failure() {
+  local issue="$1" reason="$2" summary_tmp
+  [ "$RUN_INITIALIZED" -eq 1 ] || return 0
+  RUN_FAILED_ISSUES=1
+  summary_tmp="$RUN_DIR/summary.json.tmp.$$"
+  if ! jq --argjson issue "$issue" --arg reason "$reason" \
+      '.issues = ((.issues // []) |
+        map(select(.number != $issue)) +
+        [{number: $issue, status: "failed", reason: $reason}])' \
+      "$RUN_DIR/summary.json" > "$summary_tmp" 2>/dev/null; then
+    rm -f "$summary_tmp"
+    return 70
+  fi
+  mv -f "$summary_tmp" "$RUN_DIR/summary.json" || return 70
+}
+
 signal_number() {
   case "$1" in
     HUP) printf '%s\n' 1 ;;
@@ -346,19 +433,21 @@ handle_signal() {
   local signal="$1" exit_code message
   [ "$SIGNAL_EXITING" -eq 0 ] || return 0
   SIGNAL_EXITING=1
+  RUN_STOP_REASON="signal:$signal"
   exit_code=$((128 + $(signal_number "$signal")))
   message="corrida terminada por señal $signal durante $CURRENT_PHASE del issue #${CURRENT_ISSUE:-?}"
   printf '⚠️  %s\n' "$message"
-  printf '%s\n' "$message" >> "$AGENT_LOG"
+  [ -n "$AGENT_LOG" ] && printf '%s\n' "$message" >> "$AGENT_LOG"
   record_signal_in_summary "$signal" "$exit_code"
   terminate_agent_processes
   exit "$exit_code"
 }
 
 cleanup_on_exit() {
+  local exit_code=$?
   [ "$SIGNAL_EXITING" -eq 1 ] || terminate_agent_processes
   release_remote_lock
-  rm -f "$AGENT_LOG" "$LAST_MSG"
+  finalize_run_summary "$exit_code"
   [ -n "$CURRENT_AGENT_FIFO" ] && rm -f "$CURRENT_AGENT_FIFO"
   [ -n "$CURRENT_AGENT_ERR_FIFO" ] && rm -f "$CURRENT_AGENT_ERR_FIFO"
 }
@@ -680,15 +769,36 @@ REPO_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
 [ -n "$REPO_SLUG" ] || fail "No pude resolver el repo de GitHub."
 
 write_protection_summary() {
-  local status="$1" failure required_checks protection_required_json=true summary_tmp
+  local status="$1" failure required_checks protection_required_json=true summary_tmp summary_rc
   failure=""
   [ "$#" -gt 1 ] && failure="$2"
   required_checks="$REQUIRED_CHECKS_JSON"
   [ -n "$required_checks" ] || required_checks='[]'
   [ "$REQUIRE_PROTECTION" = "0" ] && protection_required_json=false
-  [ "$DRY_RUN" = "1" ] && return 0
+  [ "$RUN_INITIALIZED" -eq 1 ] || return 0
   summary_tmp="$RUN_DIR/summary.json.tmp.$$"
-  if jq -cn \
+  if [ -f "$RUN_DIR/summary.json" ]; then
+    jq \
+      --arg status "$status" \
+      --arg base_branch "$BASE_BRANCH" \
+      --arg merge_identity "$MERGE_IDENTITY" \
+      --arg review_identity "$REVIEW_IDENTITY" \
+      --arg failure "$failure" \
+      --argjson required "$protection_required_json" \
+      --argjson required_checks "$required_checks" \
+      '.protection = {
+          required: $required,
+          status: $status,
+          base_branch: $base_branch,
+          merge_identity: $merge_identity,
+          review_identity: $review_identity,
+          required_checks: $required_checks,
+          warning: (if $status == "disabled" then "RALPH_REQUIRE_PROTECTION=0" else null end)
+        } |
+        .errors = (if $failure == "" then (.errors // []) else ((.errors // []) + [$failure]) end)' \
+      "$RUN_DIR/summary.json" >"$summary_tmp" 2>/dev/null
+  else
+    jq -cn \
       --arg status "$status" \
       --arg base_branch "$BASE_BRANCH" \
       --arg merge_identity "$MERGE_IDENTITY" \
@@ -707,7 +817,10 @@ write_protection_summary() {
           warning: (if $status == "disabled" then "RALPH_REQUIRE_PROTECTION=0" else null end)
         },
         errors: (if $failure == "" then [] else [$failure] end)
-      }' >"$summary_tmp" 2>/dev/null; then
+      }' >"$summary_tmp" 2>/dev/null
+  fi
+  summary_rc=$?
+  if [ "$summary_rc" -eq 0 ]; then
     mv -f "$summary_tmp" "$RUN_DIR/summary.json"
   else
     rm -f "$summary_tmp"
@@ -897,6 +1010,9 @@ check_base_protection || exit $?
 if [ "$DRY_RUN" != "1" ] && [ -n "$(git status --porcelain)" ]; then
   fail "Working tree sucio. Commiteá o stasheá antes de correr ralph."
 fi
+
+initialize_run_storage || exit $?
+write_protection_summary "$PROTECTION_STATUS" "$PROTECTION_FAILURES"
 
 if [ "$DRY_RUN" != "1" ]; then
   CURRENT_PHASE="adquisición del lock remoto"
@@ -1347,8 +1463,12 @@ prepare_agent_capture() {
 }
 
 record_agent_log() {
-  : > "$AGENT_LOG"
-  cat "$AGENT_STDOUT" "$AGENT_STDERR" > "$AGENT_LOG" 2>/dev/null || true
+  {
+    printf '%s\n' "agent=$AGENT_ROLE stream=stdout"
+    cat "$AGENT_STDOUT"
+    printf '%s\n' "agent=$AGENT_ROLE stream=stderr"
+    cat "$AGENT_STDERR"
+  } >> "$AGENT_LOG" 2>/dev/null || true
 }
 
 write_adapter_result() {
@@ -1535,7 +1655,7 @@ finish_adapter() {
 run_codex() {
   local prompt="$1" process_rc
   AGENT_ROLE="codex"
-  : > "$AGENT_LOG"; : > "$LAST_MSG"
+  : > "$LAST_MSG"
   prepare_agent_capture codex stdout.jsonl
   build_codex_sandbox_config || return $?
   AGENT_COMMAND=(
@@ -1570,7 +1690,6 @@ run_codex() {
 run_claude() {
   local prompt="$1" process_rc
   AGENT_ROLE="reviewer"
-  : > "$AGENT_LOG"; : > "$LAST_MSG"
   prepare_agent_capture claude stdout.json
   AGENT_COMMAND=(
     claude
@@ -2410,6 +2529,7 @@ process_issue() {
     [ "$rc" -eq 70 ] && return "$rc"
     if [ "$rc" -eq 0 ]; then
       echo "🙋 PR #$pr espera revisión humana; no lo toco."
+      record_issue_failure "$num" "needs_human" || return $?
       checkout_or_fail "$BASE_BRANCH" || return 70
       return 0
     fi
@@ -2473,6 +2593,7 @@ $PROMPT_IMPLEMENT"
     pr="$(pr_for_branch "$branch" "$num")"
     if [ -z "$pr" ]; then
       echo "⚠️  Codex no dejó PR abierto para #$num. Branch preservado, sin merge."
+      record_issue_failure "$num" "no_pull_request" || return $?
       checkout_or_fail "$BASE_BRANCH" || return 70
       return 0
     fi
@@ -2537,6 +2658,7 @@ $PROMPT_IMPLEMENT"
     if [ "$state_status" = "changes_requested" ] || [ "$state_status" = "correction_pending" ]; then
       if [ "$round" -eq "$MAX_ROUNDS" ]; then
         echo "🙋 #$num agotó las $MAX_ROUNDS rondas sin PASS. PR #$pr queda abierto para revisión humana."
+        record_issue_failure "$num" "max_rounds" || return $?
         add_label "$pr" "$NEEDS_HUMAN_LABEL"
         gh pr comment "$pr" --body "🤖 Ralph agotó las $MAX_ROUNDS rondas de revisión sin alcanzar PASS. Sin merge: necesita un humano." >/dev/null 2>&1 || true
         checkout_or_fail "$BASE_BRANCH" || return 70
@@ -2745,6 +2867,7 @@ $PROMPT_REVIEW"
     if [ "$state_status" = "changes_requested" ]; then
       if [ "$round" -eq "$MAX_ROUNDS" ]; then
         echo "🙋 #$num agotó las $MAX_ROUNDS rondas sin PASS. PR #$pr queda abierto para revisión humana."
+        record_issue_failure "$num" "max_rounds" || return $?
         add_label "$pr" "$NEEDS_HUMAN_LABEL"
         gh pr comment "$pr" --body "🤖 Ralph agotó las $MAX_ROUNDS rondas de revisión sin alcanzar PASS. Sin merge: necesita un humano." >/dev/null 2>&1 || true
         checkout_or_fail "$BASE_BRANCH" || return 70
@@ -2887,6 +3010,7 @@ validate_issue_for_agent() {
   fi
   if issue_has_label "$ISSUE_LABELS" "$NEEDS_HUMAN_LABEL"; then
     echo "🙋 #$num marcado con $NEEDS_HUMAN_LABEL; no invoco agentes."
+    record_issue_failure "$num" "needs_human" || return $?
     return 1
   fi
 
@@ -2925,6 +3049,7 @@ validate_issue_for_agent() {
     [ "$rc" -eq 70 ] && return "$rc"
     if [ "$rc" -eq 0 ]; then
       echo "🙋 PR #$pr espera revisión humana; no invoco agentes."
+      record_issue_failure "$num" "needs_human" || return $?
       return 1
     fi
   fi
@@ -3088,6 +3213,7 @@ select_issues() {
       fi
       if issue_has_label "${ISSUE_LABELS_BY_ISSUE[$num]}" "$NEEDS_HUMAN_LABEL"; then
         echo "🙋 #$num marcado con $NEEDS_HUMAN_LABEL; no lo toco."
+        record_issue_failure "$num" "needs_human" || return $?
         continue
       fi
 
@@ -3105,6 +3231,7 @@ select_issues() {
       fi
       if [ "$needs_human" = yes ]; then
         echo "🙋 PR #$pr espera revisión humana; no lo toco."
+        record_issue_failure "$num" "needs_human" || return $?
         continue
       fi
 
@@ -3190,5 +3317,10 @@ else
   select_issues run
   rc=$?
   [ "$rc" -eq 0 ] || exit "$rc"
+  if [ "$RUN_FAILED_ISSUES" -gt 0 ]; then
+    RUN_STOP_REASON="issues_failed"
+  else
+    RUN_STOP_REASON="no_ready_issues"
+  fi
   echo "🏁 No quedan issues '$LABEL' listos para procesar."
 fi

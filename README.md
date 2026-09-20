@@ -180,6 +180,15 @@ Antes de implementar consulta PRs abiertos, cerrados y mergeados asociados a la
 rama o al issue. Un PR ya mergeado con el issue todavía abierto se reconcilia
 aplicando `RALPH_CLOSE_POLICY`, en lugar de crear otra rama o implementación.
 
+Después del preflight, cada corrida normal aplica `umask 077`, genera un
+`RUN_ID` UTC (`YYYYMMDDTHHMMSSZ-<pid>`) y guarda sus artefactos en
+`$SCRIPT_DIR/runs/$RUN_ID/`. `run.log` recibe toda la salida posterior al
+preflight; `events.log`, `last-message.txt`, `summary.json` y las capturas
+separadas de stdout/stderr de cada agente quedan allí y se conservan al
+terminar. `runs/` está ignorado por el `.gitignore` distribuido, y el dry-run
+no crea ese directorio. El resumen siempre termina con un `stop_reason`
+explícito; un fallo de issue no se reporta como `no_ready_issues`.
+
 ## Exclusión entre hosts
 
 Cada corrida normal adquiere atómicamente `refs/ralph/lock` en `origin` con un
@@ -217,17 +226,15 @@ veredicto ni éxito.
 
 `once.sh` atiende `TERM`, `INT` y `HUP`. Registra la señal, la fase y el issue,
 conserva el árbol y la rama en el estado en que estaban y sale con `128 + señal`;
-no hace checkout ni reset destructivo. Cuando `RUN_DIR` está configurado y ya
-existe allí `summary.json`, también guarda allí el motivo y los datos de la señal.
+no hace checkout ni reset destructivo. También guarda el motivo y los datos de
+la señal en el `summary.json` de la corrida.
 
 ## Adaptadores JSON de agentes
 
 Codex se ejecuta con `codex exec --json -o "$LAST_MSG"` y Claude con
 `claude --print --output-format json`. Cada ejecución conserva sus archivos
 `<agente>-<n>.stdout.jsonl|json`, `<agente>-<n>.stderr.log` y
-`<agente>-<n>.result.json` bajo `RUN_DIR`; si no se define, Ralph crea un
-directorio temporal `ralph-run-<pid>` bajo `${TMPDIR:-/tmp}`. stdout nunca se
-mezcla con stderr.
+`<agente>-<n>.result.json` bajo `RUN_DIR`; stdout nunca se mezcla con stderr.
 
 El contrato interno de ambos adaptadores es:
 
@@ -357,7 +364,7 @@ Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
 | `RALPH_REVIEW_IDENTITY` | vacío (sin identidad revisora separada) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
-| `RUN_DIR` | `${TMPDIR:-/tmp}/ralph-run-<pid>` (capturas y contratos de agentes) |
+| `RUN_DIR` | `$SCRIPT_DIR/runs/<RUN_ID>` (capturas, eventos y contratos de agentes; override explícito conservado para pruebas) |
 | `RALPH_CHECKPOINT_FILE` | `$SCRIPT_DIR/last_run.md` |
 | `RALPH_HOST_CONFIG` | `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env` |
 

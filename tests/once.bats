@@ -215,6 +215,101 @@ load test_helper
   [ ! -s "$FAKE_AGENT_LOG" ]
 }
 
+@test "a normal run keeps its complete log and agent artifacts under RUN_DIR" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ -s "$RUN_DIR/run.log" ]
+  [ -f "$RUN_DIR/events.log" ]
+  [ -s "$RUN_DIR/last-message.txt" ]
+  [ -s "$RUN_DIR/codex-1.stdout.jsonl" ]
+  [ -f "$RUN_DIR/codex-1.stderr.log" ]
+  [ -s "$RUN_DIR/claude-2.stdout.json" ]
+  [ -f "$RUN_DIR/claude-2.stderr.log" ]
+  [ -s "$RUN_DIR/summary.json" ]
+  grep -Fq '════ Issue #1' "$RUN_DIR/run.log"
+  grep -Fq -- 'agent=codex' "$RUN_DIR/events.log"
+  grep -Fq -- 'agent=reviewer' "$RUN_DIR/events.log"
+  mkdir -p "$TEST_REPO/runs/ignored"
+  : > "$TEST_REPO/runs/ignored/artifact.log"
+  [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
+}
+
+@test "a normal run defaults to a timestamped directory under runs" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  unset RUN_DIR
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  run_dir="$(printf '%s\n' "$output" | sed -n 's/^📁 Corrida [^:]*: artefactos en //p' | tail -n 1)"
+  [[ "$run_dir" == "$PROJECT_ROOT/runs/"* ]]
+  [[ "$run_dir" =~ /[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]]
+  [ -s "$run_dir/run.log" ]
+  [ -z "$(git -C "$TEST_REPO" status --porcelain)" ]
+  rm -rf "$run_dir"
+}
+
+@test "dry-run does not create a run directory" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export RALPH_DRY_RUN=1
+  export RUN_DIR="$TEST_ROOT/run"
+  mkdir -p "$RUN_DIR"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ -z "$(find "$RUN_DIR" -print | sed -n '2p')" ]
+}
+
+@test "a failed issue records a stop reason instead of no_ready_issues" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=1
+  export RALPH_CI_POLICY=none
+  export RUN_DIR="$TEST_ROOT/run"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.stop_reason' "$RUN_DIR/summary.json")" = issue_failed ]
+  [ "$(jq -r '.stop_reason' "$RUN_DIR/summary.json")" != no_ready_issues ]
+}
+
+@test "an issue without a pull request is recorded as failed" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .stop_reason == "issues_failed" and
+    any(.issues[]; .number == 1 and .status == "failed" and .reason == "no_pull_request")
+  ' "$RUN_DIR/summary.json"
+}
+
+@test "an issue that exhausts review rounds is recorded as failed" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
+  export FAKE_CLAUDE_RESULT='<verdict>CHANGES_REQUESTED</verdict>'
+  export RALPH_CI_POLICY=none
+  export RALPH_MAX_ROUNDS=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '
+    .stop_reason == "issues_failed" and
+    any(.issues[]; .number == 99 and .status == "failed" and .reason == "max_rounds")
+  ' "$RUN_DIR/summary.json"
+}
+
 @test "normal run acquires the remote lock before the agent and releases it" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
@@ -671,30 +766,6 @@ load test_helper
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
 }
 
-@test "mktemp failure stops through fail with a clear message" {
-  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
-  export FAKE_MKTEMP_EXIT=1
-
-  run_once
-
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"No pude crear el temporal"* ]]
-  [ ! -s "$FAKE_AGENT_LOG" ]
-}
-
-@test "mktemp uses a TMPDIR path template supported by BSD and GNU implementations" {
-  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
-  export FAKE_CODEX_CREATE_PR=1
-  export RALPH_CI_POLICY=none
-  export TMPDIR="$TEST_ROOT/custom-tmp"
-  mkdir -p "$TMPDIR"
-
-  run_once
-
-  [ "$status" -eq 0 ]
-  [ "$(grep -Ec "^$TMPDIR/ralph-[^.]+\.XXXXXX$" "$FAKE_MKTEMP_LOG")" -eq 2 ]
-}
-
 @test "date -d is confined to the portable epoch formatter" {
   [ "$(grep -Ec 'date -d' "$PROJECT_ROOT/once.sh")" -eq 1 ]
 }
@@ -812,7 +883,6 @@ load test_helper
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_WAIT_FILE="$TEST_ROOT/codex-waiting"
   export RALPH_CI_POLICY=none
-  unset RUN_DIR
   printf '%s\n' '{"errors":[]}' > "$TEST_REPO/summary.json"
   git -C "$TEST_REPO" switch -q main
   git -C "$TEST_REPO" add summary.json
@@ -1122,6 +1192,7 @@ load test_helper
   run grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
   [ "$status" -eq 1 ]
   [[ "$run_output" == *"#1 marcado con ralph-needs-human"* ]]
+  jq -e 'any(.issues[]; .number == 1 and .status == "failed" and .reason == "needs_human")' "$RUN_DIR/summary.json"
 }
 
 @test "issue que pierde ready-for-agent antes del agente no invoca Codex" {
@@ -1151,6 +1222,7 @@ load test_helper
   run grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
   [ "$status" -eq 1 ]
   [[ "$run_output" == *"PR #101 espera revisión humana"* ]]
+  jq -e 'any(.issues[]; .number == 1 and .status == "failed" and .reason == "needs_human")' "$RUN_DIR/summary.json"
 }
 
 @test "sólo rama remota: recuperar su trabajo y revisar el PR sin Codex" {
