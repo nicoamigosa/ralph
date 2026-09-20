@@ -116,6 +116,13 @@ dry-run sólo necesita las herramientas de lectura (`git` y `gh`).
    los desbloquea dentro de la misma pasada (por eso el merge a la base ocurre
    antes de seguir: los dependientes heredan el código).
 
+Antes de evaluar dependencias, Ralph detecta el host local con `uname -s`:
+`Darwin` es `macos` y `Linux` es `linux`; cualquier otro sistema detiene la
+corrida. Un issue con `ralph-host:macos` o `ralph-host:linux` sólo se procesa en
+ese host. Sin ninguno de esos labels puede ejecutarse en ambos. Si tiene los dos,
+los labels son contradictorios y el issue queda bloqueado explícitamente. El
+dry-run muestra `host=<requerido> current=<actual>` por issue.
+
 Antes de invocar a cada agente, Ralph repite la validación de estado, labels y
 blockers. Si el issue pierde `ready-for-agent`, se cierra, se bloquea o recibe
 `ralph-needs-human` mientras la corrida está en curso, no se invoca ningún
