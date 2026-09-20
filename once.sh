@@ -2709,19 +2709,29 @@ verify_reviewed_head() {
 }
 
 reviewed_head_matches() {
-  local pr="$1" expected_sha="$2" local_sha remote_sha
-  local_sha="$(git rev-parse HEAD 2>/dev/null)" || {
-    echo "❌ No pude leer HEAD local; detengo la corrida."
-    return 70
-  }
-  remote_sha="$(gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null)" || {
-    echo "❌ No pude leer headRefOid del PR #$pr; detengo la corrida."
-    return 70
-  }
-  if [ "$local_sha" != "$expected_sha" ] || [ "$remote_sha" != "$expected_sha" ]; then
-    return 1
-  fi
-  return 0
+  local pr="$1" expected_sha="$2" local_sha remote_sha attempt=1
+  while [ "$attempt" -le 5 ]; do
+    local_sha="$(git rev-parse HEAD 2>/dev/null)" || {
+      echo "❌ No pude leer HEAD local; detengo la corrida."
+      return 70
+    }
+    [ "$local_sha" = "$expected_sha" ] || return 1
+
+    remote_sha="$(gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null)" || {
+      echo "❌ No pude leer headRefOid del PR #$pr; detengo la corrida."
+      return 70
+    }
+    [ "$remote_sha" = "$expected_sha" ] && return 0
+
+    if [ "$attempt" -lt 5 ]; then
+      sleep 2 || {
+        echo "❌ No pude esperar para volver a leer headRefOid del PR #$pr; detengo la corrida."
+        return 70
+      }
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 # Pone la rama al día con la base antes de cada revisión, para que el revisor

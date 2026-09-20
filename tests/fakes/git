@@ -21,4 +21,23 @@ if [ "${1:-}" = "branch" ] && [ "${2:-}" = "-D" ] && [ -n "${GH_MUTATION_LOG:-}"
   printf 'git %s\n' "$*" >> "$GH_MUTATION_LOG"
 fi
 
+if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "HEAD" ] \
+    && [ -n "${FAKE_GIT_REV_PARSE_HEAD_SEQUENCE:-}" ]; then
+  rev_parse_head_call=0
+  if [ -n "${FAKE_GIT_REV_PARSE_HEAD_SEQUENCE_FILE:-}" ] \
+      && [ -f "$FAKE_GIT_REV_PARSE_HEAD_SEQUENCE_FILE" ]; then
+    read -r rev_parse_head_call < "$FAKE_GIT_REV_PARSE_HEAD_SEQUENCE_FILE"
+  fi
+  IFS='|' read -r -a rev_parse_head_sequence <<< "$FAKE_GIT_REV_PARSE_HEAD_SEQUENCE"
+  rev_parse_head_index="$rev_parse_head_call"
+  if [ "$rev_parse_head_index" -ge "${#rev_parse_head_sequence[@]}" ]; then
+    rev_parse_head_index=$((${#rev_parse_head_sequence[@]} - 1))
+  fi
+  if [ -n "${FAKE_GIT_REV_PARSE_HEAD_SEQUENCE_FILE:-}" ]; then
+    printf '%s\n' "$((rev_parse_head_call + 1))" > "$FAKE_GIT_REV_PARSE_HEAD_SEQUENCE_FILE"
+  fi
+  printf '%s\n' "${rev_parse_head_sequence[$rev_parse_head_index]}"
+  exit 0
+fi
+
 exec "$RALPH_TEST_REAL_GIT" "$@"
