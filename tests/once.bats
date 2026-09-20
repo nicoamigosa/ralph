@@ -37,6 +37,19 @@ load test_helper
   ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
 }
 
+@test "preflight fails when no usable timeout command exists and explains the installation" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_TIMEOUT_UNAVAILABLE=1
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"timeout"* ]]
+  [[ "$output" == *"brew install coreutils"* ]]
+  ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
+  ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
+}
+
 @test "reviewer receives the dedicated token instead of the orchestrator token" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
@@ -130,6 +143,43 @@ load test_helper
   grep -Fq 'Codex version: `0.154.0`' "$RUN_DIR/summary.md"
   grep -Fq 'Claude version: `2.1.277`' "$RUN_DIR/summary.md"
   grep -Fq 'gh version: `2.45.0`' "$RUN_DIR/summary.md"
+}
+
+@test "agent timeout is recorded as timeout and preserves the issue branch" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_SLEEP_SECONDS=3
+  export RALPH_AGENT_TIMEOUT_SECONDS=1
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last-run.md"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"timeout"* ]]
+  jq -e '.stop_reason == "timeout" and
+    any(.issues[]; .number == 1 and .status == "timeout" and .reason == "timeout")' \
+    "$RUN_DIR/summary.json"
+  jq -s -e 'any(.[]; .event == "issue_failure" and .status == "timeout")' \
+    "$RUN_DIR/events.jsonl"
+  git -C "$TEST_REPO" show-ref --verify --quiet refs/heads/ralph/issue-1
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "bounded timeout never exceeds the remaining run deadline" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_SLEEP_SECONDS=10
+  export FAKE_TIMEOUT_LOG="$TEST_ROOT/timeout.log"
+  export RALPH_AGENT_TIMEOUT_SECONDS=1800
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last-run.md"
+  deadline="$(( $(date +%s) + 5 ))"
+  export RALPH_DEADLINE_EPOCH="$deadline"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  effective_seconds="$(awk '$1 == "--kill-after=30s" {print $2; exit}' "$FAKE_TIMEOUT_LOG")"
+  [ -n "$effective_seconds" ]
+  [ "$effective_seconds" -le 5 ]
+  [ "$effective_seconds" -lt "$RALPH_AGENT_TIMEOUT_SECONDS" ]
 }
 
 @test "preflight rejects claude when auth status JSON is not logged in" {
@@ -2039,6 +2089,27 @@ load test_helper
 
   [ "$status" -eq 0 ]
   grep -Fq "pr merge 101 --squash --match-head-commit $reviewed_sha" "$GH_MUTATION_LOG"
+}
+
+@test "post-merge hook timeout stops the run without closing the issue" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/two-issues.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_POST_MERGE_SLEEP_SECONDS=10
+  export RALPH_POST_MERGE_CHECK="$PROJECT_ROOT/tests/fakes/post-merge-check"
+  export RALPH_AGENT_TIMEOUT_SECONDS=1
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last-run.md"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"timeout"* ]]
+  jq -e '.stop_reason == "timeout" and
+    any(.issues[]; .number == 1 and .reason == "timeout")' \
+    "$RUN_DIR/summary.json"
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  ! grep -Fq 'issue close 1' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close 2' "$GH_MUTATION_LOG"
+  ! grep -Fq '^post_merge ' "$GH_MUTATION_LOG"
 }
 
 @test "merge queue confirma MERGED antes de borrar rama, hook y issue" {
