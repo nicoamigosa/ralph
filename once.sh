@@ -63,7 +63,7 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #   RALPH_MERGE_METHOD   método de merge del PR          (default: --squash)
 #   RALPH_MERGE_TIMEOUT_SECONDS espera confirmación       (default: 600)
 #   RALPH_MERGE_PENDING_POLICY ante merge encolado         (default: stop)
-#   RALPH_MAX_INFRA_RETRIES  reintentos ante caída del revisor (default: 3)
+#   RALPH_MAX_INFRA_RETRIES  reintentos ante infraestructura de CI/revisor (default: 3)
 #   RALPH_MAX_LIMIT_RETRIES  reintentos ante un tope del proveedor (default: 3)
 #   RALPH_RUN_BUDGET_USD   presupuesto estimado de Claude por corrida (optional)
 #   RALPH_DEADLINE_EPOCH     deadline global opcional, como epoch UTC
@@ -276,6 +276,7 @@ ADAPTER_EXIT_CODE=0
 ADAPTER_ERROR=""
 ADAPTER_STATUS="ok"
 CI_FAILURE_BODY=""
+CI_INFRASTRUCTURE_REASON=""
 PROTECTION_STATUS="not_checked"
 PROTECTION_FAILURES=""
 PROTECTION_RULESET_IDS=""
@@ -1692,6 +1693,14 @@ stop_for_timeout() {
   exit 1
 }
 
+stop_for_ci_infrastructure() {
+  local detail="${1:-CI no pudo iniciar el job.}"
+  RUN_STOP_REASON="ci_infrastructure"
+  echo "🛑 CI detenido por infraestructura (estado ci_infrastructure): $detail"
+  record_run_event "error" "" "${CURRENT_PR:-}" "ci_infrastructure" "$detail" || return 70
+  return 70
+}
+
 check_run_deadline() {
   run_deadline_expired
   case "$?" in
@@ -2325,6 +2334,77 @@ run_provider_preflight() {
     "versions codex=$CODEX_VERSION claude=$CLAUDE_VERSION gh=$GH_VERSION jq=present" || return $?
 }
 
+ci_annotation_text() {
+  local check_run_id="$1" annotations
+  annotations="$(gh api --paginate \
+    "repos/$REPO_SLUG/check-runs/$check_run_id/annotations" 2>/dev/null | \
+    jq -s -r '[.[][]? | (.message // ""), (.title // ""), (.raw_details // "")] | join(" ")' \
+    2>/dev/null)" || return 70
+  printf '%s\n' "$annotations"
+}
+
+ci_job_steps_length() {
+  local job_id="$1" job_json steps_length
+  job_json="$(gh api "repos/$REPO_SLUG/actions/jobs/$job_id" 2>/dev/null)" || return 70
+  steps_length="$(jq -r 'if (.steps | type) == "array" then (.steps | length) else -1 end' \
+    <<<"$job_json" 2>/dev/null)" || return 70
+  printf '%s\n' "$steps_length"
+}
+
+run_base_ci_preflight() {
+  local runs run_id jobs jobs_count executed_steps check_id annotation reason
+  [ "$DRY_RUN" = "1" ] && return 0
+  if [ "$CI_POLICY" = "none" ]; then
+    echo "⚠️  Preflight CI de la base omitido: política RALPH_CI_POLICY=none explícita."
+    return 0
+  fi
+
+  runs="$(gh run list --branch "$BASE_BRANCH" --limit 1 \
+    --json databaseId,headSha,status,conclusion,url 2>/dev/null)" || {
+    reason="no pude consultar el último run de CI en '$BASE_BRANCH'"
+    stop_for_ci_infrastructure "$reason"
+    return $?
+  }
+  run_id="$(jq -r '.[0].databaseId // empty' <<<"$runs" 2>/dev/null)" || run_id=""
+  if [ -z "$run_id" ]; then
+    reason="no existe un run de CI verificable en la base '$BASE_BRANCH'"
+    stop_for_ci_infrastructure "$reason"
+    return $?
+  fi
+  jobs="$(gh api --paginate \
+    "repos/$REPO_SLUG/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null | \
+    jq -s -c '[.[] | .jobs[]?]' 2>/dev/null)" || {
+    reason="no pude consultar los jobs del último run de CI #$run_id en '$BASE_BRANCH'"
+    stop_for_ci_infrastructure "$reason"
+    return $?
+  }
+  jobs_count="$(jq 'length' <<<"$jobs" 2>/dev/null)" || jobs_count=0
+  executed_steps="$(jq '[.[] | .steps[]?] | length' <<<"$jobs" 2>/dev/null)" || executed_steps=0
+  if [ "$jobs_count" -gt 0 ] && [ "$executed_steps" -gt 0 ]; then
+    echo "✅ Preflight CI de la base verificado: el último run #$run_id ejecutó steps."
+    record_run_event "preflight" "" "" "ok" \
+      "base CI run=$run_id executed_steps=$executed_steps" || return $?
+    return 0
+  fi
+
+  check_id="$(jq -r '[.[] | select((.conclusion // "" | ascii_downcase) == "failure" or (.conclusion // "" | ascii_downcase) == "cancelled") | .id // empty] | first // empty' <<<"$jobs" 2>/dev/null)" || check_id=""
+  annotation=""
+  if [ -n "$check_id" ]; then
+    annotation="$(ci_annotation_text "$check_id")" || {
+      reason="el último run de CI #$run_id no ejecutó steps y no pude leer sus anotaciones; verificá con gh api repos/$REPO_SLUG/check-runs/$check_id/annotations"
+      stop_for_ci_infrastructure "$reason"
+      return $?
+    }
+  fi
+  reason="el último run de CI #$run_id en '$BASE_BRANCH' no ejecutó ningún step"
+  [ -n "$annotation" ] && reason="$reason: $annotation"
+  if [ -n "$check_id" ]; then
+    reason="$reason. Verificá con gh api repos/$REPO_SLUG/check-runs/$check_id/annotations"
+  fi
+  stop_for_ci_infrastructure "$reason"
+  return $?
+}
+
 run_smoke_test() {
   local codex_stdout="$RUN_DIR/preflight-codex.stdout.jsonl"
   local codex_stderr="$RUN_DIR/preflight-codex.stderr.log"
@@ -2807,10 +2887,54 @@ $PROMPT_CONFLICTS"
   return 0
 }
 
+check_run_infrastructure_reason() {
+  local check_runs="$1" reviewed_sha="$2" check_id steps_length check_name annotation job_steps_length
+  CI_INFRASTRUCTURE_REASON=""
+  while IFS=$'\t' read -r check_id steps_length check_name; do
+    [ -n "$check_id$check_name" ] || continue
+    annotation=""
+    if [ -n "$check_id" ]; then
+      annotation="$(ci_annotation_text "$check_id")" || return 2
+    fi
+    if printf '%s\n' "$annotation" | grep -Eqi 'was[[:space:]]+not[[:space:]]+started'; then
+      CI_INFRASTRUCTURE_REASON="CI check '$check_name' terminó sin ejecutar steps"
+      [ -n "$annotation" ] && CI_INFRASTRUCTURE_REASON="$CI_INFRASTRUCTURE_REASON: $annotation"
+      if [ -n "$check_id" ]; then
+        CI_INFRASTRUCTURE_REASON="$CI_INFRASTRUCTURE_REASON. Verificá con gh api repos/$REPO_SLUG/check-runs/$check_id/annotations"
+      fi
+      return 0
+    fi
+    if [ "$steps_length" -lt 0 ] && [ -n "$check_id" ]; then
+      job_steps_length="$(ci_job_steps_length "$check_id")" || return 2
+      steps_length="$job_steps_length"
+    fi
+    if [ "$steps_length" -eq 0 ]; then
+      CI_INFRASTRUCTURE_REASON="CI check '$check_name' terminó sin ejecutar steps"
+      [ -n "$annotation" ] && CI_INFRASTRUCTURE_REASON="$CI_INFRASTRUCTURE_REASON: $annotation"
+      if [ -n "$check_id" ]; then
+        CI_INFRASTRUCTURE_REASON="$CI_INFRASTRUCTURE_REASON. Verificá con gh api repos/$REPO_SLUG/check-runs/$check_id/annotations"
+      fi
+      return 0
+    fi
+  done < <(jq -r --arg sha "$reviewed_sha" '
+    .[] |
+    select(.head_sha == $sha and
+      (.status // "" | ascii_downcase) == "completed" and
+      ((.conclusion // "" | ascii_downcase) == "failure" or
+       (.conclusion // "" | ascii_downcase) == "cancelled")) |
+    [(.id // "" | tostring),
+     (if (.steps | type) == "array" then (.steps | length) else -1 end),
+     (.name // "check sin nombre")] | @tsv
+  ' <<<"$check_runs" 2>/dev/null)
+  return 1
+}
+
 # Revisa todos los checks obligatorios del SHA exacto que Claude vio. Devuelve
 # 0 si cada uno terminó en success, 1 si alguno terminó en un estado distinto,
-# y 2 si alguno está ausente, pendiente o la API no responde. Los estados
-# auxiliares quedan en variables globales para distinguir rechazo de espera.
+# 2 si alguno está ausente, pendiente o la API no responde, y 3 si un check
+# falló por infraestructura (sin steps o con la anotación de job no iniciado).
+# Los estados auxiliares quedan en variables globales para distinguir rechazo,
+# espera e infraestructura.
 check_required_checks() {
   local reviewed_sha="$1"
   local check_runs_pages statuses_pages check_runs statuses results_json
@@ -2835,6 +2959,19 @@ check_required_checks() {
   statuses="$statuses_pages"
   results_json="$(jq -cn --argjson check_runs "$check_runs" --argjson statuses "$statuses" \
     '{check_runs: $check_runs, statuses: $statuses}' 2>/dev/null)" || return 2
+
+  check_run_infrastructure_reason "$check_runs" "$reviewed_sha"
+  case "$?" in
+    0)
+      REQUIRED_CHECKS_STATE="ci_infrastructure"
+      return 3
+      ;;
+    1) ;;
+    *)
+      REQUIRED_CHECKS_STATE="infrastructure"
+      return 2
+      ;;
+  esac
 
   if [ -z "$REQUIRED_CHECKS_JSON" ]; then
     state="$(jq -r --arg sha "$reviewed_sha" '
@@ -2964,7 +3101,7 @@ verify_distinct_review() {
 # pasan, 1 si hay un fallo real (tras dejar en el PR el ítem que Codex debe
 # corregir), y 2 si la ausencia o el estado de CI sigue pendiente.
 wait_for_ci() {
-  local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining heartbeat_remaining global_remaining sleep_rc
+  local pr="$1" branch="$2" reviewed_sha="${3:-}" run_url started now deadline checks_rc pending_reason remaining heartbeat_remaining global_remaining sleep_rc infra_retries=0
 
   CI_FAILURE_BODY=""
 
@@ -2982,6 +3119,26 @@ wait_for_ci() {
     checks_rc=$?
     if [ "$checks_rc" -eq 0 ]; then
       return 0
+    elif [ "$checks_rc" -eq 3 ]; then
+      if [ "$infra_retries" -lt "$MAX_INFRA_RETRIES" ]; then
+        infra_retries=$((infra_retries + 1))
+        echo "🔁 CI de infraestructura para PR #$pr; reintento $infra_retries/$MAX_INFRA_RETRIES sin consumir ronda."
+        now="$(date +%s 2>/dev/null)" || return 70
+        if [ "$now" -lt "$deadline" ]; then
+          remaining=$((deadline - now))
+          [ "$remaining" -gt 30 ] && remaining=30
+          [ "$remaining" -gt 0 ] || remaining=1
+          run_bounded "$remaining" sleep "$remaining"
+          sleep_rc=$?
+          if [ "$BOUNDED_TIMED_OUT" -eq 1 ]; then
+            stop_for_deadline "la espera de recuperación de CI"
+          fi
+          [ "$sleep_rc" -eq 0 ] || return 70
+        fi
+        continue
+      fi
+      stop_for_ci_infrastructure "$CI_INFRASTRUCTURE_REASON"
+      return $?
     elif [ "$checks_rc" -eq 1 ]; then
       run_url="$(gh run list --branch "$branch" --limit 1 --json url --jq '.[0].url' 2>/dev/null)"
       if [ -n "$REQUIRED_CHECKS_JSON" ]; then
@@ -4019,6 +4176,7 @@ if [ "$DRY_RUN" = "1" ]; then
 else
   run_provider_preflight || exit $?
   run_sandbox_preflight || exit $?
+  run_base_ci_preflight || exit $?
   run_smoke_test || exit $?
   # Label con el que marcamos los PRs que agotaron las rondas.
   gh label create "$NEEDS_HUMAN_LABEL" --color B60205 \

@@ -1975,6 +1975,24 @@ load test_helper
   [[ "$output" == *"CI obligatorio en rojo"* ]]
 }
 
+@test "check completed failure con steps ejecutados sigue siendo CI rojo" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
+  export FAKE_CHECK_RUNS_JSON="[{\"id\":802,\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"failure\",\"steps\":[{\"name\":\"test\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}]"
+  export FAKE_STATUSES_JSON='[]'
+  export FAKE_CI_RUN_URL='https://github.com/nicoamigosa/ralph/actions/runs/457'
+  export RALPH_MAX_ROUNDS=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  [[ "$output" == *"CI obligatorio en rojo"* ]]
+  [[ "$output" != *"ci_infrastructure"* ]]
+}
+
 @test "todos los checks obligatorios exitosos permiten extras" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
@@ -2074,6 +2092,23 @@ load test_helper
   [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
   [[ "$runner_output" == *"CI ausente"* ]]
   [[ "$runner_output" == *"ci_pending"* ]]
+}
+
+@test "preflight detiene la corrida si el último CI de la base no inició jobs" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_BASE_RUN_JSON='[{"databaseId":900,"headSha":"base-sha","status":"completed","conclusion":"failure","url":"https://github.com/nicoamigosa/ralph/actions/runs/900"}]'
+  export FAKE_BASE_JOBS_JSON='[{"id":901,"name":"test","status":"completed","conclusion":"failure","steps":[]}]'
+  export FAKE_CHECK_ANNOTATIONS_JSON='[{"message":"The job was not started because recent account payments have failed or your spending limit needs to be increased"}]'
+  export FAKE_ISSUE_LIST_LOG="$TEST_ROOT/issue-list.log"
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  [[ "$output" == *"was not started"* ]]
+  [[ "$output" == *"gh api repos/"*"/check-runs/901/annotations"* ]]
+  ! grep -Fq 'issue-list' "$FAKE_ISSUE_LIST_LOG"
+  ! grep -Fq 'codex exec ' "$FAKE_AGENT_LOG"
+  jq -e '.stop_reason == "ci_infrastructure" and .issues_started == 0 and any(.errors[]; contains("was not started"))' "$RUN_DIR/summary.json"
 }
 
 @test "timeout de CI ausente no mergea ni manda corrección a Codex" {
@@ -2177,6 +2212,47 @@ load test_helper
   grep -Fq "$FAKE_CI_RUN_URL" "$GH_MUTATION_LOG"
   [[ "$runner_output" == *"CI en rojo"* ]]
   [[ "$runner_output" != *"ci_pending"* ]]
+}
+
+@test "check completed failure sin steps es infraestructura y detiene sin corrección" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
+  export FAKE_CHECK_RUNS_JSON="[{\"id\":801,\"name\":\"CI\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"failure\",\"steps\":[]}]"
+  export FAKE_STATUSES_JSON='[]'
+  export FAKE_CHECK_ANNOTATIONS_JSON='[{"message":"The job was not started because recent account payments have failed or your spending limit needs to be increased"}]'
+  export RALPH_MAX_INFRA_RETRIES=2
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  [[ "$output" == *"ci_infrastructure"* ]]
+  [[ "$output" == *"was not started"* ]]
+  [[ "$output" == *"gh api repos/"*"/check-runs/801/annotations"* ]]
+  [[ "$output" == *"reintento 2/2"* ]]
+  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  jq -e '.stop_reason == "ci_infrastructure" and any(.errors[]; contains("was not started"))' "$RUN_DIR/summary.json"
+}
+
+@test "infraestructura de CI que se recupera dentro de los reintentos continúa" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULTS='ci_infra|pass'
+  export FAKE_CHECK_ANNOTATIONS_JSON='[{"message":"The job was not started because recent account payments have failed"}]'
+  export RALPH_MAX_INFRA_RETRIES=2
+  export RALPH_CI_TIMEOUT_SECONDS=60
+  export FAKE_SLEEP_NOOP=1
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+  ! grep -Fq 'pr comment' "$GH_MUTATION_LOG"
+  [ "$(cat "$FAKE_CI_CALL_COUNT_FILE")" -eq 2 ]
 }
 
 @test "fallo de infraestructura de CI queda ci_pending sin corrección" {

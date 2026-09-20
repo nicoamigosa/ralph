@@ -26,10 +26,26 @@ lecturas; un `HEAD` local distinto falla de inmediato y nunca se revisa ni
 mergea un SHA que el PR no confirme. `RALPH_MERGE_METHOD` sólo admite
 `--squash`, `--merge` o `--rebase`; cualquier otro valor detiene el preflight.
 
-La política de CI es `required` por defecto. Si GitHub todavía no reporta checks,
-Ralph espera hasta `RALPH_CI_TIMEOUT_SECONDS` (30 minutos por defecto), deja el
-issue en estado `ci_pending` y no manda una corrección a Codex ni mergea. Un
-fallo explícito de un check sí se comenta en el PR para Codex. Para repos sin CI,
+## CI
+
+La política de CI es `required` por defecto. Ralph distingue tres estados:
+
+- **CI rojo:** un check terminó con fallo después de ejecutar steps. Ralph deja
+  el detalle en el PR para que Codex lo corrija; no mergea.
+- **CI pendiente:** faltan checks o siguen `queued`/`in_progress`. Ralph espera
+  hasta `RALPH_CI_TIMEOUT_SECONDS` (30 minutos por defecto), deja el issue en
+  `ci_pending` y no manda una corrección ni mergea.
+- **Infraestructura (`ci_infrastructure`):** un job terminó en `failure` o
+  `cancelled` sin ejecutar steps, o su anotación indica que no fue iniciado
+  (por ejemplo, por facturación o límite de gasto). Ralph reintenta el poll hasta
+  `RALPH_MAX_INFRA_RETRIES`, sin consumir una ronda ni comentar CI rojo; si
+  persiste, detiene la corrida con rc 70. El mensaje cita la anotación y el
+  comando `gh api repos/<slug>/check-runs/<id>/annotations`, y el motivo queda
+  en `RUN_DIR/summary.json`.
+
+Antes de consultar issues, el preflight inspecciona el último run de CI de la
+base y exige que haya ejecutado al menos un step. Si no arrancó por esa
+infraestructura, falla la corrida con `ci_infrastructure`. Para repos sin CI,
 `RALPH_CI_POLICY=none` es una excepción explícita y queda avisada en la salida.
 
 Cada corrida calcula un deadline global al comenzar: `RALPH_MAX_RUN_SECONDS`
