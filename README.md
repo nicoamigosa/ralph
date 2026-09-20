@@ -199,6 +199,12 @@ el proveedor no entrega es `null`, nunca `0`. `claude_estimated_usd` es sólo
 el coste estimado reportado por el proveedor: Ralph no calcula coste marginal
 de una suscripción ni lo presenta como facturación real.
 
+Al terminar una corrida normal, Ralph imprime en stdout la ruta de
+`summary.md`. Si `RALPH_REPORT_ISSUE` contiene un número de issue, publica ese
+archivo como el único comentario adicional en el issue indicado. Si GitHub
+rechaza la publicación, avisa, conserva el archivo y mantiene el código de
+salida original de la corrida.
+
 ## Exclusión entre hosts
 
 Cada corrida normal adquiere atómicamente `refs/ralph/lock` en `origin` con un
@@ -373,6 +379,7 @@ Todo es opcional; puede venir del entorno, `.ralph/config.env` o `host.env`:
 | `RALPH_MERGE_IDENTITY` | vacío (login de `gh api user`) |
 | `RALPH_REVIEW_IDENTITY` | vacío (sin identidad revisora separada) |
 | `RALPH_ISSUE_ORDER` | vacío (orden por número) |
+| `RALPH_REPORT_ISSUE` | vacío (no publica el resumen; si se define, comenta `summary.md` en ese issue) |
 | `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
 | `RUN_DIR` | `$SCRIPT_DIR/runs/<RUN_ID>` (capturas, eventos, `summary.json`/`.md` y contratos de agentes; override explícito conservado para pruebas) |
 | `RALPH_CHECKPOINT_FILE` | `$SCRIPT_DIR/last_run.md` |

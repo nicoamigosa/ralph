@@ -270,6 +270,51 @@ load test_helper
     "$RUN_DIR/events.jsonl"
 }
 
+@test "a run prints the summary path and does not report without an issue variable" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  unset RALPH_REPORT_ISSUE
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$RUN_DIR/summary.md"* ]]
+  run grep -E -- '^issue comment ' "$GH_MUTATION_LOG"
+  [ "$status" -eq 1 ]
+}
+
+@test "an issue variable publishes only the completed summary as a comment" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  export RALPH_REPORT_ISSUE=777
+  export FAKE_ISSUE_COMMENT_BODY_FILE="$TEST_ROOT/report-body"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_ISSUE_COMMENT_BODY_FILE")" = "$(cat "$RUN_DIR/summary.md")" ]
+  run grep -E -- '^issue comment 777 --body ' "$GH_MUTATION_LOG"
+  [ "$status" -eq 0 ]
+}
+
+@test "a failed report keeps the summary and the original run exit code" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=42
+  export RALPH_CI_POLICY=none
+  export RALPH_REPORT_ISSUE=777
+  export FAKE_ISSUE_COMMENT_EXIT=23
+
+  run_once
+
+  [ "$status" -eq 42 ]
+  [ -s "$RUN_DIR/summary.md" ]
+  [[ "$output" == *"No pude publicar el resumen en issue #777"* ]]
+  run grep -E -- '^issue comment 777 --body ' "$GH_MUTATION_LOG"
+  [ "$status" -eq 1 ]
+}
+
 @test "a normal run defaults to a timestamped directory under runs" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
