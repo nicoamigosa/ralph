@@ -1128,6 +1128,7 @@ load test_helper
   export FAKE_DATE_FAST_FORWARD=1
   export FAKE_DATE_INCREMENTAL_FAST_FORWARD=1
   export FAKE_SLEEP_NOOP=1
+  export RALPH_MAX_RUN_SECONDS=100000
   export RUN_DIR="$TEST_ROOT/run"
   export RALPH_CI_POLICY=none
 
@@ -1871,7 +1872,9 @@ load test_helper
   export FAKE_CI_RESULT="no checks reported"
   export RALPH_CI_TIMEOUT_SECONDS=60
   export FAKE_DATE_FAST_FORWARD=1
+  export FAKE_DATE_INCREMENTAL_FAST_FORWARD=1
   export FAKE_SLEEP_NOOP=1
+  export RALPH_MAX_RUN_SECONDS=100000
   unset RALPH_CI_POLICY
 
   run_once
@@ -2884,6 +2887,63 @@ load test_helper
   [[ "$output" == *"provider rejected model"* ]]
   [ -f "$RALPH_CHECKPOINT_FILE" ]
   [ "$(jq -r '.status' "$RUN_DIR"/codex-1.result.json)" = config_error ]
+}
+
+@test "max issues stops after exactly two unique issues and writes a checkpoint" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/five-issues.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  export RALPH_MAX_ISSUES=2
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last_run.md"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -s -e '[.[] | select(.event == "issue_started")] | length == 2' \
+    "$RUN_DIR/events.jsonl"
+  jq -s -e '[.[] | select(.event == "issue_started") | .issue] == [1, 2]' \
+    "$RUN_DIR/events.jsonl"
+  jq -e '.issues_started == 2 and .stop_reason == "max_issues"' "$RUN_DIR/summary.json"
+  [ -f "$RALPH_CHECKPOINT_FILE" ]
+  ! grep -Fq '════ Issue #3' "$output"
+}
+
+@test "an expired run deadline during CI wait stops cleanly without merging" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CI_RESULT=pending
+  export RALPH_CI_TIMEOUT_SECONDS=1800
+  export RALPH_MAX_RUN_SECONDS=7200
+  export FAKE_DATE_FAST_FORWARD=1
+  export FAKE_SLEEP_NOOP=1
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last_run.md"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq '/check-runs' "$FAKE_API_LOG"
+  [ "$(jq -r '.stop_reason' "$RUN_DIR/summary.json")" = deadline ]
+  [ -f "$RALPH_CHECKPOINT_FILE" ]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  ! grep -Fq 'issue close' "$GH_MUTATION_LOG"
+}
+
+@test "a provider retry never waits past the run deadline and counts the issue once" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXITS=1
+  export FAKE_CODEX_STDOUT='{"type":"error","error":{"code":"rate_limit_exceeded","retry_at":4102444800,"message":"provider rate limit"}}'
+  export RALPH_MAX_LIMIT_RETRIES=3
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last_run.md"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_CODEX_CALL_COUNT_FILE")" = 1 ]
+  jq -s -e '[.[] | select(.event == "issue_started")] | length == 1' \
+    "$RUN_DIR/events.jsonl"
+  [ "$(jq -r '.stop_reason' "$RUN_DIR/summary.json")" = deadline ]
+  [ -f "$RALPH_CHECKPOINT_FILE" ]
+  [ ! -s "$FAKE_SLEEP_LOG" ]
 }
 
 @test "fallo fatal antes de correr ningún agente no explota por ADAPTER_STATUS" {

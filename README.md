@@ -29,6 +29,13 @@ issue en estado `ci_pending` y no manda una corrección a Codex ni mergea. Un
 fallo explícito de un check sí se comenta en el PR para Codex. Para repos sin CI,
 `RALPH_CI_POLICY=none` es una excepción explícita y queda avisada en la salida.
 
+Cada corrida calcula un deadline global al comenzar: `RALPH_MAX_RUN_SECONDS`
+(4 horas por defecto). También limita a `RALPH_MAX_ISSUES` (5 por defecto) los
+issues únicos iniciados; los reintentos por tope no consumen otro cupo. Al vencer
+cualquiera de esos límites, Ralph guarda checkpoint, termina sin iniciar otro
+agente ni merge, y registra `stop_reason=deadline` o `stop_reason=max_issues`.
+Las esperas de CI y de reset del proveedor se acotan al mismo deadline.
+
 El proyecto puede declarar sus gates con
 `RALPH_REQUIRED_CHECKS_JSON='["CI / test","ShellCheck"]'`. Ralph consulta los
 `check-runs` y `statuses` del SHA exacto que revisó Claude: cada nombre declarado
@@ -199,10 +206,11 @@ preflight; `events.log`, `last-message.txt`, `summary.json` y las capturas
 separadas de stdout/stderr de cada agente quedan allí y se conservan al
 terminar. `runs/` está ignorado por el `.gitignore` distribuido, y el dry-run
 no crea ese directorio. El resumen siempre termina con un `stop_reason`
-explícito; un fallo de issue no se reporta como `no_ready_issues`.
+explícito; `issues_started` cuenta los issues únicos iniciados en la corrida;
+un fallo de issue no se reporta como `no_ready_issues`.
 
 Al salir, el trap conserva el código original y finaliza `summary.json` y
-`summary.md`. El JSON incluye `run_id`, `stop_reason`, `merged`, `open_prs`,
+`summary.md`. El JSON incluye `run_id`, `stop_reason`, `issues_started`, `merged`, `open_prs`,
 `needs_human`, `blocked`, `errors`, `elapsed_seconds` y `usage` con
 `codex_tokens` y `claude_estimated_usd`. `versions.codex`,
 `versions.claude` y `versions.gh` conservan las versiones observadas en el
@@ -368,6 +376,8 @@ entorno, `.ralph/config.env` o `host.env`:
 | `RALPH_BASE_BRANCH` | trunk del repo (`main`/`master`) |
 | `RALPH_BRANCH_PREFIX` | `ralph/issue-` |
 | `RALPH_MAX_ROUNDS` | `3` |
+| `RALPH_MAX_ISSUES` | `5` |
+| `RALPH_MAX_RUN_SECONDS` | `14400` |
 | `RALPH_CODEX_MODEL` | `gpt-5.6-luna` |
 | `RALPH_CODEX_EFFORT` | `xhigh` |
 | `RALPH_CODEX_SANDBOX` | `workspace-write` (en este modo Codex monta `.git` como sólo lectura; ralph lo habilita como `writable_root` y ejecuta una sonda de preflight; `danger-full-access` no se recomienda) |
