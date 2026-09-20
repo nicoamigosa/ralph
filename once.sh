@@ -180,6 +180,7 @@ CLOSE_POLICY="${RALPH_CLOSE_POLICY:-verified}"
 TDD_SKILL="${RALPH_TDD_SKILL:-}"
 SMOKE_TEST="${RALPH_SMOKE_TEST:-0}"
 TIMEOUT_COMMAND=""
+declare -a CLEAN_RALPH_ENV_ARGS=()
 
 # These are the versions represented by the checked-in provider contract
 # fixtures. Newer patch/minor releases are accepted; older releases are not.
@@ -1741,7 +1742,8 @@ run_agent_group() {
         unset GH_TOKEN
       fi
     fi
-    RUN_BOUNDED_ISOLATE=1 run_bounded "$AGENT_TIMEOUT_SECONDS" "${AGENT_COMMAND[@]}"
+    RUN_BOUNDED_ISOLATE=1 run_bounded "$AGENT_TIMEOUT_SECONDS" env \
+      "${CLEAN_RALPH_ENV_ARGS[@]}" "${AGENT_COMMAND[@]}"
   }
   if command -v setsid >/dev/null 2>&1; then
     launch_agent_process > "$stdout_fifo" 2> "$stderr_fifo" &
@@ -1812,6 +1814,17 @@ run_agent_group() {
   [ "$tee_rc" -eq 0 ] || return 70
   [ "$tee_err_rc" -eq 0 ] || return 70
   return "$agent_rc"
+}
+
+build_clean_ralph_env_args() {
+  local env_name
+  CLEAN_RALPH_ENV_ARGS=()
+  while IFS= read -r env_name; do
+    case "$env_name" in
+      RALPH_TEST_REAL_*) ;;
+      RALPH_*) CLEAN_RALPH_ENV_ARGS+=(-u "$env_name") ;;
+    esac
+  done < <(compgen -e)
 }
 
 build_codex_sandbox_config() {
@@ -2065,6 +2078,7 @@ run_codex() {
   record_run_event "agent_started" "$CURRENT_ISSUE" "$CURRENT_PR" "codex" "$CURRENT_PHASE" || return $?
   prepare_agent_capture codex stdout.jsonl
   build_codex_sandbox_config || return $?
+  build_clean_ralph_env_args
   AGENT_COMMAND=(
     codex exec
     --json
@@ -2110,6 +2124,7 @@ run_claude() {
   AGENT_ROLE="reviewer"
   record_run_event "agent_started" "$CURRENT_ISSUE" "$CURRENT_PR" "reviewer" "$CURRENT_PHASE" || return $?
   prepare_agent_capture claude stdout.json
+  build_clean_ralph_env_args
   AGENT_COMMAND=(
     claude
     --model "$CLAUDE_MODEL"
@@ -2323,9 +2338,11 @@ run_smoke_test() {
     return 0
   fi
   build_codex_sandbox_config || return $?
+  build_clean_ralph_env_args
   check_run_deadline "la invocación de Codex del smoke test" || return $?
 
-  if run_bounded "$AGENT_TIMEOUT_SECONDS" codex exec --json --model "$CODEX_MODEL" \
+  if run_bounded "$AGENT_TIMEOUT_SECONDS" env "${CLEAN_RALPH_ENV_ARGS[@]}" \
+      codex exec --json --model "$CODEX_MODEL" \
       "${CODEX_SANDBOX_CONFIG_ARGS[@]}" --sandbox "$CODEX_SANDBOX" \
       --skip-git-repo-check -o "$codex_message" \
       'RALPH preflight smoke test: reply with OK.' \
@@ -2348,7 +2365,8 @@ run_smoke_test() {
     claude_command+=(--max-budget-usd "$CLAUDE_MAX_BUDGET_USD")
   fi
   claude_command+=(--print --output-format json 'RALPH preflight smoke test: reply with OK.')
-  if run_bounded "$AGENT_TIMEOUT_SECONDS" "${claude_command[@]}" \
+  if run_bounded "$AGENT_TIMEOUT_SECONDS" env "${CLEAN_RALPH_ENV_ARGS[@]}" \
+      "${claude_command[@]}" \
       >"$claude_stdout" 2>"$claude_stderr"; then
     smoke_rc=0
   else
@@ -3508,7 +3526,9 @@ $PROMPT_REVIEW"
         # Producción rota no admite otro despliegue encima: si el hook falla, para toda la corrida.
         if [ -n "$POST_MERGE_CHECK" ]; then
           echo "🩺 Verifico producción con $POST_MERGE_CHECK $merged_sha..."
-          run_bounded "$AGENT_TIMEOUT_SECONDS" "$POST_MERGE_CHECK" "$merged_sha"
+          build_clean_ralph_env_args
+          run_bounded "$AGENT_TIMEOUT_SECONDS" env \
+            "${CLEAN_RALPH_ENV_ARGS[@]}" "$POST_MERGE_CHECK" "$merged_sha"
           rc=$?
           if [ "$BOUNDED_TIMED_OUT" -eq 1 ]; then
             add_label "$num" "$NEEDS_HUMAN_LABEL"
