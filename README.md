@@ -170,6 +170,16 @@ Si una corrida se corta (Ctrl-C, tope de uso, caída), la siguiente **reutiliza*
 la rama y el PR existentes en vez de recrearlos, y salta lo ya mergeado. Volver
 a correr `./ralph/once.sh` siempre es seguro.
 
+Al comenzar cada issue, Ralph ejecuta `git fetch origin`. Si la rama del issue
+sólo existe en el remoto, la recupera con tracking y revisa el PR existente sin
+volver a invocar Codex. Cuando existen ambas copias, exige igualdad o un
+fast-forward; una divergencia conserva la rama, etiqueta el PR (o el issue si
+no hay PR abierto) como `ralph-needs-human` y no lanza agentes.
+
+Antes de implementar consulta PRs abiertos, cerrados y mergeados asociados a la
+rama o al issue. Un PR ya mergeado con el issue todavía abierto se reconcilia
+aplicando `RALPH_CLOSE_POLICY`, en lugar de crear otra rama o implementación.
+
 ## Exclusión entre hosts
 
 Cada corrida normal adquiere atómicamente `refs/ralph/lock` en `origin` con un

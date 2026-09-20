@@ -1798,13 +1798,46 @@ $PROMPT_REVISE"
   fi
 }
 
-pr_for_branch() {
-  local pr
-  if ! pr="$(gh pr list --head "$1" --state open --json number --jq '.[0].number // empty' 2>/dev/null)"; then
-    printf '❌ No pude leer el PR de la rama %s; detengo la corrida.\n' "$1" >&2
+pull_requests_for_branch_or_issue() {
+  local branch="$1" issue="$2" prs
+  if ! prs="$(gh pr list --state all --limit 1000 \
+      --json number,state,headRefName,body,mergedAt,mergeCommit 2>/dev/null)"; then
+    printf '❌ No pude leer los PRs asociados a la rama %s o al issue #%s; detengo la corrida.\n' \
+      "$branch" "$issue" >&2
     return 70
   fi
-  printf '%s' "$pr"
+  jq -c --arg branch "$branch" --arg issue "#$issue" '
+    [ .[] |
+      select((.headRefName // "") == $branch or
+        ((.body // "") | test("(^|[^[:alnum:]_])" + $issue + "([^[:alnum:]_]|$)")))
+    ]
+  ' <<<"$prs" 2>/dev/null || {
+    printf '❌ La lista de PRs asociados a la rama %s o al issue #%s no es válida; detengo la corrida.\n' \
+      "$branch" "$issue" >&2
+    return 70
+  }
+}
+
+pr_for_branch() {
+  local branch="$1" issue="$2" prs
+  prs="$(pull_requests_for_branch_or_issue "$branch" "$issue")" || return $?
+  jq -r --arg branch "$branch" '
+    map(select((.state // "") | ascii_upcase == "OPEN")) |
+    sort_by(if (.headRefName // "") == $branch then 0 else 1 end) |
+    .[0].number // empty
+  ' <<<"$prs"
+}
+
+reconcile_merged_pr() {
+  local pr="$1" issue="$2" body="$3"
+  if [ "$CLOSE_POLICY" = "verified" ] &&
+      printf '%s\n' "$body" | grep -Eiq "(^|[^[:alnum:]])closes[[:space:]]+#[[:space:]]*$issue([^[:alnum:]]|$)"; then
+    gh issue close "$issue" --comment "Reconciliado por PR mergeado #$pr (política de cierre verificada)." >/dev/null 2>&1 || true
+    echo "✅ PR #$pr ya estaba mergeado; reconcilio el issue #$issue y lo cierro según la política '$CLOSE_POLICY'."
+  else
+    gh issue comment "$issue" --body "🤖 PR #$pr ya estaba mergeado; el issue queda abierto (política de cierre: $CLOSE_POLICY)." >/dev/null 2>&1 || true
+    echo "✅ PR #$pr ya estaba mergeado; reconcilio el issue #$issue y lo dejo abierto según la política '$CLOSE_POLICY'."
+  fi
 }
 
 checkout_or_fail() {
@@ -1814,6 +1847,95 @@ checkout_or_fail() {
   fi
   echo "❌ No pude hacer checkout de '$branch'; detengo la corrida."
   return 70
+}
+
+remote_branch_exists() {
+  local branch="$1" rc
+  git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$rc" -eq 2 ]; then
+    return 1
+  fi
+  echo "❌ No pude comprobar si existe 'origin/$branch'; detengo la corrida." >&2
+  return 70
+}
+
+synchronize_branch_with_origin() {
+  local branch="$1" local_sha remote_sha rc
+  local_sha="$(git rev-parse "$branch" 2>/dev/null)" || {
+    echo "❌ No pude leer la rama local '$branch'; detengo la corrida."
+    return 70
+  }
+  remote_sha="$(git rev-parse "origin/$branch" 2>/dev/null)" || {
+    echo "❌ No pude leer la rama remota 'origin/$branch'; detengo la corrida."
+    return 70
+  }
+  if [ "$local_sha" = "$remote_sha" ]; then
+    git branch --set-upstream-to="origin/$branch" "$branch" >/dev/null 2>&1 || {
+      echo "❌ No pude configurar el tracking de '$branch'; detengo la corrida."
+      return 70
+    }
+    return 0
+  fi
+
+  if git merge-base --is-ancestor "$branch" "origin/$branch"; then
+    if ! git merge --ff-only "origin/$branch" >/dev/null 2>&1; then
+      echo "❌ No pude hacer fast-forward local de '$branch' desde origin; detengo la corrida."
+      return 70
+    fi
+    echo "🔄 rama local '$branch' actualizada por fast-forward desde origin."
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || {
+      echo "❌ No pude comprobar la relación entre '$branch' y 'origin/$branch'; detengo la corrida."
+      return 70
+    }
+    if git merge-base --is-ancestor "origin/$branch" "$branch"; then
+      if ! git push -q -u origin "$branch" >/dev/null 2>&1; then
+        echo "❌ No pude publicar el fast-forward de '$branch' en origin; detengo la corrida."
+        return 70
+      fi
+      if ! git fetch -q origin "$branch" >/dev/null 2>&1; then
+        echo "❌ No pude confirmar el fast-forward de '$branch' en origin; detengo la corrida."
+        return 70
+      fi
+      echo "🔄 rama remota 'origin/$branch' actualizada por fast-forward desde local."
+    else
+      rc=$?
+      [ "$rc" -eq 1 ] || {
+        echo "❌ No pude comprobar la relación entre '$branch' y 'origin/$branch'; detengo la corrida."
+        return 70
+      }
+      return 1
+    fi
+  fi
+
+  local_sha="$(git rev-parse "$branch" 2>/dev/null)" || return 70
+  remote_sha="$(git rev-parse "origin/$branch" 2>/dev/null)" || return 70
+  [ "$local_sha" = "$remote_sha" ] || {
+    echo "❌ '$branch' y 'origin/$branch' siguen sin coincidir después del fast-forward; detengo la corrida."
+    return 70
+  }
+  git branch --set-upstream-to="origin/$branch" "$branch" >/dev/null 2>&1 || {
+    echo "❌ No pude configurar el tracking de '$branch'; detengo la corrida."
+    return 70
+  }
+  return 0
+}
+
+mark_divergent_branch_for_human() {
+  local branch="$1" pr="$2"
+  echo "🙋 '$branch' y 'origin/$branch' están divergentes; ${pr:+PR #$pr }queda para un humano."
+  if [ -n "$pr" ]; then
+    add_label "$pr" "$NEEDS_HUMAN_LABEL"
+    gh pr comment "$pr" --body "🤖 Ralph detectó que '$branch' y 'origin/$branch' tienen historias divergentes. El PR queda para un humano." >/dev/null 2>&1 || true
+  else
+    add_label "$CURRENT_ISSUE" "$NEEDS_HUMAN_LABEL"
+    gh issue comment "$CURRENT_ISSUE" --body "🤖 Ralph detectó que '$branch' y 'origin/$branch' tienen historias divergentes. El issue queda para un humano." >/dev/null 2>&1 || true
+  fi
 }
 
 verify_reviewed_head() {
@@ -2186,41 +2308,97 @@ process_issue() {
   local branch="${BRANCH_PREFIX}${num}"
   local rc issue_ctx commits pr round verdict review_body prior_work reviewed_sha
   local state_status state_phase infra_retries merged_sha ci_ok ci_rc backoff
-  local pr_body
+  local pr_body prs open_pr_record merged_pr merged_pr_body
   local review_rc
   local remote_delete_error
 
   CURRENT_ISSUE="$num"
   CURRENT_PHASE="preparación"
+  pr=""
   echo ""
   echo "════ Issue #$num ($branch) ════"
+
+  if ! git fetch -q origin >/dev/null 2>&1; then
+    echo "❌ No pude actualizar las referencias de origin para el issue #$num; detengo la corrida."
+    return 70
+  fi
+
+  prs="$(pull_requests_for_branch_or_issue "$branch" "$num")" || return $?
+  open_pr_record="$(jq -c --arg branch "$branch" '
+    map(select((.state // "") | ascii_upcase == "OPEN")) |
+    sort_by(if (.headRefName // "") == $branch then 0 else 1 end) |
+    .[0] // empty
+  ' <<<"$prs")"
+  if [ -n "$open_pr_record" ]; then
+    pr="$(jq -r '.number' <<<"$open_pr_record")"
+    branch="$(jq -r --arg fallback "$branch" '.headRefName // $fallback' <<<"$open_pr_record")"
+  else
+    merged_pr="$(jq -r '
+      map(select(((.state // "") | ascii_upcase) == "MERGED" or (.mergedAt // null) != null)) |
+      .[0].number // empty
+    ' <<<"$prs")"
+    if [ -n "$merged_pr" ]; then
+      merged_pr_body="$(jq -r --argjson pr "$merged_pr" '.[] | select(.number == $pr) | .body // ""' <<<"$prs")"
+      reconcile_merged_pr "$merged_pr" "$num" "$merged_pr_body"
+      checkout_or_fail "$BASE_BRANCH" || return 70
+      return 0
+    fi
+  fi
 
   # Idempotencia: si la rama ya existe (corrida anterior interrumpida) la
   # reutilizamos. Recrearla con 'checkout -B' descartaría ese trabajo.
   if git show-ref --verify --quiet "refs/heads/$branch"; then
     checkout_or_fail "$branch" || return 70
-    prior_work="$(git log --oneline "$BASE_BRANCH..$branch" 2>/dev/null)"
-  elif git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-    if ! git fetch -q origin "$branch" >/dev/null 2>&1; then
-      echo "❌ No pude traer '$branch' desde origin; detengo la corrida."
-      return 70
-    fi
-    if ! git checkout -b "$branch" "origin/$branch" >/dev/null 2>&1; then
-      echo "❌ No pude crear '$branch' desde origin; detengo la corrida."
-      return 70
+    remote_branch_exists "$branch"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      if ! git show-ref --verify --quiet "refs/remotes/origin/$branch" &&
+          ! git fetch -q origin "$branch" >/dev/null 2>&1; then
+        echo "❌ No pude traer '$branch' desde origin; detengo la corrida."
+        return 70
+      fi
+      synchronize_branch_with_origin "$branch"
+      rc=$?
+      if [ "$rc" -eq 1 ]; then
+        mark_divergent_branch_for_human "$branch" "$pr"
+        checkout_or_fail "$BASE_BRANCH" || return 70
+        return 0
+      fi
+      [ "$rc" -eq 0 ] || return "$rc"
+    elif [ "$rc" -ne 1 ]; then
+      return "$rc"
     fi
     prior_work="$(git log --oneline "$BASE_BRANCH..$branch" 2>/dev/null)"
   else
-    if ! git checkout -b "$branch" "$BASE_BRANCH" >/dev/null 2>&1; then
-      echo "❌ No pude crear y hacer checkout de '$branch'; detengo la corrida."
-      return 70
+    remote_branch_exists "$branch"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      if ! git fetch -q origin "$branch" >/dev/null 2>&1; then
+        echo "❌ No pude traer '$branch' desde origin; detengo la corrida."
+        return 70
+      fi
+      if ! git checkout --track -b "$branch" "origin/$branch" >/dev/null 2>&1; then
+        echo "❌ No pude crear '$branch' desde origin; detengo la corrida."
+        return 70
+      fi
+      echo "📥 rama remota '$branch' recuperada con tracking; continúo con el trabajo existente."
+      prior_work="$(git log --oneline "$BASE_BRANCH..$branch" 2>/dev/null)"
+    elif [ "$rc" -ne 1 ]; then
+      return "$rc"
+    else
+      if ! git checkout -b "$branch" "$BASE_BRANCH" >/dev/null 2>&1; then
+        echo "❌ No pude crear y hacer checkout de '$branch'; detengo la corrida."
+        return 70
+      fi
+      prior_work=""
     fi
-    prior_work=""
   fi
 
-  pr="$(pr_for_branch "$branch")"
-  rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
+  if [ -z "$pr" ]; then
+    pr="$(pr_for_branch "$branch" "$num")"
+    rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+  fi
 
   # Un PR ya marcado para humano no se vuelve a tocar: agotó sus rondas.
   if [ -n "$pr" ]; then
@@ -2289,7 +2467,7 @@ $PROMPT_IMPLEMENT"
       return 70
     fi
 
-    pr="$(pr_for_branch "$branch")"
+    pr="$(pr_for_branch "$branch" "$num")"
     if [ -z "$pr" ]; then
       echo "⚠️  Codex no dejó PR abierto para #$num. Branch preservado, sin merge."
       checkout_or_fail "$BASE_BRANCH" || return 70
@@ -2857,7 +3035,7 @@ select_issues() {
         fi
       done
 
-      pr="$(pr_for_branch "${BRANCH_PREFIX}${num}")"
+      pr="$(pr_for_branch "${BRANCH_PREFIX}${num}" "$num")"
       rc=$?
       [ "$rc" -eq 0 ] || return "$rc"
       needs_human=no
