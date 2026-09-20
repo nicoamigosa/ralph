@@ -2813,6 +2813,9 @@ load test_helper
   first_result="$RUN_DIR/codex-1.result.json"
   [ "$(jq -r '.status' "$first_result")" = rate_limited ]
   [ "$(jq -r '.retry_at' "$first_result")" != null ]
+  jq -e '.issues_started == 1' "$RUN_DIR/summary.json"
+  jq -s -e '[.[] | select(.event == "issue_started") | .issue] | unique == [1]' \
+    "$RUN_DIR/events.jsonl"
   grep -Fq 'pr merge' "$GH_MUTATION_LOG"
 }
 
