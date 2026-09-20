@@ -1193,6 +1193,30 @@ load test_helper
   [[ "$run_output" == *"PR #101 ya estaba mergeado; reconcilio el issue #1"* ]]
 }
 
+@test "reconciliar un PR mergeado sin cierre marca el issue para humano" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/merged-pr-open-issue-part-of.json"
+  export RALPH_CLOSE_POLICY=never
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Eq '^(codex exec|claude) ' "$FAKE_AGENT_LOG"
+  grep -Fq 'api repos/nicoamigosa/ralph/issues/1/labels -f labels[]=ralph-needs-human' "$GH_MUTATION_LOG"
+  grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
+}
+
+@test "PR mergeado de otra rama que menciona el issue no impide implementarlo" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/foreign-merged-pr-mention.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Eq '^codex exec ' "$FAKE_AGENT_LOG"
+  ! grep -Fq 'issue comment 1' "$GH_MUTATION_LOG"
+}
+
 @test "rama local divergente de origin queda para humano sin invocar agentes" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_PR_STATE="$TEST_ROOT/codex-created-pr"

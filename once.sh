@@ -1806,10 +1806,12 @@ pull_requests_for_branch_or_issue() {
       "$branch" "$issue" >&2
     return 70
   fi
-  jq -c --arg branch "$branch" --arg issue "#$issue" '
+  jq -c --arg branch "$branch" --arg issue "$issue" '
     [ .[] |
       select((.headRefName // "") == $branch or
-        ((.body // "") | test("(^|[^[:alnum:]_])" + $issue + "([^[:alnum:]_]|$)")))
+        ((.body // "") | test(
+          "(^|[^[:alnum:]_])(closes|fixes|resolves|part[[:space:]]+of)[[:space:]]+#[[:space:]]*" +
+          $issue + "([^[:alnum:]_]|$)"; "i")))
     ]
   ' <<<"$prs" 2>/dev/null || {
     printf '❌ La lista de PRs asociados a la rama %s o al issue #%s no es válida; detengo la corrida.\n' \
@@ -1835,6 +1837,7 @@ reconcile_merged_pr() {
     gh issue close "$issue" --comment "Reconciliado por PR mergeado #$pr (política de cierre verificada)." >/dev/null 2>&1 || true
     echo "✅ PR #$pr ya estaba mergeado; reconcilio el issue #$issue y lo cierro según la política '$CLOSE_POLICY'."
   else
+    add_label "$issue" "$NEEDS_HUMAN_LABEL"
     gh issue comment "$issue" --body "🤖 PR #$pr ya estaba mergeado; el issue queda abierto (política de cierre: $CLOSE_POLICY)." >/dev/null 2>&1 || true
     echo "✅ PR #$pr ya estaba mergeado; reconcilio el issue #$issue y lo dejo abierto según la política '$CLOSE_POLICY'."
   fi
