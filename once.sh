@@ -2352,7 +2352,7 @@ ci_job_steps_length() {
 }
 
 run_base_ci_preflight() {
-  local runs run_id jobs jobs_count executed_steps check_id annotation reason
+  local runs run_id run_status run_conclusion jobs jobs_count executed_steps check_id annotation reason
   [ "$DRY_RUN" = "1" ] && return 0
   if [ "$CI_POLICY" = "none" ]; then
     echo "⚠️  Preflight CI de la base omitido: política RALPH_CI_POLICY=none explícita."
@@ -2370,6 +2370,13 @@ run_base_ci_preflight() {
     reason="no existe un run de CI verificable en la base '$BASE_BRANCH'"
     stop_for_ci_infrastructure "$reason"
     return $?
+  fi
+  run_status="$(jq -r '.[0].status // empty | ascii_downcase' <<<"$runs" 2>/dev/null)" || run_status=""
+  run_conclusion="$(jq -r '.[0].conclusion // empty | ascii_downcase' <<<"$runs" 2>/dev/null)" || run_conclusion=""
+  if [ "$run_status" != "completed" ] ||
+     { [ "$run_conclusion" != "failure" ] && [ "$run_conclusion" != "cancelled" ]; }; then
+    echo "✅ Preflight CI de la base no detecta infraestructura: run #$run_id status=${run_status:-desconocido} conclusion=${run_conclusion:-desconocida}."
+    return 0
   fi
   jobs="$(gh api --paginate \
     "repos/$REPO_SLUG/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null | \
@@ -2894,7 +2901,7 @@ check_run_infrastructure_reason() {
     [ -n "$check_id$check_name" ] || continue
     annotation=""
     if [ -n "$check_id" ]; then
-      annotation="$(ci_annotation_text "$check_id")" || return 2
+      annotation="$(ci_annotation_text "$check_id")" || annotation=""
     fi
     if printf '%s\n' "$annotation" | grep -Eqi 'was[[:space:]]+not[[:space:]]+started'; then
       CI_INFRASTRUCTURE_REASON="CI check '$check_name' terminó sin ejecutar steps"
@@ -2905,8 +2912,9 @@ check_run_infrastructure_reason() {
       return 0
     fi
     if [ "$steps_length" -lt 0 ] && [ -n "$check_id" ]; then
-      job_steps_length="$(ci_job_steps_length "$check_id")" || return 2
-      steps_length="$job_steps_length"
+      if job_steps_length="$(ci_job_steps_length "$check_id")"; then
+        steps_length="$job_steps_length"
+      fi
     fi
     if [ "$steps_length" -eq 0 ]; then
       CI_INFRASTRUCTURE_REASON="CI check '$check_name' terminó sin ejecutar steps"

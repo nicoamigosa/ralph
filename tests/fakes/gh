@@ -484,7 +484,7 @@ case "${1:-}" in
             printf '{"check_runs":[{"name":"CI","head_sha":"%s","status":"in_progress","conclusion":null}]}\n' "$fake_sha"
             ;;
           ci_infra)
-            printf '{"check_runs":[{"id":801,"name":"CI","head_sha":"%s","status":"completed","conclusion":"failure","steps":[]}]}\n' "$fake_sha"
+            printf '{"check_runs":[{"id":801,"name":"CI","head_sha":"%s","status":"completed","conclusion":"failure"}]}\n' "$fake_sha"
             ;;
           infra)
             printf '%s\n' 'failed to connect to GitHub API' >&2

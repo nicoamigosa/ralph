@@ -1964,8 +1964,10 @@ load test_helper
   export FAKE_CODEX_CREATE_PR=1
   export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
   reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
-  export FAKE_CHECK_RUNS_JSON="[{\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"failure\"}]"
+  export FAKE_CHECK_RUNS_JSON="[{\"id\":802,\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"failure\"}]"
   export FAKE_STATUSES_JSON='[]'
+  export RALPH_CI_TIMEOUT_SECONDS=0
+  export FAKE_SLEEP_NOOP=1
 
   run_once
 
@@ -1980,7 +1982,9 @@ load test_helper
   export FAKE_CODEX_CREATE_PR=1
   reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
   export RALPH_REQUIRED_CHECKS_JSON='["suite obligatoria"]'
-  export FAKE_CHECK_RUNS_JSON="[{\"id\":802,\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"failure\",\"steps\":[{\"name\":\"test\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}]"
+  export FAKE_CHECK_RUNS_JSON="[{\"id\":802,\"name\":\"suite obligatoria\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"failure\"}]"
+  export FAKE_CHECK_JOB_JSON='{"id":802,"steps":[{"name":"test","status":"completed","conclusion":"failure"}]}'
+  export FAKE_CHECK_ANNOTATIONS_JSON='[]'
   export FAKE_STATUSES_JSON='[]'
   export FAKE_CI_RUN_URL='https://github.com/nicoamigosa/ralph/actions/runs/457'
   export RALPH_MAX_ROUNDS=1
@@ -2111,6 +2115,19 @@ load test_helper
   jq -e '.stop_reason == "ci_infrastructure" and .issues_started == 0 and any(.errors[]; contains("was not started"))' "$RUN_DIR/summary.json"
 }
 
+@test "preflight no detiene un run de la base en curso sin anotación" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_BASE_RUN_JSON='[{"databaseId":900,"headSha":"base-sha","status":"in_progress","conclusion":null,"url":"https://github.com/nicoamigosa/ralph/actions/runs/900"}]'
+  export FAKE_BASE_JOBS_JSON='[]'
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fq 'pr merge 101 --squash --match-head-commit ' "$GH_MUTATION_LOG"
+  [[ "$output" != *"CI detenido por infraestructura"* ]]
+}
+
 @test "timeout de CI ausente no mergea ni manda corrección a Codex" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
@@ -2218,7 +2235,8 @@ load test_helper
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
   reviewed_sha="$(git -C "$TEST_REPO" rev-parse HEAD)"
-  export FAKE_CHECK_RUNS_JSON="[{\"id\":801,\"name\":\"CI\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"failure\",\"steps\":[]}]"
+  export FAKE_CHECK_RUNS_JSON="[{\"id\":801,\"name\":\"CI\",\"head_sha\":\"$reviewed_sha\",\"status\":\"completed\",\"conclusion\":\"failure\"}]"
+  export FAKE_CHECK_JOB_JSON='{"id":801,"steps":[]}'
   export FAKE_STATUSES_JSON='[]'
   export FAKE_CHECK_ANNOTATIONS_JSON='[{"message":"The job was not started because recent account payments have failed or your spending limit needs to be increased"}]'
   export RALPH_MAX_INFRA_RETRIES=2
@@ -2242,7 +2260,8 @@ load test_helper
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
   export FAKE_CI_RESULTS='ci_infra|pass'
-  export FAKE_CHECK_ANNOTATIONS_JSON='[{"message":"The job was not started because recent account payments have failed"}]'
+  export FAKE_CHECK_JOB_JSON='{"id":801,"steps":[]}'
+  export FAKE_CHECK_ANNOTATIONS_JSON='[]'
   export RALPH_MAX_INFRA_RETRIES=2
   export RALPH_CI_TIMEOUT_SECONDS=60
   export FAKE_SLEEP_NOOP=1
