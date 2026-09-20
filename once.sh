@@ -775,7 +775,7 @@ write_protection_summary() {
   required_checks="$REQUIRED_CHECKS_JSON"
   [ -n "$required_checks" ] || required_checks='[]'
   [ "$REQUIRE_PROTECTION" = "0" ] && protection_required_json=false
-  [ "$DRY_RUN" = "1" ] || [ "$RUN_INITIALIZED" -eq 1 ] || return 0
+  [ "$RUN_INITIALIZED" -eq 1 ] || return 0
   summary_tmp="$RUN_DIR/summary.json.tmp.$$"
   if [ -f "$RUN_DIR/summary.json" ]; then
     jq \

@@ -261,11 +261,12 @@ load test_helper
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
   export RALPH_DRY_RUN=1
   export RUN_DIR="$TEST_ROOT/run"
+  mkdir -p "$RUN_DIR"
 
   run_once
 
   [ "$status" -eq 0 ]
-  [ ! -e "$RUN_DIR" ]
+  [ -z "$(find "$RUN_DIR" -print | sed -n '2p')" ]
 }
 
 @test "a failed issue records a stop reason instead of no_ready_issues" {
