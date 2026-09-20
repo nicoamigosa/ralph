@@ -55,6 +55,7 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #                           ejecuta una sonda de preflight y reemplaza writable_roots
 #                           configurado; danger-full-access no se recomienda)
 #   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus)
+#   RALPH_CLAUDE_MAX_BUDGET_USD límite por invocación de Claude (optional)
 #   RALPH_TDD_SKILL      ruta obligatoria a SKILL.md para Codex
 #   RALPH_SMOKE_TEST     smoke test de ambos modelos      (default: 0)
 #   RALPH_REVIEWER_GH_TOKEN token fine-grained read-only para Claude (required)
@@ -64,6 +65,7 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #   RALPH_MERGE_PENDING_POLICY ante merge encolado         (default: stop)
 #   RALPH_MAX_INFRA_RETRIES  reintentos ante caída del revisor (default: 3)
 #   RALPH_MAX_LIMIT_RETRIES  reintentos ante un tope del proveedor (default: 3)
+#   RALPH_RUN_BUDGET_USD   presupuesto estimado de Claude por corrida (optional)
 #   RALPH_DEADLINE_EPOCH     deadline global opcional, como epoch UTC
 #   RALPH_CI_POLICY          required o none explícito       (default: required)
 #   RALPH_CI_TIMEOUT_SECONDS espera de CI requerido         (default: 1800)
@@ -149,6 +151,8 @@ CODEX_MODEL="${RALPH_CODEX_MODEL:-gpt-5.6-luna}"
 CODEX_EFFORT="${RALPH_CODEX_EFFORT:-xhigh}"
 CODEX_SANDBOX="${RALPH_CODEX_SANDBOX:-workspace-write}"
 CLAUDE_MODEL="${RALPH_CLAUDE_MODEL:-opus}"
+CLAUDE_MAX_BUDGET_USD="${RALPH_CLAUDE_MAX_BUDGET_USD:-}"
+RUN_BUDGET_USD="${RALPH_RUN_BUDGET_USD:-}"
 REVIEWER_GH_TOKEN="${RALPH_REVIEWER_GH_TOKEN:-}"
 REQUIRE_REVIEWER_TOKEN="${RALPH_REQUIRE_REVIEWER_TOKEN:-1}"
 MERGE_METHOD="${RALPH_MERGE_METHOD:---squash}"
@@ -199,6 +203,16 @@ validate_non_negative_integer() {
   esac
 }
 
+validate_non_negative_decimal() {
+  local variable_name="$1" value="$2"
+  case "$value" in
+    ''|*[!0-9.]*|.*|*.) fail "$variable_name debe ser un número decimal no negativo." ;;
+  esac
+  case "$value" in
+    *.*.*) fail "$variable_name debe ser un número decimal no negativo." ;;
+  esac
+}
+
 validate_file_path() {
   local variable_name="$1" path="$2" parent
   [ -n "$path" ] || fail "$variable_name no puede estar vacío."
@@ -222,6 +236,14 @@ validate_non_negative_integer RALPH_MAX_RUN_SECONDS "$MAX_RUN_SECONDS"
 validate_non_negative_integer RALPH_MAX_INFRA_RETRIES "$MAX_INFRA_RETRIES"
 validate_non_negative_integer RALPH_MAX_LIMIT_RETRIES "$MAX_LIMIT_RETRIES"
 validate_non_negative_integer RALPH_CI_TIMEOUT_SECONDS "$CI_TIMEOUT_SECONDS"
+case "$CLAUDE_MAX_BUDGET_USD" in
+  '') ;;
+  *) validate_non_negative_decimal RALPH_CLAUDE_MAX_BUDGET_USD "$CLAUDE_MAX_BUDGET_USD" ;;
+esac
+case "$RUN_BUDGET_USD" in
+  '') ;;
+  *) validate_non_negative_decimal RALPH_RUN_BUDGET_USD "$RUN_BUDGET_USD" ;;
+esac
 case "$DEADLINE_EPOCH" in
   '') ;;
   *) validate_non_negative_integer RALPH_DEADLINE_EPOCH "$DEADLINE_EPOCH" ;;
@@ -534,7 +556,7 @@ write_summary_markdown() {
     "## Usage\n\n" +
     "- Codex tokens: `" + (if .usage.codex_tokens == null then "unknown" else (.usage.codex_tokens | tostring) end) + "`\n" +
     "- Claude estimated USD: `" + (if .usage.claude_estimated_usd == null then "unknown" else (.usage.claude_estimated_usd | tostring) end) + "`\n\n" +
-    "Claude cost is an estimate reported by the provider. Actual billing is not inferred, and a subscription does not imply marginal cost.\n"
+    "Claude cost is an estimate reported by the provider. Actual billing is not inferred, and a subscription does not imply marginal cost. The run budget covers only this estimated Claude cost; it is not a joint Codex/Claude budget. Configure Codex hard ceiling at its provider.\n"
   ' "$RUN_DIR/summary.json" > "$markdown_tmp" 2>/dev/null || {
     rm -f "$markdown_tmp"
     return 70
@@ -1636,6 +1658,30 @@ stop_for_deadline() {
   exit 0
 }
 
+stop_for_budget() {
+  local context="${1:-la siguiente invocación de un agente}"
+  echo "🛑 Presupuesto estimado de Claude alcanzado durante $context; detengo la corrida sin continuar."
+  RUN_STOP_REASON="budget"
+  write_checkpoint "presupuesto estimado de Claude alcanzado durante $context."
+  exit 0
+}
+
+run_budget_reached() {
+  [ -n "$RUN_BUDGET_USD" ] || return 1
+  [ -n "$RUN_CLAUDE_ESTIMATED_USD" ] || return 1
+  awk -v spent="$RUN_CLAUDE_ESTIMATED_USD" -v budget="$RUN_BUDGET_USD" \
+    'BEGIN { exit !(spent >= budget) }'
+}
+
+check_run_budget() {
+  run_budget_reached
+  case "$?" in
+    0) stop_for_budget "$1" ;;
+    1) return 0 ;;
+    *) return 70 ;;
+  esac
+}
+
 stop_for_timeout() {
   local context="${1:-la orden acotada}"
   echo "⏱️  timeout durante $context; conservo la rama y detengo la corrida."
@@ -2011,6 +2057,7 @@ record_agent_timeout() {
 
 run_codex() {
   local prompt="$1" process_rc
+  check_run_budget "la invocación de Codex" || return $?
   check_run_deadline "la invocación de Codex" || return $?
   prompt+="$CODEX_SKILL_CONTEXT"
   AGENT_ROLE="codex"
@@ -2058,6 +2105,7 @@ run_codex() {
 
 run_claude() {
   local prompt="$1" process_rc
+  check_run_budget "la invocación de Claude" || return $?
   check_run_deadline "la invocación de Claude" || return $?
   AGENT_ROLE="reviewer"
   record_run_event "agent_started" "$CURRENT_ISSUE" "$CURRENT_PR" "reviewer" "$CURRENT_PHASE" || return $?
@@ -2065,6 +2113,11 @@ run_claude() {
   AGENT_COMMAND=(
     claude
     --model "$CLAUDE_MODEL"
+  )
+  if [ -n "$CLAUDE_MAX_BUDGET_USD" ]; then
+    AGENT_COMMAND+=(--max-budget-usd "$CLAUDE_MAX_BUDGET_USD")
+  fi
+  AGENT_COMMAND+=(
     --dangerously-skip-permissions
     --print
     --output-format json
@@ -2264,6 +2317,7 @@ run_smoke_test() {
   local claude_stdout="$RUN_DIR/preflight-claude.stdout.json"
   local claude_stderr="$RUN_DIR/preflight-claude.stderr.log"
   local smoke_rc
+  local -a claude_command=(claude --model "$CLAUDE_MODEL")
 
   if [ "$DRY_RUN" = "1" ] || [ "$SMOKE_TEST" = "0" ]; then
     return 0
@@ -2290,8 +2344,11 @@ run_smoke_test() {
   fi
 
   check_run_deadline "la invocación de Claude del smoke test" || return $?
-  if run_bounded "$AGENT_TIMEOUT_SECONDS" claude --model "$CLAUDE_MODEL" --print --output-format json \
-      'RALPH preflight smoke test: reply with OK.' \
+  if [ -n "$CLAUDE_MAX_BUDGET_USD" ]; then
+    claude_command+=(--max-budget-usd "$CLAUDE_MAX_BUDGET_USD")
+  fi
+  claude_command+=(--print --output-format json 'RALPH preflight smoke test: reply with OK.')
+  if run_bounded "$AGENT_TIMEOUT_SECONDS" "${claude_command[@]}" \
       >"$claude_stdout" 2>"$claude_stderr"; then
     smoke_rc=0
   else
