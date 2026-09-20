@@ -697,6 +697,23 @@ load test_helper
   grep -Fq 'Configure Codex hard ceiling at its provider' "$RUN_DIR/summary.md"
 }
 
+@test "run budget stops before Codex for an issue without a prior PR" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/two-issues-second-without-pr.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_EXITS='0|0'
+  export FAKE_CLAUDE_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/claude-2.1.277-success.json"
+  export RALPH_RUN_BUDGET_USD=0.10
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ "$(cat "$FAKE_CODEX_CALL_COUNT_FILE")" = 1 ]
+  jq -e '.stop_reason == "budget" and .usage.claude_estimated_usd == 0.1823155' \
+    "$RUN_DIR/summary.json"
+}
+
 @test "missing codex token fields are null rather than zero" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_STDOUT='{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n{"type":"turn.completed","usage":{}}'
