@@ -428,7 +428,7 @@ corrida y escriben checkpoint; `unknown` registra el error y no espera.
 | `prompt_conflicts.md` | Codex: resolver los conflictos al poner la rama al día con la base |
 | `update.sh` | Descarga y verifica una release antes de actualizar la instalación |
 | `MANIFEST` | Paths de los archivos que forman la distribución |
-| `VERSION` | Release instalada; la compara `update.sh --check` |
+| `VERSION` | Release instalada; la comparará `update.sh --check` (#20) |
 | `last_run.md` | Checkpoint, generado al detenerse por límite/error global (no se versiona) |
 
 ## Niveles de configuración
@@ -541,9 +541,10 @@ ninguno fija ni verifica la versión que se ejecuta.
   checkpoints y toda `.ralph/`. Mientras `once.sh` corre, el lock remoto
   `refs/ralph/lock` impide actualizar. El updater nunca crea commits: el diff
   queda para un PR normal.
-- Comprobar atraso: `ralph/update.sh --check` compara `VERSION` con la última
-  release estable y responde "actual", "actualización disponible" o "consulta
-  fallida" (una consulta fallida **no** significa estar al día).
+- Comprobar atraso (pendiente, issue #20): `ralph/update.sh --check` comparará
+  `VERSION` con la última release estable y responderá "actual", "actualización
+  disponible" o "consulta fallida" (una consulta fallida **no** significa estar
+  al día). Hoy `update.sh` rechaza `--check` y cualquier otra opción.
 
 Cada release publica dos assets con nombres fijos: `ralph-v<VERSION>.tar.gz` y
 `SHA256SUMS`. El segundo contiene el SHA-256 del primero. Para poder detectar

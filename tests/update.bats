@@ -142,3 +142,17 @@ make_release_fixture() {
   [[ "$output" == *'lock remoto'* ]]
   [ "$(cat "$TEST_REPO/VERSION")" = "$before_version" ]
 }
+
+@test "update rejects option-style arguments instead of treating them as versions" {
+  make_release_fixture
+  before_version="$(cat "$TEST_REPO/VERSION")"
+
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  export RALPH_RELEASE_BASE_URL='https://releases.invalid/ralph'
+
+  run bash -c 'cd "$1" && bash ./update.sh --check' _ "$TEST_REPO"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Opción no soportada: --check"* ]]
+  [ "$(cat "$TEST_REPO/VERSION")" = "$before_version" ]
+}

@@ -230,6 +230,9 @@ apply_package() {
 }
 
 [ "$#" -eq 1 ] || fail "Uso: $0 <VERSION>"
+case "$1" in
+  -*) fail "Opción no soportada: $1 (\`--check\` llega con #20). Uso: $0 <VERSION>" ;;
+esac
 TARGET_VERSION="$1"
 valid_version "$TARGET_VERSION" || fail "VERSION inválida: $TARGET_VERSION."
 
