@@ -404,6 +404,14 @@ para que el siguiente intento retome esa revisión sin consumir presupuesto.
 Una respuesta válida se publica una sola vez como el cuerpo exacto; la ronda
 sólo avanza después de que Codex completa la corrección.
 
+Una respuesta sin veredicto bien formado, o un `CHANGES_REQUESTED` sin ningún
+hallazgo numerado, se trata como fallo de infraestructura del revisor: se
+reintenta hasta `RALPH_MAX_INFRA_RETRIES` sin consumir ronda ni publicar nada.
+Agotados los reintentos sigue siendo `CHANGES_REQUESTED` (fail-closed). El
+revisor corre con `--disallowedTools Monitor,ScheduleWakeup,CronCreate,Agent`
+porque cada despertar de una herramienta de segundo plano es un turno nuevo y
+`claude --print` devuelve sólo el último, perdiendo la revisión.
+
 ## Topes de uso
 
 Los adaptadores clasifican un tope sólo desde un evento de error o metadatos

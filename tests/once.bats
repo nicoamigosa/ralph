@@ -857,7 +857,7 @@ load test_helper
 
 @test "an issue that exhausts review rounds is recorded as failed" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
-  export FAKE_CLAUDE_RESULT='<verdict>CHANGES_REQUESTED</verdict>'
+  export FAKE_CLAUDE_RESULT=$'1. Falta un test.\n<verdict>CHANGES_REQUESTED</verdict>'
   export RALPH_CI_POLICY=none
   export RALPH_MAX_ROUNDS=1
 
@@ -1326,6 +1326,52 @@ load test_helper
   ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
 }
 
+@test "the reviewer runs without background tools that would truncate its final message" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT='<verdict>PASS</verdict>'
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  review_call="$(grep -F -- '--output-format json' "$FAKE_AGENT_LOG" | grep -Fv 'preflight smoke test')"
+  [[ "$review_call" == *"--disallowedTools Monitor,ScheduleWakeup,CronCreate,Agent"* ]]
+}
+
+@test "a CHANGES_REQUESTED verdict without findings is retried as infrastructure" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULTS='Otro Monitor expirado; el veredicto no cambia.\n\n<verdict>CHANGES_REQUESTED</verdict>|<verdict>PASS</verdict>'
+  export FAKE_SLEEP_NOOP=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sin hallazgos"* ]]
+  [[ "$output" == *"reintento 1/3 sin consumir ronda"* ]]
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 2 ]
+  [ "$(grep -c '^codex exec ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  ! grep -Fq 'Otro Monitor expirado' "$GH_MUTATION_LOG"
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "a CHANGES_REQUESTED verdict without findings still blocks after the retries" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT='<verdict>CHANGES_REQUESTED</verdict>'
+  export RALPH_MAX_INFRA_RETRIES=0
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sin hallazgos"* ]]
+  ! grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+  jq -e '.stop_reason == "issues_failed"' "$RUN_DIR/summary.json"
+}
+
 @test "date -d is confined to the portable epoch formatter" {
   [ "$(grep -Ec 'date -d' "$PROJECT_ROOT/once.sh")" -eq 1 ]
 }
@@ -1674,7 +1720,7 @@ load test_helper
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
   export FAKE_CODEX_COMMIT_FILE="$TEST_REPO/.ralph/prompt_review.local.md"
-  export FAKE_CLAUDE_RESULT='<verdict>CHANGES_REQUESTED</verdict>'
+  export FAKE_CLAUDE_RESULT=$'1. Falta un test.\n<verdict>CHANGES_REQUESTED</verdict>'
   export RALPH_MAX_ROUNDS=1
   export RALPH_CI_POLICY=none
   git -C "$TEST_REPO" switch -q main
@@ -1791,7 +1837,7 @@ load test_helper
 @test "sólo rama remota: recuperar su trabajo y revisar el PR sin Codex" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_PR_STATE="$TEST_ROOT/codex-created-pr"
-  export FAKE_CLAUDE_RESULT='<verdict>CHANGES_REQUESTED</verdict>'
+  export FAKE_CLAUDE_RESULT=$'1. Falta un test.\n<verdict>CHANGES_REQUESTED</verdict>'
   export RALPH_MAX_ROUNDS=1
 
   git -C "$TEST_REPO" switch -q -c ralph/issue-1
@@ -1899,7 +1945,7 @@ load test_helper
 @test "quoted PASS before final CHANGES_REQUESTED never merges the issue" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
-  export FAKE_CLAUDE_RESULT=$'The review body quotes <verdict>PASS</verdict> as an example.\n<verdict>CHANGES_REQUESTED</verdict>'
+  export FAKE_CLAUDE_RESULT=$'1. The review body quotes <verdict>PASS</verdict> as an example.\n<verdict>CHANGES_REQUESTED</verdict>'
 
   run_once
 
@@ -2577,7 +2623,7 @@ load test_helper
 
 @test "git push failure stops with the branch and PR still open" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
-  export FAKE_CLAUDE_RESULTS='<verdict>CHANGES_REQUESTED</verdict>|<verdict>PASS</verdict>'
+  export FAKE_CLAUDE_RESULTS='1. Falta un test.\n<verdict>CHANGES_REQUESTED</verdict>|<verdict>PASS</verdict>'
   export FAKE_CODEX_COMMIT_FILE="$TEST_REPO/review-fix.txt"
   export FAKE_GIT_FAIL=push
 
@@ -2791,7 +2837,7 @@ load test_helper
   ' "$PROJECT_ROOT/tests/fixtures/review-cycle.json" > "$TEST_ROOT/foreign-state.json"
   export GH_FIXTURE="$TEST_ROOT/foreign-state.json"
   export RALPH_MERGE_IDENTITY=ralph-bot
-  export FAKE_CLAUDE_RESULT='<verdict>CHANGES_REQUESTED</verdict>'
+  export FAKE_CLAUDE_RESULT=$'1. Falta un test.\n<verdict>CHANGES_REQUESTED</verdict>'
   export RALPH_CI_POLICY=none
   export RALPH_MAX_ROUNDS=1
 
@@ -2805,7 +2851,7 @@ load test_helper
 
 @test "restart after round two resumes the same PR at round three" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
-  export FAKE_CLAUDE_RESULTS='<verdict>CHANGES_REQUESTED</verdict>|<verdict>CHANGES_REQUESTED</verdict>|__rate_limit__'
+  export FAKE_CLAUDE_RESULTS='1. Falta un test.\n<verdict>CHANGES_REQUESTED</verdict>|1. Falta un test.\n<verdict>CHANGES_REQUESTED</verdict>|__rate_limit__'
   export RALPH_CI_POLICY=none
   export RALPH_MAX_ROUNDS=3
   export RALPH_MAX_LIMIT_RETRIES=0
@@ -2998,7 +3044,7 @@ load test_helper
 
 @test "review corrections push only to the isolated test remote" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/review-cycle.json"
-  export FAKE_CLAUDE_RESULTS='<verdict>CHANGES_REQUESTED</verdict>|<verdict>PASS</verdict>'
+  export FAKE_CLAUDE_RESULTS='1. Falta un test.\n<verdict>CHANGES_REQUESTED</verdict>|<verdict>PASS</verdict>'
 
   project_branches_before="$(git -C "$PROJECT_ROOT" for-each-ref --format='%(refname)' 'refs/heads/ralph/*')"
 

@@ -160,6 +160,7 @@ MERGE_TIMEOUT_SECONDS="${RALPH_MERGE_TIMEOUT_SECONDS:-600}"
 MERGE_PENDING_POLICY="${RALPH_MERGE_PENDING_POLICY:-stop}"
 NEEDS_HUMAN_LABEL="${RALPH_NEEDS_HUMAN_LABEL:-ralph-needs-human}"
 MAX_INFRA_RETRIES="${RALPH_MAX_INFRA_RETRIES:-3}"
+CLAUDE_DISALLOWED_TOOLS="Monitor,ScheduleWakeup,CronCreate,Agent"
 MAX_LIMIT_RETRIES="${RALPH_MAX_LIMIT_RETRIES:-3}"
 DEADLINE_EPOCH="${RALPH_DEADLINE_EPOCH:-}"
 ISSUE_ORDER="${RALPH_ISSUE_ORDER:-}"
@@ -2141,8 +2142,11 @@ run_claude() {
   if [ -n "$CLAUDE_MAX_BUDGET_USD" ]; then
     AGENT_COMMAND+=(--max-budget-usd "$CLAUDE_MAX_BUDGET_USD")
   fi
+  # Sin herramientas de segundo plano: cada despertar de Monitor/ScheduleWakeup
+  # es un turno nuevo y `--print` devuelve sólo el último, perdiendo la revisión.
   AGENT_COMMAND+=(
     --dangerously-skip-permissions
+    --disallowedTools "$CLAUDE_DISALLOWED_TOOLS"
     --print
     --output-format json
     "$prompt"
@@ -3590,6 +3594,14 @@ $PROMPT_REVIEW"
       # Fail-closed: sin PASS explícito y bien formado, no se mergea.
       verdict="$(printf '%s\n' "$review_body" | tail -n 1 | \
         grep -xE '<verdict>(PASS|CHANGES_REQUESTED)</verdict>' || true)"
+      # Un CHANGES_REQUESTED sin ítems numerados no le sirve a Codex: el
+      # revisor perdió su mensaje (p. ej. un turno extra). Se reintenta como
+      # infraestructura; agotados los reintentos sigue siendo CHANGES_REQUESTED.
+      if [ "$verdict" = "<verdict>CHANGES_REQUESTED</verdict>" ] && \
+          ! printf '%s\n' "$review_body" | grep -qE '^[[:space:]]*[0-9]+[.)]'; then
+        echo "⚠️  El revisor pidió cambios sin hallazgos numerados."
+        [ "$infra_retries" -lt "$MAX_INFRA_RETRIES" ] && verdict=""
+      fi
       if [ -z "$verdict" ] && [ "$infra_retries" -lt "$MAX_INFRA_RETRIES" ]; then
         infra_retries=$((infra_retries + 1))
         backoff=$((60 * 3 ** (infra_retries - 1)))
