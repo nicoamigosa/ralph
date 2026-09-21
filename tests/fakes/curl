@@ -22,11 +22,6 @@ done
 [ -n "$output_file" ] || { printf '%s\n' 'fake curl requires --output' >&2; exit 2; }
 [ -n "$url" ] || { printf '%s\n' 'fake curl requires a URL' >&2; exit 2; }
 
-if [[ "$url" == */releases/latest ]]; then
-  printf '{"tag_name":"v%s"}\n' "${FAKE_LATEST_VERSION:?missing FAKE_LATEST_VERSION}" > "$output_file"
-  exit 0
-fi
-
 asset="${url##*/}"
 source_file="${FAKE_RELEASE_ROOT:?missing FAKE_RELEASE_ROOT}/$asset"
 [ -f "$source_file" ] || {

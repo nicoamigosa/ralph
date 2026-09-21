@@ -142,15 +142,3 @@ make_release_fixture() {
   [[ "$output" == *'lock remoto'* ]]
   [ "$(cat "$TEST_REPO/VERSION")" = "$before_version" ]
 }
-
-@test "update check reports a newer stable release" {
-  make_release_fixture
-  export FAKE_LATEST_VERSION=1.2.0
-  export RALPH_RELEASE_API_URL='https://api.invalid/repos/nicoamigosa/ralph/releases/latest'
-
-  run bash -c 'cd "$1" && bash ./update.sh --check' _ "$TEST_REPO"
-
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'actualización disponible'* ]]
-  [[ "$output" == *'v1.2.0'* ]]
-}

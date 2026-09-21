@@ -229,40 +229,8 @@ apply_package() {
   done < <(manifest_paths "$package_root/MANIFEST")
 }
 
-check_latest_release() {
-  local current_version api_url latest_tag latest_version
-  current_version="$(read_version "$SCRIPT_DIR/VERSION")" \
-    || fail "No encontré una VERSION instalada válida en $SCRIPT_DIR."
-  command -v jq >/dev/null 2>&1 || fail "Falta 'jq' para consultar la última release."
-  CHECK_FILE="$(mktemp "$TMP_ROOT/ralph-update-check.XXXXXX")" \
-    || fail "No pude crear el temporal para consultar la release."
-  trap 'rm -f "$CHECK_FILE"' EXIT
-  api_url="${RALPH_RELEASE_API_URL:-https://api.github.com/repos/$RELEASE_REPO/releases/latest}"
-  curl --fail --silent --show-error --location \
-    --output "$CHECK_FILE" "$api_url" \
-    || fail "consulta fallida: no pude consultar la última release estable."
-  latest_tag="$(jq -er '.tag_name // empty' "$CHECK_FILE" 2>/dev/null)" \
-    || fail "consulta fallida: la respuesta no contiene tag_name."
-  case "$latest_tag" in
-    v*) latest_version="${latest_tag#v}" ;;
-    *) fail "La última release tiene un tag inesperado: $latest_tag." ;;
-  esac
-  valid_version "$latest_version" \
-    || fail "La última release tiene una VERSION inválida: $latest_version."
-  if [ "$current_version" = "$latest_version" ]; then
-    printf '✅ actual: v%s.\n' "$current_version"
-  else
-    printf '⬆️  actualización disponible: v%s (instalada: v%s).\n' \
-      "$latest_version" "$current_version"
-  fi
-}
-
 [ "$#" -eq 1 ] || fail "Uso: $0 <VERSION>"
 TARGET_VERSION="$1"
-if [ "$TARGET_VERSION" = '--check' ]; then
-  check_latest_release
-  exit 0
-fi
 valid_version "$TARGET_VERSION" || fail "VERSION inválida: $TARGET_VERSION."
 
 INSTALLED_VERSION="$(read_version "$SCRIPT_DIR/VERSION")" \
