@@ -31,6 +31,9 @@ Read the full diff of the PR. Then, independently:
 - Gates are split between this host and CI. Run every gate assigned to this
   host. Verify every CI-only gate against the exact PR head SHA (the commit you
   have checked out); a check that ran on an older commit proves nothing.
+- Wait for CI synchronously (`gh pr checks <PR> --watch`). Never use Monitor,
+  scheduled wake-ups, background tasks or subagents: each wake-up is a new
+  turn, and the orchestrator only receives the text of your last turn.
 - Do not modify tracked files or create commits while reviewing.
 - Check that the new tests actually fail without the change when that is cheap to
   establish. A test that passes against an empty implementation is not a test.
@@ -62,12 +65,17 @@ not emit PASS either.
 
 Do not publish a comment yourself. Return the complete review body in your final
 result; the orchestrator publishes that exact body and records its remote state.
-Do not use `gh pr comment` or `gh pr review`.
+Do not use `gh pr comment` or `gh pr review`. The final message is the only
+thing the orchestrator reads: a review written in an earlier turn is lost, so
+if you ever find yourself "already done", write the full review again.
 
 The review body must be precise, concise and actionable. Its reader is another agent
 with no memory of your reasoning, so:
 
-- One numbered item per finding, ordered most blocking first.
+- One numbered item per finding, ordered most blocking first. A gate that is
+  missing, failing or unverifiable is also a numbered item. A
+  `CHANGES_REQUESTED` with no numbered item is discarded as an infrastructure
+  failure and the review is run again.
 - Each item names the file and line, states what is wrong in one sentence, and
   states what must change. No essays, no restating the diff back.
 - Never write "consider" or "maybe" — if it is not blocking, leave it out.
