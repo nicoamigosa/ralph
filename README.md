@@ -426,6 +426,8 @@ corrida y escriben checkpoint; `unknown` registra el error y no espera.
 | `prompt_review.md` | Claude: revisar el PR y emitir el veredicto |
 | `prompt_revise.md` | Codex: atender los comentarios de la revisión |
 | `prompt_conflicts.md` | Codex: resolver los conflictos al poner la rama al día con la base |
+| `update.sh` | Descarga y verifica una release antes de actualizar la instalación |
+| `MANIFEST` | Paths de los archivos que forman la distribución |
 | `VERSION` | Release instalada; la compara `update.sh --check` |
 | `last_run.md` | Checkpoint, generado al detenerse por límite/error global (no se versiona) |
 
@@ -534,16 +536,50 @@ cuál está instalada. No se usa subtree ni submodule ni copia desde `main`:
 ninguno fija ni verifica la versión que se ejecuta.
 
 - Instalar/actualizar: `ralph/update.sh <VERSION>` descarga esa release,
-  verifica su SHA-256, rechaza modificaciones locales en archivos comunes y
-  aplica sólo los archivos del manifiesto; preserva `runs/`, checkpoints y toda
-  `.ralph/`. Nunca se autoactualiza durante una corrida; el diff queda para un
-  PR normal.
+  verifica el tarball contra `SHA256SUMS`, rechaza modificaciones locales en
+  archivos comunes y aplica sólo los paths de `MANIFEST`; preserva `runs/`,
+  checkpoints y toda `.ralph/`. Mientras `once.sh` corre, el lock remoto
+  `refs/ralph/lock` impide actualizar. El updater nunca crea commits: el diff
+  queda para un PR normal.
 - Comprobar atraso: `ralph/update.sh --check` compara `VERSION` con la última
   release estable y responde "actual", "actualización disponible" o "consulta
   fallida" (una consulta fallida **no** significa estar al día).
 
-> Estado: `update.sh` está planificado (issues del repo `nicoamigosa/ralph`).
-> Hasta que exista, instalar es copiar el contenido del tag `v<VERSION>`.
+Cada release publica dos assets con nombres fijos: `ralph-v<VERSION>.tar.gz` y
+`SHA256SUMS`. El segundo contiene el SHA-256 del primero. Para poder detectar
+ediciones locales, `update.sh` también descarga y verifica el tarball de la
+versión actualmente instalada antes de comparar sus archivos del `MANIFEST`.
+Por eso los assets de releases anteriores deben conservarse.
+
+### Publicar una release
+
+Después de pasar `bash -n once.sh update.sh`, `shellcheck once.sh update.sh` y
+`bats tests/`, versioná `VERSION`, commiteá y creá el tag `v<VERSION>`. Construí
+el tarball desde `MANIFEST` para que no entren archivos fuera de la
+distribución:
+
+```bash
+version="$(cat VERSION)"
+stage="$(mktemp -d "${TMPDIR:-/tmp}/ralph-release.XXXXXX")"
+root="$stage/ralph-v$version"
+mkdir -p "$root"
+while IFS= read -r path || [ -n "$path" ]; do
+  case "$path" in ''|'#'*) continue ;; esac
+  mkdir -p "$root/$(dirname "$path")"
+  cp -p "$path" "$root/$path"
+done < MANIFEST
+tar -czf "$stage/ralph-v$version.tar.gz" -C "$stage" "ralph-v$version"
+(cd "$stage" && if command -v shasum >/dev/null 2>&1; then
+  shasum -a 256 "ralph-v$version.tar.gz" > SHA256SUMS
+else
+  sha256sum "ralph-v$version.tar.gz" > SHA256SUMS
+fi)
+gh release create "v$version" "$stage/ralph-v$version.tar.gz" \
+  "$stage/SHA256SUMS" --title "ralph $version"
+```
+
+La publicación se hace sólo después de que el tag exista en el remoto; el
+tarball y su checksum deben corresponder exactamente a ese tag.
 
 ## Notas de diseño
 
