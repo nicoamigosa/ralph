@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output_file=""
+url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output|-o)
+      output_file="${2:?missing curl output path}"
+      shift 2
+      ;;
+    --fail|--silent|--show-error|--location|-f|-s|-S|-L)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+[ -n "$output_file" ] || { printf '%s\n' 'fake curl requires --output' >&2; exit 2; }
+[ -n "$url" ] || { printf '%s\n' 'fake curl requires a URL' >&2; exit 2; }
+
+asset="${url##*/}"
+source_file="${FAKE_RELEASE_ROOT:?missing FAKE_RELEASE_ROOT}/$asset"
+[ -f "$source_file" ] || {
+  printf 'fake release asset missing: %s\n' "$asset" >&2
+  exit 22
+}
+cp "$source_file" "$output_file"
