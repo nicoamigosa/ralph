@@ -71,6 +71,8 @@ download_release() {
     || fail "SHA256SUMS no contiene un checksum válido para $asset."
   actual="$(sha256_file "$archive_file")" \
     || fail "No encontré una herramienta SHA-256 (sha256sum o shasum)."
+  actual="${actual,,}"
+  expected="${expected,,}"
   [ "$actual" = "$expected" ] \
     || fail "Checksum SHA-256 incorrecto para $asset; no se aplicó ningún cambio."
 }

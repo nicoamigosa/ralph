@@ -88,6 +88,22 @@ make_release_fixture() {
   [ "$(test_sha256 "$TEST_REPO/once.sh")" = "$before_once" ]
 }
 
+@test "update accepts uppercase hexadecimal release checksums" {
+  make_release_fixture
+  while read -r hash asset; do
+    printf '%s  %s\n' "${hash^^}" "$asset"
+  done < "$TEST_ROOT/releases/SHA256SUMS" > "$TEST_ROOT/releases/SHA256SUMS.upper"
+  mv "$TEST_ROOT/releases/SHA256SUMS.upper" "$TEST_ROOT/releases/SHA256SUMS"
+
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  export RALPH_RELEASE_BASE_URL='https://releases.invalid/ralph'
+
+  run bash -c 'cd "$1" && bash ./update.sh 1.2.0' _ "$TEST_REPO"
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_REPO/VERSION")" = '1.2.0' ]
+}
+
 @test "update lists local changes in common files and leaves them untouched" {
   make_release_fixture
   printf '%s\n' '# local edit' >> "$TEST_REPO/once.sh"
