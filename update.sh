@@ -123,6 +123,109 @@ read_version() {
   printf '%s\n' "$version"
 }
 
+decimal_compare() {
+  local left="$1" right="$2"
+  left="${left#"${left%%[!0]*}"}"
+  right="${right#"${right%%[!0]*}"}"
+  left="${left:-0}"
+  right="${right:-0}"
+  if [ "${#left}" -gt "${#right}" ]; then
+    return 1
+  elif [ "${#left}" -lt "${#right}" ]; then
+    return 2
+  elif [ "$left" = "$right" ]; then
+    return 0
+  elif [[ "$left" > "$right" ]]; then
+    return 1
+  fi
+  return 2
+}
+
+version_compare() {
+  local left="$1" right="$2" comparison index
+  local -a left_parts=() right_parts=()
+  if [[ "$left" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    left_parts=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+  else
+    return 3
+  fi
+  if [[ "$right" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    right_parts=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+  else
+    return 3
+  fi
+  for index in 0 1 2; do
+    if decimal_compare "${left_parts[$index]}" "${right_parts[$index]}"; then
+      comparison=0
+    else
+      comparison=$?
+    fi
+    case "$comparison" in
+      0) ;;
+      1) return 1 ;;
+      2) return 2 ;;
+      *) return 3 ;;
+    esac
+  done
+  return 0
+}
+
+check_update() {
+  local installed_version check_dir api_file latest_tag comparison
+  installed_version="$(read_version "$SCRIPT_DIR/VERSION")" || {
+    printf 'consulta fallida\n'
+    return 20
+  }
+  check_dir="$(mktemp -d "$TMP_ROOT/ralph-update-check.XXXXXX" 2>/dev/null)" || {
+    printf 'consulta fallida\n'
+    return 20
+  }
+  api_file="$check_dir/releases.json"
+  if ! curl --fail --silent --show-error --location \
+    --output "$api_file" \
+    "https://api.github.com/repos/$RELEASE_REPO/releases?per_page=100" \
+    2>/dev/null; then
+    rm -rf "$check_dir"
+    printf 'consulta fallida\n'
+    return 20
+  fi
+  if ! latest_tag="$(jq -er '
+    if type != "array" then error("releases response is not an array") else
+      [ .[]
+        | select(type == "object")
+        | select(.draft == false and .prerelease == false)
+        | .tag_name
+        | select(type == "string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+      ]
+      | if length == 0 then error("no stable release") else .[0] end
+    end
+  ' "$api_file" 2>/dev/null)"; then
+    rm -rf "$check_dir"
+    printf 'consulta fallida\n'
+    return 20
+  fi
+  rm -rf "$check_dir"
+  if version_compare "$latest_tag" "$installed_version"; then
+    comparison=0
+  else
+    comparison=$?
+  fi
+  case "$comparison" in
+    0|2)
+      printf 'actual\n'
+      return 0
+      ;;
+    1)
+      printf 'actualización disponible: %s\n' "$latest_tag"
+      return 10
+      ;;
+    *)
+      printf 'consulta fallida\n'
+      return 20
+      ;;
+  esac
+}
+
 validate_manifest() {
   local manifest_file="$1" path
   declare -A seen=()
@@ -229,9 +332,14 @@ apply_package() {
   done < <(manifest_paths "$package_root/MANIFEST")
 }
 
+if [ "$#" -eq 1 ] && [ "$1" = '--check' ]; then
+  check_update
+  exit $?
+fi
+
 [ "$#" -eq 1 ] || fail "Uso: $0 <VERSION>"
 case "$1" in
-  -*) fail "Opción no soportada: $1 (\`--check\` llega con #20). Uso: $0 <VERSION>" ;;
+  -*) fail "Opción no soportada: $1. Uso: $0 <VERSION>" ;;
 esac
 TARGET_VERSION="$1"
 valid_version "$TARGET_VERSION" || fail "VERSION inválida: $TARGET_VERSION."

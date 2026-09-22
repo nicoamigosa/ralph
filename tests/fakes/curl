@@ -22,10 +22,17 @@ done
 [ -n "$output_file" ] || { printf '%s\n' 'fake curl requires --output' >&2; exit 2; }
 [ -n "$url" ] || { printf '%s\n' 'fake curl requires a URL' >&2; exit 2; }
 
-asset="${url##*/}"
-source_file="${FAKE_RELEASE_ROOT:?missing FAKE_RELEASE_ROOT}/$asset"
+case "$url" in
+  */releases\?*)
+    source_file="${FAKE_RELEASE_ROOT:?missing FAKE_RELEASE_ROOT}/releases.json"
+    ;;
+  *)
+    asset="${url##*/}"
+    source_file="${FAKE_RELEASE_ROOT:?missing FAKE_RELEASE_ROOT}/$asset"
+    ;;
+esac
 [ -f "$source_file" ] || {
-  printf 'fake release asset missing: %s\n' "$asset" >&2
+  printf 'fake release asset missing: %s\n' "${asset:-releases.json}" >&2
   exit 22
 }
 cp "$source_file" "$output_file"

@@ -150,9 +150,58 @@ make_release_fixture() {
   export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
   export RALPH_RELEASE_BASE_URL='https://releases.invalid/ralph'
 
-  run bash -c 'cd "$1" && bash ./update.sh --check' _ "$TEST_REPO"
+  run bash -c 'cd "$1" && bash ./update.sh --unsupported' _ "$TEST_REPO"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Opción no soportada: --check"* ]]
+  [[ "$output" == *"Opción no soportada: --unsupported"* ]]
   [ "$(cat "$TEST_REPO/VERSION")" = "$before_version" ]
+}
+
+@test "check reports installed release as current" {
+  make_release_fixture
+  printf '%s\n' '[{"tag_name":"v1.1.0","draft":false,"prerelease":false}]' \
+    > "$TEST_ROOT/releases/releases.json"
+
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+
+  run bash -c 'cd "$1" && bash ./update.sh --check' _ "$TEST_REPO"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = 'actual' ]
+}
+
+@test "check reports a newer stable release as available" {
+  make_release_fixture
+  printf '%s\n' '[{"tag_name":"v1.2.0","draft":false,"prerelease":false}]' \
+    > "$TEST_ROOT/releases/releases.json"
+
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+
+  run bash -c 'cd "$1" && bash ./update.sh --check' _ "$TEST_REPO"
+
+  [ "$status" -eq 10 ]
+  [ "$output" = 'actualización disponible: v1.2.0' ]
+}
+
+@test "check ignores pre-releases when selecting the latest stable release" {
+  make_release_fixture
+  printf '%s\n' '[{"tag_name":"v1.2.0-rc.1","draft":false,"prerelease":true},{"tag_name":"v1.1.0","draft":false,"prerelease":false}]' \
+    > "$TEST_ROOT/releases/releases.json"
+
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+
+  run bash -c 'cd "$1" && bash ./update.sh --check' _ "$TEST_REPO"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = 'actual' ]
+}
+
+@test "check reports a failed release query without claiming current" {
+  make_release_fixture
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/missing-releases"
+
+  run bash -c 'cd "$1" && bash ./update.sh --check' _ "$TEST_REPO"
+
+  [ "$status" -eq 20 ]
+  [ "$output" = 'consulta fallida' ]
 }
