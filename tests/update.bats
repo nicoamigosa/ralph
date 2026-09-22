@@ -21,6 +21,10 @@ make_release_fixture() {
     mkdir -p "$TEST_REPO/$(dirname "$manifest_path")"
     cp "$PROJECT_ROOT/$manifest_path" "$TEST_REPO/$manifest_path"
   done < "$PROJECT_ROOT/MANIFEST"
+  # La instalación de prueba se fija en 1.1.0: heredar la VERSION real del repo
+  # ataría estos tests al número de release del día, y en cuanto el repo llega a
+  # 1.2.0 actualizar a 1.2.0 pasa a ser un no-op y --check dice 'actual'.
+  printf '%s\n' '1.1.0' > "$TEST_REPO/VERSION"
   mkdir -p "$release_root"
 
   for version in 1.1.0 1.2.0; do
