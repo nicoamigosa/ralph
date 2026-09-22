@@ -10,8 +10,8 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #
 # Ralph loop — resuelve issues de GitHub sin supervisión, con dos agentes:
 #
-#   Codex (gpt-5.6-luna, xhigh) implementa    →  abre PR
-#   Claude (opus) revisa                      →  PASS ? merge : comentarios
+#   Codex (gpt-6-luna, max) implementa         →  abre PR
+#   Claude (opus, medium) revisa               →  PASS ? merge : comentarios
 #   Codex corrige sobre la misma rama         →  Claude vuelve a revisar
 #
 # Nada se mergea sin un <verdict>PASS</verdict> explícito de Claude. Si tras
@@ -48,13 +48,14 @@ fail() { printf '❌ %s\n' "$*" >&2; exit 1; }
 #   RALPH_MAX_ROUNDS     revisiones de Claude por PR     (default: 3)
 #   RALPH_MAX_ISSUES     issues únicos iniciados por corrida (default: 5)
 #   RALPH_MAX_RUN_SECONDS duración máxima de la corrida (default: 14400)
-#   RALPH_CODEX_MODEL    modelo del implementador        (default: gpt-5.6-luna)
-#   RALPH_CODEX_EFFORT   reasoning effort de Codex       (default: xhigh)
+#   RALPH_CODEX_MODEL    modelo del implementador        (default: gpt-6-luna)
+#   RALPH_CODEX_EFFORT   reasoning effort de Codex       (default: max)
 #   RALPH_CODEX_SANDBOX  sandbox de Codex                (default: workspace-write; .git
 #                           es sólo lectura allí, ralph lo habilita como writable_root,
 #                           ejecuta una sonda de preflight y reemplaza writable_roots
 #                           configurado; danger-full-access no se recomienda)
-#   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus)
+#   RALPH_CLAUDE_MODEL   modelo del revisor              (default: opus = latest Opus)
+#   RALPH_CLAUDE_EFFORT  reasoning effort del revisor   (default: medium)
 #   RALPH_CLAUDE_MAX_BUDGET_USD límite por invocación de Claude (optional)
 #   RALPH_TDD_SKILL      ruta obligatoria a SKILL.md para Codex
 #   RALPH_SMOKE_TEST     smoke test de ambos modelos      (default: 0)
@@ -147,10 +148,11 @@ BRANCH_PREFIX="${RALPH_BRANCH_PREFIX:-ralph/issue-}"
 MAX_ROUNDS="${RALPH_MAX_ROUNDS:-3}"
 MAX_ISSUES="${RALPH_MAX_ISSUES:-5}"
 MAX_RUN_SECONDS="${RALPH_MAX_RUN_SECONDS:-14400}"
-CODEX_MODEL="${RALPH_CODEX_MODEL:-gpt-5.6-luna}"
-CODEX_EFFORT="${RALPH_CODEX_EFFORT:-xhigh}"
+CODEX_MODEL="${RALPH_CODEX_MODEL:-gpt-6-luna}"
+CODEX_EFFORT="${RALPH_CODEX_EFFORT:-max}"
 CODEX_SANDBOX="${RALPH_CODEX_SANDBOX:-workspace-write}"
 CLAUDE_MODEL="${RALPH_CLAUDE_MODEL:-opus}"
+CLAUDE_EFFORT="${RALPH_CLAUDE_EFFORT:-medium}"
 CLAUDE_MAX_BUDGET_USD="${RALPH_CLAUDE_MAX_BUDGET_USD:-}"
 RUN_BUDGET_USD="${RALPH_RUN_BUDGET_USD:-}"
 REVIEWER_GH_TOKEN="${RALPH_REVIEWER_GH_TOKEN:-}"
@@ -252,6 +254,11 @@ case "$DEADLINE_EPOCH" in
 esac
 validate_file_path RALPH_CHECKPOINT_FILE "$CHECKPOINT_FILE"
 validate_tdd_skill
+
+case "$CLAUDE_EFFORT" in
+  low|medium|high|xhigh|max) ;;
+  *) fail "RALPH_CLAUDE_EFFORT debe ser exactamente low, medium, high, xhigh o max." ;;
+esac
 
 AGENT_LOG=""
 LAST_MSG=""
@@ -1325,7 +1332,7 @@ if ! git ls-remote --exit-code --heads origin "$BASE_BRANCH" >/dev/null 2>&1; th
   fi
 fi
 
-echo "🔧 base=$BASE_BRANCH · label=$LABEL · rondas=$MAX_ROUNDS · $CODEX_MODEL($CODEX_EFFORT) → $CLAUDE_MODEL"
+echo "🔧 base=$BASE_BRANCH · label=$LABEL · rondas=$MAX_ROUNDS · $CODEX_MODEL($CODEX_EFFORT) → $CLAUDE_MODEL($CLAUDE_EFFORT)"
 
 # ----------------------------------------------------------------- helpers --
 
@@ -2138,6 +2145,7 @@ run_claude() {
   AGENT_COMMAND=(
     claude
     --model "$CLAUDE_MODEL"
+    --effort "$CLAUDE_EFFORT"
   )
   if [ -n "$CLAUDE_MAX_BUDGET_USD" ]; then
     AGENT_COMMAND+=(--max-budget-usd "$CLAUDE_MAX_BUDGET_USD")
@@ -2423,7 +2431,7 @@ run_smoke_test() {
   local claude_stdout="$RUN_DIR/preflight-claude.stdout.json"
   local claude_stderr="$RUN_DIR/preflight-claude.stderr.log"
   local smoke_rc
-  local -a claude_command=(claude --model "$CLAUDE_MODEL")
+  local -a claude_command=(claude --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT")
 
   if [ "$DRY_RUN" = "1" ] || [ "$SMOKE_TEST" = "0" ]; then
     return 0

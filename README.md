@@ -3,9 +3,9 @@
 Resolves GitHub issues without supervision, using two agents and a real gate:
 
 ```
-Codex (gpt-5.6-luna, xhigh)  implements with the tdd skill  →  opens PR
-Claude (opus)                returns the review              →  PASS ? merge : Codex fixes
-Codex                        fixes on the same branch       →  Claude reviews again
+Codex (gpt-6-luna, max)                implements with the tdd skill  →  opens PR
+Claude (opus, medium)                  returns the review              →  PASS ? merge : Codex fixes
+Codex                                 fixes on the same branch       →  Claude reviews again
 ```
 
 **Nothing is merged without an explicit `<verdict>PASS</verdict>` from Claude.** If
@@ -113,6 +113,26 @@ RALPH_BASE_BRANCH=develop ./ralph/once.sh        # explicit base
 RALPH_MAX_ROUNDS=2 ./ralph/once.sh               # fewer rounds, lower cost
 RALPH_DRY_RUN=1 ./ralph/once.sh                  # read-only plan
 ```
+
+The reviewer defaults to the `opus` alias, which Claude Code resolves to the
+latest Opus model, with `medium` effort. To make that choice explicit, or to
+override it for a run:
+
+```bash
+RALPH_CLAUDE_MODEL=opus RALPH_CLAUDE_EFFORT=medium \
+  ./ralph/once.sh
+```
+
+`RALPH_CLAUDE_EFFORT` accepts `low`, `medium`, `high`, `xhigh`, or `max` and
+is passed to Claude Code as `--effort`. Opus 5.5 uses adaptive thinking; the
+effort level controls its depth, so Ralph does not send a `thinking` or
+`budget_tokens` option. Use `RALPH_SMOKE_TEST=1` to verify model access before
+Ralph queries issues.
+
+Codex defaults to the current `gpt-6-luna` model with `max` reasoning. The
+current Codex catalog does not expose a generic `luna` alias, so a future Luna
+model ID requires updating this default or setting `RALPH_CODEX_MODEL` for the
+run.
 
 ## Real GitHub integration
 
@@ -394,7 +414,7 @@ The exact Codex capture command was:
 
 The exact Claude capture command was:
 
-    claude --model opus --dangerously-skip-permissions --print --output-format json "Respond with exactly: <verdict>PASS</verdict>. Do not modify files, run commands, or use tools."
+    claude --model opus --effort medium --dangerously-skip-permissions --print --output-format json "Respond with exactly: <verdict>PASS</verdict>. Do not modify files, run commands, or use tools."
 
 In both executions, stdout and stderr were redirected to separate files; the
 fixtures contain raw stdout. `codex-0.154.0-truncated.jsonl` is the same real
@@ -484,10 +504,11 @@ come from the environment, `.ralph/config.env`, or `host.env`:
 | `RALPH_MAX_ROUNDS` | `3` |
 | `RALPH_MAX_ISSUES` | `5` |
 | `RALPH_MAX_RUN_SECONDS` | `14400` |
-| `RALPH_CODEX_MODEL` | `gpt-5.6-luna` |
-| `RALPH_CODEX_EFFORT` | `xhigh` |
+| `RALPH_CODEX_MODEL` | `gpt-6-luna` |
+| `RALPH_CODEX_EFFORT` | `max` |
 | `RALPH_CODEX_SANDBOX` | `workspace-write` (in this mode Codex mounts `.git` read-only; ralph enables it as `writable_root` and runs a preflight probe; `danger-full-access` is not recommended) |
-| `RALPH_CLAUDE_MODEL` | `opus` |
+| `RALPH_CLAUDE_MODEL` | `opus` (latest Opus alias) |
+| `RALPH_CLAUDE_EFFORT` | `medium` (`low`, `medium`, `high`, `xhigh`, or `max`) |
 | `RALPH_TDD_SKILL` | required: path to a `SKILL.md` readable by Codex |
 | `RALPH_SMOKE_TEST` | `0` (with `1`, test both models before querying issues) |
 | `RALPH_REVIEWER_GH_TOKEN` | required for the reviewer: a GitHub fine-grained token limited to this repository with read permissions |
