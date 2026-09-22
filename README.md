@@ -1,144 +1,145 @@
 # Ralph
 
-Resuelve issues de GitHub sin supervisión, con dos agentes y un gate real:
+Resolves GitHub issues without supervision, using two agents and a real gate:
 
 ```
-Codex (gpt-5.6-luna, xhigh)  implementa con la skill tdd  →  abre PR
-Claude (opus)                devuelve la revisión         →  PASS ? merge : Codex corrige
-Codex                        corrige sobre la misma rama  →  Claude vuelve a revisar
+Codex (gpt-5.6-luna, xhigh)  implements with the tdd skill  →  opens PR
+Claude (opus)                returns the review              →  PASS ? merge : Codex fixes
+Codex                        fixes on the same branch       →  Claude reviews again
 ```
 
-**Nada se mergea sin un `<verdict>PASS</verdict>` explícito de Claude.** Si tras
-3 rondas de revisión el PR sigue sin pasar, queda abierto y etiquetado
-`ralph-needs-human`: el loop nunca mergea por cansancio, y no vuelve a tocar ese
-PR en corridas posteriores.
+**Nothing is merged without an explicit `<verdict>PASS</verdict>` from Claude.** If
+the PR still does not pass after 3 review rounds, it remains open and is labeled
+`ralph-needs-human`: the loop never merges out of exhaustion, and does not touch
+that PR again in later runs.
 
-El exit code real de cada agente se conserva antes de pasar su salida por `tee`:
-un agente que termina con error nunca puede convertirse en PASS. El veredicto se
-acepta únicamente cuando es la última línea de la salida final de Claude; un
-fallo de `tee` devuelve 70 y detiene la corrida.
+Each agent's real exit code is preserved before its output is passed through
+`tee`: an agent that ends with an error can never become PASS. The verdict is
+accepted only when it is the last line of Claude's final output; a `tee` failure
+returns 70 and stops the run.
 
-La revisión, los checks y el merge quedan ligados al mismo SHA: Ralph compara el
-`HEAD` local con `headRefOid` antes y después de revisar, exige un árbol limpio y
-usa `--match-head-commit` al mergear. Si GitHub tarda en reflejar un push recién
-hecho, sólo reintenta `headRefOid` hasta 5 veces, esperando 2 segundos entre
-lecturas; un `HEAD` local distinto falla de inmediato y nunca se revisa ni
-mergea un SHA que el PR no confirme. `RALPH_MERGE_METHOD` sólo admite
-`--squash`, `--merge` o `--rebase`; cualquier otro valor detiene el preflight.
+The review, checks, and merge stay tied to the same SHA: Ralph compares the
+local `HEAD` with `headRefOid` before and after reviewing, requires a clean tree,
+and uses `--match-head-commit` when merging. If GitHub takes time to reflect a
+newly pushed commit, it retries `headRefOid` up to 5 times, waiting 2 seconds
+between reads; a different local `HEAD` fails immediately, and Ralph never
+reviews or merges a SHA that the PR does not confirm. `RALPH_MERGE_METHOD` only
+accepts `--squash`, `--merge`, or `--rebase`; any other value stops preflight.
 
 ## CI
 
-La política de CI es `required` por defecto. Ralph distingue tres estados:
+The CI policy is `required` by default. Ralph distinguishes three states:
 
-- **CI rojo:** un check terminó con fallo después de ejecutar steps. Ralph deja
-  el detalle en el PR para que Codex lo corrija; no mergea.
-- **CI pendiente:** faltan checks o siguen `queued`/`in_progress`. Ralph espera
-  hasta `RALPH_CI_TIMEOUT_SECONDS` (30 minutos por defecto), deja el issue en
-  `ci_pending` y no manda una corrección ni mergea.
-- **Infraestructura (`ci_infrastructure`):** un job terminó en `failure` o
-  `cancelled` sin ejecutar steps, o su anotación indica que no fue iniciado
-  (por ejemplo, por facturación o límite de gasto). Ralph reintenta el poll hasta
-  `RALPH_MAX_INFRA_RETRIES`, sin consumir una ronda ni comentar CI rojo; si
-  persiste, detiene la corrida con rc 70. El mensaje cita la anotación y el
-  comando `gh api repos/<slug>/check-runs/<id>/annotations`, y el motivo queda
-  en `RUN_DIR/summary.json`.
+- **Red CI:** a check finished with a failure after running steps. Ralph leaves
+  the details on the PR for Codex to fix; it does not merge.
+- **Pending CI:** checks are missing or remain `queued`/`in_progress`. Ralph
+  waits up to `RALPH_CI_TIMEOUT_SECONDS` (30 minutes by default), leaves the
+  issue in `ci_pending`, and does not send a fix or merge.
+- **Infrastructure (`ci_infrastructure`):** a job ended in `failure` or
+  `cancelled` without running steps, or its annotation says it was not started
+  (for example, because of billing or a spending limit). Ralph retries polling
+  up to `RALPH_MAX_INFRA_RETRIES`, without consuming a round or commenting on
+  red CI; if it persists, it stops the run with rc 70. The message cites the
+  annotation and the command `gh api repos/<slug>/check-runs/<id>/annotations`,
+  and the reason is recorded in `RUN_DIR/summary.json`.
 
-Antes de consultar issues, el preflight inspecciona el último run de CI de la
-base y exige que haya ejecutado al menos un step. Si no arrancó por esa
-infraestructura, falla la corrida con `ci_infrastructure`. Para repos sin CI,
-`RALPH_CI_POLICY=none` es una excepción explícita y queda avisada en la salida.
+Before querying issues, preflight inspects the base branch's latest CI run and
+requires it to have run at least one step. If it did not start because of that
+infrastructure problem, the run fails with `ci_infrastructure`. For repositories
+without CI, `RALPH_CI_POLICY=none` is an explicit exception and is reported in
+the output.
 
-Cada corrida calcula un deadline global al comenzar: `RALPH_MAX_RUN_SECONDS`
-(4 horas por defecto). También limita a `RALPH_MAX_ISSUES` (5 por defecto) los
-issues únicos iniciados; los reintentos por tope no consumen otro cupo. Al vencer
-cualquiera de esos límites, Ralph guarda checkpoint, termina sin iniciar otro
-agente ni merge, y registra `stop_reason=deadline` o `stop_reason=max_issues`.
-Las esperas de CI y de reset del proveedor se acotan al mismo deadline. El
-preflight requiere una implementación GNU de `timeout`: elige `gtimeout` cuando
-está disponible (Homebrew `coreutils` en macOS) y luego `timeout` en Linux; si
-ninguna es usable, detiene la corrida con instrucciones de instalación.
+Each run calculates a global deadline at startup: `RALPH_MAX_RUN_SECONDS` (4
+hours by default). It also limits the number of unique issues started to
+`RALPH_MAX_ISSUES` (5 by default); limit retries do not consume another slot.
+When either limit expires, Ralph saves a checkpoint, ends without starting
+another agent or merging, and records `stop_reason=deadline` or
+`stop_reason=max_issues`. CI and provider reset waits are bounded by the same
+deadline. Preflight requires a GNU implementation of `timeout`: it chooses
+`gtimeout` when available (Homebrew `coreutils` on macOS), then `timeout` on
+Linux; if neither is usable, it stops the run with installation instructions.
 
-`RALPH_CLAUDE_MAX_BUDGET_USD` agrega `--max-budget-usd` a cada invocación de
-Claude, incluido el smoke test. `RALPH_RUN_BUDGET_USD` es un tope estimado de
-coste de Claude para toda la corrida: cuando el coste acumulado reportado por
-Claude alcanza o supera ese valor, Ralph no inicia otro agente y registra
-`stop_reason=budget`. No es una medición exacta de facturación ni un presupuesto
-conjunto de Claude y Codex; el techo duro de Codex se configura en su proveedor.
+`RALPH_CLAUDE_MAX_BUDGET_USD` adds `--max-budget-usd` to every Claude
+invocation, including the smoke test. `RALPH_RUN_BUDGET_USD` is an estimated
+Claude cost cap for the entire run: when Claude's reported accumulated cost
+reaches or exceeds it, Ralph does not start another agent and records
+`stop_reason=budget`. It is not an exact billing measurement or a shared Claude
+and Codex budget; Codex's hard ceiling is configured with its provider.
 
-El proyecto puede declarar sus gates con
-`RALPH_REQUIRED_CHECKS_JSON='["CI / test","ShellCheck"]'`. Ralph consulta los
-`check-runs` y `statuses` del SHA exacto que revisó Claude: cada nombre declarado
-debe terminar en `success`; `skipped`, `neutral`, `cancelled`, `pending` y los
-resultados ausentes no habilitan el merge. Los checks exitosos adicionales no
-reemplazan uno obligatorio. Si no se declara la lista, todos los resultados del
-SHA deben ser exitosos y al menos uno debe existir.
+The project can declare its gates with
+`RALPH_REQUIRED_CHECKS_JSON='["CI / test","ShellCheck"]'`. Ralph queries the
+`check-runs` and `statuses` for the exact SHA Claude reviewed: every declared
+name must end in `success`; `skipped`, `neutral`, `cancelled`, `pending`, and
+missing results do not enable a merge. Additional successful checks do not
+replace a required one. If the list is not declared, all results for the SHA
+must be successful and at least one must exist.
 
-La protección de la base también es `required` por defecto:
-`RALPH_REQUIRE_PROTECTION=1` consulta los rulesets activos de la rama base,
-comprueba que cubran los checks de `RALPH_REQUIRED_CHECKS_JSON` y rechaza
-cualquier bypass para la identidad que mergea. Si se configura una identidad
-revisora distinta con `RALPH_REVIEW_IDENTITY`, el ruleset debe exigir una
-aprobación o el check `ralph-review`; antes del merge, esa aprobación o check
-debe corresponder al SHA revisado y a esa identidad. `RALPH_REQUIRE_PROTECTION=0`
-queda reservado al sandbox de pruebas, avisa explícitamente y se registra en
-`RUN_DIR/summary.json`. La ausencia de `--auto` no desactiva esta protección:
-el merge inmediato sigue respetando las reglas aplicables del servidor.
+Base branch protection is also `required` by default:
+`RALPH_REQUIRE_PROTECTION=1` queries the active rulesets for the base branch,
+checks that they cover the checks in `RALPH_REQUIRED_CHECKS_JSON`, and rejects
+any bypass for the merging identity. If a separate reviewer identity is
+configured with `RALPH_REVIEW_IDENTITY`, the ruleset must require an approval or
+the `ralph-review` check; before merging, that approval or check must match the
+reviewed SHA and that identity. `RALPH_REQUIRE_PROTECTION=0` is reserved for
+the test sandbox, is explicitly reported, and is recorded in
+`RUN_DIR/summary.json`. Omitting `--auto` does not disable this protection:
+immediate merging still follows the server's applicable rules.
 
-Después de pedir el merge, Ralph consulta el PR hasta confirmar `state=MERGED`
-con un `mergeCommit.oid` SHA válido. El timeout es de 10 minutos por defecto y
-se configura con `RALPH_MERGE_TIMEOUT_SECONDS`. Si el PR queda encolado hasta
-vencerlo, registra `merge_pending`, conserva ramas y issue, y detiene la corrida
-por defecto; `RALPH_MERGE_PENDING_POLICY=continue` permite seguir con otros
-issues independientes.
-Si GitHub ya borró la ref remota de la rama al completar el merge, Ralph la
-considera eliminada y continúa con el borrado local, el hook post-merge y el
-cierre del issue.
+After requesting the merge, Ralph polls the PR until it confirms `state=MERGED`
+with a valid `mergeCommit.oid` SHA. The timeout is 10 minutes by default and is
+configured with `RALPH_MERGE_TIMEOUT_SECONDS`. If the PR remains queued until
+the timeout, it records `merge_pending`, preserves the branch and issue, and
+stops the run by default; `RALPH_MERGE_PENDING_POLICY=continue` allows it to
+continue with other independent issues.
+If GitHub has already deleted the branch's remote ref after completing the
+merge, Ralph considers it deleted and continues with local deletion, the
+post-merge hook, and closing the issue.
 
-## Es agnóstico al proyecto
+## Project agnostic
 
-Instalá una release etiquetada como `ralph/` en cualquier repo con remoto de
-GitHub y funciona (ver [Distribución y versión](#distribución-y-versión)). No
-asume lenguaje, framework ni test runner: los agentes deducen los comandos de test,
-lint y tipos leyendo `AGENTS.md`, `CLAUDE.md`, `README`, `CONTRIBUTING.md` y el
-manifest del proyecto (`Makefile`, `package.json`, `pyproject.toml`,
-`Cargo.toml`, `go.mod`, `.github/workflows/`…). Si esos archivos y el manifest
-discrepan, mandan las instrucciones de agente.
+Install a tagged `ralph/` release in any repository with a GitHub remote and it
+works (see [Distribution and version](#distribution-and-version)). It assumes
+no language, framework, or test runner: agents infer test, lint, and type-check
+commands by reading `AGENTS.md`, `CLAUDE.md`, `README`, `CONTRIBUTING.md`, and
+the project's manifest (`Makefile`, `package.json`, `pyproject.toml`,
+`Cargo.toml`, `go.mod`, `.github/workflows/`…). If those files disagree with the
+manifest, the agent instructions take precedence.
 
-## Uso
+## Usage
 
 ```bash
-./ralph/once.sh                                  # base = trunk del repo (main/master)
-RALPH_BASE_BRANCH=develop ./ralph/once.sh        # base explícita
-RALPH_MAX_ROUNDS=2 ./ralph/once.sh               # menos rondas, menos gasto
-RALPH_DRY_RUN=1 ./ralph/once.sh                  # plan de solo lectura
+./ralph/once.sh                                  # base = repository trunk (main/master)
+RALPH_BASE_BRANCH=develop ./ralph/once.sh        # explicit base
+RALPH_MAX_ROUNDS=2 ./ralph/once.sh               # fewer rounds, lower cost
+RALPH_DRY_RUN=1 ./ralph/once.sh                  # read-only plan
 ```
 
-## Integración real con GitHub
+## Real GitHub integration
 
-La suite que usa GitHub real no forma parte de `bats tests/` ni de la CI normal.
-Se lanza explícitamente con `make integration` o desde el workflow manual
-`.github/workflows/integration.yml`. El destino por defecto es
-`nicoamigosa/ralph-sandbox`; para otro sandbox se debe configurar el slug exacto
-en ambos valores antes de ejecutar:
+The suite that uses real GitHub is not part of `bats tests/` or normal CI. Run
+it explicitly with `make integration` or from the manual workflow
+`.github/workflows/integration.yml`. The default target is
+`nicoamigosa/ralph-sandbox`; for another sandbox, configure the exact slug in
+both values before running:
 
 ```bash
 export REPO_SLUG=nicoamigosa/ralph-sandbox
 export RALPH_SANDBOX_SLUGS=nicoamigosa/ralph-sandbox
-export GH_TOKEN='token-con-contents-issues-y-pull-requests-write'
-export RALPH_REVIEWER_GH_TOKEN='token-distinto-de-solo-lectura'
+export GH_TOKEN='token-with-contents-issues-and-pull-requests-write'
+export RALPH_REVIEWER_GH_TOKEN='different-read-only-token'
 make integration
 ```
 
-El harness compara `REPO_SLUG` con la allowlist antes de ejecutar `gh auth
-setup-git`, clonar, crear issues o hacer cualquier otra escritura. Un slug fuera
-de la allowlist termina con código 2. `GH_TOKEN` y
-`RALPH_REVIEWER_GH_TOKEN` deben ser credenciales distintas; no se escriben en
-archivos `.env`.
+The harness compares `REPO_SLUG` with the allowlist before running `gh auth
+setup-git`, cloning, creating issues, or performing any other write. A slug
+outside the allowlist exits with code 2. `GH_TOKEN` and
+`RALPH_REVIEWER_GH_TOKEN` must be different credentials; they are not written to
+`.env` files.
 
-### Preparar `ralph-sandbox`
+### Prepare `ralph-sandbox`
 
-El sandbox debe tener el label `ready-for-agent` y un workflow de pull request
-cuyo job se llame `test`. La prueba mínima puede ser:
+The sandbox must have the `ready-for-agent` label and a pull request workflow
+whose job is named `test`. The minimal test can be:
 
 ```yaml
 name: Sandbox CI
@@ -151,104 +152,105 @@ jobs:
       - run: test ! -e .ralph-integration-fail
 ```
 
-En Settings → Rules → Rulesets, crear un ruleset activo para `main` que exija
-el status check `test` y no tenga bypass actors. No exigir aprobaciones humanas:
-la identidad que ejecuta la suite debe poder mergear cuando `test` está verde,
-pero no debe saltarse el ruleset. El workflow debe estar en `main` antes de
-lanzar la suite para que GitHub ejecute el check en cada PR.
+In Settings → Rules → Rulesets, create an active ruleset for `main` that
+requires the `test` status check and has no bypass actors. Do not require human
+approvals: the identity running the suite must be able to merge when `test` is
+green, but must not bypass the ruleset. The workflow must be on `main` before
+launching the suite so GitHub runs the check on every PR.
 
-La suite crea un issue por escenario, sustituye Codex y Claude por fixtures bajo
-`tests/integration/`, y comprueba el estado remoto. Ejecuta, en orden, PASS con
-CI verde (merge), PASS con CI rojo (PR abierto), rechazo (PR abierto con
-comentario) y error del agente (sin merge). Al finalizar cierra los issues,
-cierra los PR no mergeados y borra sus ramas. El PR mergeado permanece como
-historial inmutable de GitHub; la limpieza garantiza que no queden PR abiertos
-ni ramas de los escenarios. Se puede limitar la corrida, por ejemplo,
+The suite creates one issue per scenario, replaces Codex and Claude with
+fixtures under `tests/integration/`, and checks the remote state. In order, it
+runs PASS with green CI (merge), PASS with red CI (open PR), rejection (open PR
+with a comment), and agent error (no merge). At the end it closes the issues,
+closes unmerged PRs, and deletes their branches. The merged PR remains as
+immutable GitHub history; cleanup ensures no scenario PRs or branches remain
+open. You can limit the run, for example,
 `RALPH_INTEGRATION_SCENARIOS=pass-green make integration`.
 
-La base **nunca** es la rama en la que estés parado: es el trunk del repo,
-detectado con `gh repo view` (`main` o `master`, según el repo). Ahí
-se mergea cada PR aprobado, y de ahí sale la rama del siguiente issue.
+The base is **never** the branch you are currently on: it is the repository
+trunk, detected with `gh repo view` (`main` or `master`, depending on the
+repository). Every approved PR is merged there, and the next issue's branch is
+created from it.
 
-`RALPH_DRY_RUN=1` imprime el plan del selector —prioridad, host, padres,
-blockers, exclusión por revisión humana y PR existente— y termina antes de
-checkout, agentes, labels, push o merge. También lee la ref remota de lock: si
-hay otra corrida activa lo informa y nunca reclama ni modifica esa ref. Sirve
-para inspeccionar una corrida sin modificar el repositorio ni GitHub.
+`RALPH_DRY_RUN=1` prints the selector plan —priority, host, parents, blockers,
+human-review exclusion, and existing PR—then ends before checkout, agents,
+labels, push, or merge. It also reads the remote lock ref: if another run is
+active, it reports it and never claims or modifies that ref. This lets you
+inspect a run without modifying the repository or GitHub.
 
-Requisitos para una corrida completa: Bash **5 o superior**, `git`, `gh`
-(autenticado, scope `repo`), `jq`, `codex`, `claude`, remoto `origin`, y
-**working tree limpio** — el script salta entre ramas y mergea. Además,
-`RALPH_TDD_SKILL` debe apuntar a un `SKILL.md` legible; Ralph lo agrega sólo al
-contexto de Codex. Antes de consultar issues, el preflight valida las sesiones
-de Codex (`codex login status`), Claude (`claude auth status --json`) y GitHub
-(`gh auth status`), comprueba `jq` y verifica las versiones mínimas soportadas:
-Codex `0.154.0`, Claude `2.1.277` y gh `2.45.0`. Las versiones quedan en
-`run.log`, `summary.json` y `summary.md`.
+Requirements for a complete run: Bash **5 or newer**, `git`, `gh` (authenticated
+with `repo` scope), `jq`, `codex`, `claude`, an `origin` remote, and a **clean
+working tree** —the script switches branches and merges. In addition,
+`RALPH_TDD_SKILL` must point to a readable `SKILL.md`; Ralph adds it only to
+Codex's context. Before querying issues, preflight validates Codex
+(`codex login status`), Claude (`claude auth status --json`), and GitHub
+(`gh auth status`) sessions, checks `jq`, and verifies the minimum supported
+versions: Codex `0.154.0`, Claude `2.1.277`, and gh `2.45.0`. Versions are
+recorded in `run.log`, `summary.json`, and `summary.md`.
 
-`RALPH_SMOKE_TEST=1` habilita una llamada mínima a ambos modelos después del
-preflight. Un modelo inaccesible detiene la corrida como error de configuración,
-antes de listar o tocar issues; queda desactivado por defecto porque consume
-presupuesto. El dry-run sigue sin exigir login de Codex o Claude, aunque sí
-necesita `git`, `gh` y `jq` para construir el plan. En macOS,
-instalá Bash con `brew install bash` y anteponé `$(brew --prefix bash)/bin` al
-`PATH`. `once.sh` usa los formatos nativos de `date` para Darwin y Linux y
-temporales bajo `${TMPDIR:-/tmp}`, sin requerir utilidades GNU adicionales. El
-plan dry-run usa únicamente esas herramientas de lectura.
+`RALPH_SMOKE_TEST=1` enables a minimal call to both models after preflight. An
+inaccessible model stops the run as a configuration error, before listing or
+touching issues; it is disabled by default because it consumes budget. Dry-run
+still does not require Codex or Claude login, although it does need `git`, `gh`,
+and `jq` to build the plan. On macOS, install Bash with `brew install bash` and
+prepend `$(brew --prefix bash)/bin` to `PATH`. `once.sh` uses the native `date`
+formats for Darwin and Linux and temporary files under `${TMPDIR:-/tmp}`, with
+no additional GNU utilities required. The dry-run plan uses only those
+read-only tools.
 
-## Cómo elige los issues
+## How issues are selected
 
-1. Issues abiertos con el label `ready-for-agent`, **por número ascendente**.
-   La consulta usa un límite explícito alto (`1000`) para no heredar el tope
-   predeterminado de 30 resultados de `gh`; ese límite sólo afecta la consulta,
-   no la cantidad de issues que el selector intenta procesar.
-2. Antes de crear una rama, vuelve a leer y validar el body, el estado y los
-   labels de cada candidato. Un `gh issue view` fallido detiene la pasada
-   (nunca se interpreta como un body sin dependencias). Un issue con
-   `ralph-needs-human` se omite, igual que un PR que tenga ese label.
-3. Excluye los **épicos**: cualquier issue referenciado por otro bajo `## Parent`.
-   Para detectarlos, Ralph inspecciona también hijos cerrados o sin el label de
-   candidatos.
-4. Respeta dependencias: salta los que tienen blockers abiertos bajo
-   `## Blocked by`. El estado de cada blocker se consulta **en el momento de
-   evaluarlo**, no del listado cacheado al inicio de la pasada: la API de GitHub
-   es eventualmente consistente y justo tras cerrar un issue todavía lo devuelve
-   abierto, bloqueando de mentira a sus dependientes. Consultarlo en vivo además
-   los desbloquea dentro de la misma pasada (por eso el merge a la base ocurre
-   antes de seguir: los dependientes heredan el código).
+1. Open issues with the `ready-for-agent` label, **in ascending number order**.
+   The query uses an explicit high limit (`1000`) so it does not inherit gh's
+   default limit of 30 results; that limit affects only the query, not the number
+   of issues the selector tries to process.
+2. Before creating a branch, it rereads and validates each candidate's body,
+   state, and labels. A failed `gh issue view` stops the pass (it is never
+   interpreted as a body with no dependencies). An issue with
+   `ralph-needs-human` is skipped, as is a PR with that label.
+3. It excludes **epics**: any issue referenced by another under `## Parent`.
+   To detect them, Ralph also inspects closed children and children without the
+   candidate label.
+4. It respects dependencies: it skips issues with open blockers under
+   `## Blocked by`. Each blocker's state is queried **when it is evaluated**, not
+   from the list cached at the start of the pass: GitHub's API is eventually
+   consistent and may still return an issue as open immediately after it was
+   closed, falsely blocking its dependents. Live queries also unblock them
+   within the same pass (which is why the merge to the base happens before
+   continuing: dependents inherit the code).
 
-Antes de evaluar dependencias, Ralph detecta el host local con `uname -s`:
-`Darwin` es `macos` y `Linux` es `linux`; cualquier otro sistema detiene la
-corrida. Un issue con `ralph-host:macos` o `ralph-host:linux` sólo se procesa en
-ese host. Sin ninguno de esos labels puede ejecutarse en ambos. Si tiene los dos,
-los labels son contradictorios y el issue queda bloqueado explícitamente. El
-dry-run muestra `host=<requerido> current=<actual>` por issue.
+Before evaluating dependencies, Ralph detects the local host with `uname -s`:
+`Darwin` is `macos` and `Linux` is `linux`; any other system stops the run. An
+issue with `ralph-host:macos` or `ralph-host:linux` is processed only on that
+host. With neither label it can run on either host. If it has both, the labels
+contradict each other and the issue is explicitly blocked. Dry-run shows
+`host=<required> current=<current>` for each issue.
 
-Antes de invocar a cada agente, Ralph repite la validación de estado, labels y
-blockers. Si el issue pierde `ready-for-agent`, se cierra, se bloquea o recibe
-`ralph-needs-human` mientras la corrida está en curso, no se invoca ningún
-agente y la rama queda preservada para la siguiente pasada.
+Before invoking each agent, Ralph repeats the state, label, and blocker
+validation. If the issue loses `ready-for-agent`, is closed, becomes blocked, or
+receives `ralph-needs-human` while the run is in progress, no agent is invoked
+and the branch is preserved for the next pass.
 
-## Orden de prioridad
+## Priority order
 
-El orden por defecto es el número de issue, que rara vez coincide con la
-prioridad. `RALPH_ISSUE_ORDER` lo fija sin tocar los issues:
+The default order is the issue number, which rarely matches priority.
+`RALPH_ISSUE_ORDER` sets it without touching issues:
 
 ```bash
 RALPH_ISSUE_ORDER="127 124 126 128" ./ralph/once.sh
 ```
 
-Esos van primero y en ese orden; el resto detrás, por número. Un número que no
-esté abierto y etiquetado se ignora sin ruido: la lista **ordena** el trabajo,
-nunca lo **crea**. Y no salta dependencias — un issue con blockers abiertos se
-sigue posponiendo aunque encabece la lista.
+Those issues come first and in that order; the rest follow by number. A number
+that is not open and labeled is silently ignored: the list **orders** work, it
+never **creates** it. It also does not skip dependencies —an issue with open
+blockers is still postponed even if it heads the list.
 
-Es lo que hay que usar para encadenar varias slices sin intervenir. La
-alternativa —inventar `## Blocked by` entre issues que no dependen entre sí—
-convierte un campo que significa "esto necesita ese código" en un campo de
-prioridad, y luego nadie sabe cuál de las dos cosas quiso decir.
+This is what you should use to chain several slices without intervention. The
+alternative —inventing `## Blocked by` relationships between unrelated issues—
+turns a field that means “this needs that code” into a priority field, and then
+no one knows which of the two meanings was intended.
 
-El formato esperado en el cuerpo del issue:
+Expected format in the issue body:
 
 ```markdown
 ## Parent
@@ -259,314 +261,318 @@ El formato esperado en el cuerpo del issue:
 - #28
 ```
 
-Los encabezados de estas secciones se comparan sin distinguir mayúsculas y
-la sección termina en el siguiente `## `. Cada referencia debe ocupar una
-línea completa (`#N` o `- #N`, con espacios opcionales); se tolera un `\r`
-final. En `## Blocked by`, cualquier línea no vacía fuera de ese formato
-bloquea el issue y Ralph informa explícitamente el error.
+Section headings are compared case-insensitively, and a section ends at the next
+`## `. Each reference must occupy a complete line (`#N` or `- #N`, with
+optional spaces); a trailing `\r` is accepted. Under `## Blocked by`, any
+non-empty line outside that format blocks the issue, and Ralph reports the error
+explicitly.
 
-## Idempotencia
+## Idempotence
 
-Si una corrida se corta (Ctrl-C, tope de uso, caída), la siguiente **reutiliza**
-la rama y el PR existentes en vez de recrearlos, y salta lo ya mergeado. Volver
-a correr `./ralph/once.sh` siempre es seguro.
+If a run is interrupted (Ctrl-C, usage limit, crash), the next one **reuses** the
+existing branch and PR instead of recreating them, and skips anything already
+merged. Running `./ralph/once.sh` again is always safe.
 
-Al comenzar cada issue, Ralph ejecuta `git fetch origin`. Si la rama del issue
-sólo existe en el remoto, la recupera con tracking y revisa el PR existente sin
-volver a invocar Codex. Cuando existen ambas copias, exige igualdad o un
-fast-forward; una divergencia conserva la rama, etiqueta el PR (o el issue si
-no hay PR abierto) como `ralph-needs-human` y no lanza agentes.
+At the start of each issue, Ralph runs `git fetch origin`. If the issue branch
+exists only remotely, it restores it with tracking and reviews the existing PR
+without invoking Codex again. When both copies exist, it requires equality or a
+fast-forward; a divergence preserves the branch, labels the PR (or the issue if
+there is no open PR) `ralph-needs-human`, and does not launch agents.
 
-Antes de implementar consulta PRs abiertos, cerrados y mergeados asociados a la
-rama o al issue. Un PR ya mergeado con el issue todavía abierto se reconcilia
-aplicando `RALPH_CLOSE_POLICY`, en lugar de crear otra rama o implementación.
+Before implementing, it queries open, closed, and merged PRs associated with the
+branch or issue. An already merged PR whose issue is still open is reconciled by
+applying `RALPH_CLOSE_POLICY`, rather than creating another branch or
+implementation.
 
-Después del preflight, cada corrida normal aplica `umask 077`, genera un
-`RUN_ID` UTC (`YYYYMMDDTHHMMSSZ-<pid>`) y guarda sus artefactos en
-`$SCRIPT_DIR/runs/$RUN_ID/`. `run.log` recibe toda la salida posterior al
-preflight; `events.log`, `last-message.txt`, `summary.json` y las capturas
-separadas de stdout/stderr de cada agente quedan allí y se conservan al
-terminar. `runs/` está ignorado por el `.gitignore` distribuido, y el dry-run
-no crea ese directorio. El resumen siempre termina con un `stop_reason`
-explícito; `issues_started` cuenta los issues únicos iniciados en la corrida;
-un fallo de issue no se reporta como `no_ready_issues`.
+After preflight, each normal run applies `umask 077`, generates a UTC `RUN_ID`
+(`YYYYMMDDTHHMMSSZ-<pid>`), and stores its artifacts in
+`$SCRIPT_DIR/runs/$RUN_ID/`. `run.log` receives all output after preflight;
+`events.log`, `last-message.txt`, `summary.json`, and separate stdout/stderr
+captures for each agent remain there after completion. `runs/` is ignored by the
+distributed `.gitignore`, and dry-run does not create that directory. The
+summary always ends with an explicit `stop_reason`; `issues_started` counts
+unique issues started in the run; an issue failure is not reported as
+`no_ready_issues`.
 
-Al salir, el trap conserva el código original y finaliza `summary.json` y
-`summary.md`. El JSON incluye `run_id`, `stop_reason`, `issues_started`, `merged`, `open_prs`,
-`needs_human`, `blocked`, `errors`, `elapsed_seconds` y `usage` con
-`codex_tokens` y `claude_estimated_usd`. `versions.codex`,
-`versions.claude` y `versions.gh` conservan las versiones observadas en el
-preflight. Los cuatro estados de trabajo son listas con números y enlaces a
-issues/PRs; `events.jsonl` conserva un evento
-JSON por línea asociado al issue y, cuando existe, al PR. Un dato de uso que
-el proveedor no entrega es `null`, nunca `0`. `claude_estimated_usd` es sólo
-el coste estimado reportado por el proveedor: Ralph no calcula coste marginal
-de una suscripción ni lo presenta como facturación real. El presupuesto de
-corrida sólo cubre ese coste estimado de Claude; no es un presupuesto conjunto
-con Codex.
+On exit, the trap preserves the original code and finalizes `summary.json` and
+`summary.md`. The JSON includes `run_id`, `stop_reason`, `issues_started`,
+`merged`, `open_prs`, `needs_human`, `blocked`, `errors`, `elapsed_seconds`, and
+`usage` with `codex_tokens` and `claude_estimated_usd`. `versions.codex`,
+`versions.claude`, and `versions.gh` preserve the versions observed during
+preflight. The four work states are lists with issue/PR numbers and links;
+`events.jsonl` preserves one JSON event per line associated with the issue and,
+when present, the PR. A usage value the provider does not supply is `null`,
+never `0`. `claude_estimated_usd` is only the estimated cost reported by the
+provider: Ralph does not calculate subscription marginal cost or present it as
+actual billing. The run budget covers only that estimated Claude cost; it is not
+a shared budget with Codex.
 
-Al terminar una corrida normal, Ralph imprime en stdout la ruta de
-`summary.md`. Si `RALPH_REPORT_ISSUE` contiene un número de issue, publica ese
-archivo como el único comentario adicional en el issue indicado. Si GitHub
-rechaza la publicación, avisa, conserva el archivo y mantiene el código de
-salida original de la corrida.
+At the end of a normal run, Ralph prints the path to `summary.md` on stdout. If
+`RALPH_REPORT_ISSUE` contains an issue number, it publishes that file as the
+only additional comment on the specified issue. If GitHub rejects the
+publication, it warns, preserves the file, and keeps the run's original exit
+code.
 
-## Exclusión entre hosts
+## Host exclusion
 
-Cada corrida normal adquiere atómicamente `refs/ralph/lock` en `origin` con un
-`git push` de creación. El commit de la ref contiene host, PID, inicio y último
-heartbeat; mientras la corrida está activa, Ralph lo renueva con un
-`--force-with-lease` y lo libera con el mismo lease en el trap de salida. Una
-segunda corrida, incluso desde WSL o macOS, sale antes de seleccionar issues,
-agentes, labels, push o merge.
+Each normal run atomically acquires `refs/ralph/lock` on `origin` with a
+creation `git push`. The ref's commit contains the host, PID, start time, and
+last heartbeat; while the run is active, Ralph renews it with
+`--force-with-lease` and releases it with the same lease in the exit trap. A
+second run, even from WSL or macOS, exits before selecting issues, agents,
+labels, pushing, or merging.
 
-El heartbeat se considera vencido después de `RALPH_LOCK_TTL_SECONDS` y puede
-reclamarse con otro compare-and-swap atómico. El valor por defecto es dos veces
-`RALPH_AGENT_TIMEOUT_SECONDS`. La reclamación imprime el host y PID anteriores;
-un lock con metadatos inválidos detiene la corrida (fail-closed). El dry-run
-sólo lee esta ref y nunca la crea, renueva, reclama ni libera.
+The heartbeat is considered expired after `RALPH_LOCK_TTL_SECONDS` and can be
+claimed with another atomic compare-and-swap. The default is twice
+`RALPH_AGENT_TIMEOUT_SECONDS`. A claim prints the previous host and PID; a lock
+with invalid metadata stops the run (fail-closed). Dry-run only reads this ref
+and never creates, renews, claims, or releases it.
 
-Ralph nunca crea commits para tapar trabajo que Codex dejó sin commitear: conserva
-el árbol y detiene la corrida con código 70 para que el estado pueda recuperarse
-manualmente. También detiene la corrida ante fallos de `checkout`, `fetch`,
-`push` o `pull --ff-only`; un conflicto que Codex no resuelve se aborta cuando
-es posible, conserva el árbol si no lo es y deja el PR etiquetado para un humano.
+Ralph never creates commits to hide work Codex left uncommitted: it preserves the
+tree and stops the run with code 70 so the state can be recovered manually. It
+also stops the run on `checkout`, `fetch`, `push`, or `pull --ff-only` failures;
+a conflict Codex does not resolve is aborted when possible, the tree is
+preserved otherwise, and the PR is left labeled for a human.
 
-## Procesos
+## Processes
 
-Cada `codex exec` y `claude` se lanza en su propia sesión/grupo de procesos.
-Cuando existe `setsid` se usa para crear la sesión; en macOS sin `setsid`, Bash
-5 usa job control (`set -m`) para obtener un grupo separado. stdout y stderr se
-transmiten por capturas separadas, pero el grupo del agente queda aislado del
-grupo de `once.sh`: una señal dirigida al agente no termina el orquestador.
+Each `codex exec` and `claude` invocation runs in its own session/process group.
+When `setsid` exists it creates the session; on macOS without `setsid`, Bash 5
+uses job control (`set -m`) to obtain a separate group. stdout and stderr are
+streamed through separate captures, but the agent group is isolated from the
+`once.sh` group: a signal sent to the agent does not terminate the orchestrator.
 
-Al terminar un agente, Ralph termina su grupo completo, incluidos procesos
-huérfanos como servidores, watchers o tests colgados. Comprueba que el grupo no
-sea el suyo antes de hacerlo, por lo que nunca se mata a sí mismo. Un agente que
-termina por señal (`rc >= 128`) es un fallo de infraestructura: no produce
-veredicto ni éxito.
+When an agent ends, Ralph terminates its complete group, including orphaned
+processes such as servers, watchers, or hung tests. It checks that the group is
+not its own before doing so, so it never kills itself. An agent that ends from a
+signal (`rc >= 128`) is an infrastructure failure: it produces neither a
+verdict nor success.
 
-`once.sh` atiende `TERM`, `INT` y `HUP`. Registra la señal, la fase y el issue,
-conserva el árbol y la rama en el estado en que estaban y sale con `128 + señal`;
-no hace checkout ni reset destructivo. También guarda el motivo y los datos de
-la señal en el `summary.json` de la corrida.
+`once.sh` handles `TERM`, `INT`, and `HUP`. It records the signal, phase, and
+issue, preserves the tree and branch as they were, and exits with `128 +
+signal`; it does not perform a checkout or destructive reset. It also stores the
+reason and signal data in the run's `summary.json`.
 
-Cada invocación de Codex o Claude, el hook `RALPH_POST_MERGE_CHECK` y las
-esperas de CI/confirmación de merge pasan por un límite GNU `timeout --kill-after=30s`.
-El límite efectivo nunca supera el tiempo restante de la corrida. Si vence una
-orden, el estado es `timeout` —no un tope del proveedor—, se conserva la rama
-cuando todavía existe y la corrida se detiene; un hook post-merge vencido también
-impide encadenar otro issue.
+Each Codex or Claude invocation, the `RALPH_POST_MERGE_CHECK` hook, and CI/merge
+confirmation waits pass through a GNU `timeout --kill-after=30s` limit. The
+effective limit never exceeds the run's remaining time. If a command times out,
+the state is `timeout` —not a provider limit—, the branch is preserved when it
+still exists, and the run stops; a timed-out post-merge hook also prevents
+chaining another issue.
 
-## Adaptadores JSON de agentes
+## Agent JSON adapters
 
-Codex se ejecuta con `codex exec --json -o "$LAST_MSG"` y Claude con
-`claude --print --output-format json`. Cada ejecución conserva sus archivos
-`<agente>-<n>.stdout.jsonl|json`, `<agente>-<n>.stderr.log` y
-`<agente>-<n>.result.json` bajo `RUN_DIR`; stdout nunca se mezcla con stderr.
+Codex runs with `codex exec --json -o "$LAST_MSG"` and Claude with
+`claude --print --output-format json`. Each execution preserves its
+`<agent>-<n>.stdout.jsonl|json`, `<agent>-<n>.stderr.log`, and
+`<agent>-<n>.result.json` files under `RUN_DIR`; stdout is never mixed with
+stderr.
 
-El contrato interno de ambos adaptadores es:
+The internal contract for both adapters is:
 
 ```json
 {"status":"ok|rate_limited|auth_error|config_error|timeout|failed|unknown","retry_at":null,"limit_scope":"session|weekly|unknown","retryable":false,"exit_code":0,"final_message":null,"error":null}
 ```
 
-`ok` exige exit code cero y una salida terminal válida: `turn.completed` para
-Codex y un objeto `type=result` con campo `result` para Claude. JSON inválido,
-truncado o sin resultado terminal es `failed`; el gate no mergea ese issue.
+`ok` requires exit code zero and a valid terminal output: `turn.completed` for
+Codex and a `type=result` object with a `result` field for Claude. Invalid,
+truncated, or terminal-result-free JSON is `failed`; the gate does not merge
+that issue.
 
-Las salidas soportadas y sus fixtures versionados son Codex CLI **0.154.x**
-(`tests/fixtures/codex-0.154.0-*.jsonl`) y Claude Code **2.1.x**
-(`tests/fixtures/claude-2.1.277-success.json`). Una actualización de cualquiera
-de esos formatos requiere actualizar primero el fixture y el adaptador.
+Supported outputs and their versioned fixtures are Codex CLI **0.154.x**
+(`tests/fixtures/codex-0.154.0-*.jsonl`) and Claude Code **2.1.x**
+(`tests/fixtures/claude-2.1.277-success.json`). Updating either format requires
+updating the fixture and adapter first.
 
-Los fixtures se capturaron de ejecuciones reales en este host. Codex CLI
-reportó la versión 0.154.0 con codex --version y Claude Code reportó la versión
-2.1.277 con claude --version.
+The fixtures were captured from real executions on this host. Codex CLI reported
+version 0.154.0 with `codex --version`, and Claude Code reported version 2.1.277
+with `claude --version`.
 
-El comando exacto de captura de Codex fue:
+The exact Codex capture command was:
 
     codex exec --json -o "$capture_dir/last-message.txt" --skip-git-repo-check "Respond with exactly: real codex fixture capture. Do not modify files, run commands, or use tools."
 
-El comando exacto de captura de Claude fue:
+The exact Claude capture command was:
 
     claude --model opus --dangerously-skip-permissions --print --output-format json "Respond with exactly: <verdict>PASS</verdict>. Do not modify files, run commands, or use tools."
 
-En ambas ejecuciones stdout y stderr se redirigieron a archivos separados; los
-fixtures contienen el stdout crudo. codex-0.154.0-truncated.jsonl es el mismo
-stdout real de Codex cortado a mitad del evento turn.completed.
+In both executions, stdout and stderr were redirected to separate files; the
+fixtures contain raw stdout. `codex-0.154.0-truncated.jsonl` is the same real
+Codex stdout truncated halfway through the `turn.completed` event.
 
-## Fallos del revisor vs. rechazos
+## Reviewer failures vs. rejections
 
-Claude no publica comentarios: si la ejecución falla antes de devolver su
-cuerpo, el estado remoto queda en `phase=revisión`, con la misma ronda y SHA,
-para que el siguiente intento retome esa revisión sin consumir presupuesto.
-Una respuesta válida se publica una sola vez como el cuerpo exacto; la ronda
-sólo avanza después de que Codex completa la corrección.
+Claude does not publish comments: if execution fails before returning its body,
+the remote state remains at `phase=revisión`, with the same round and SHA, so the
+next attempt can resume that review without consuming budget. A valid response
+is published once as the exact body; the round advances only after Codex
+completes the fix.
 
-Una respuesta sin veredicto bien formado, o un `CHANGES_REQUESTED` sin ningún
-hallazgo numerado, se trata como fallo de infraestructura del revisor: se
-reintenta hasta `RALPH_MAX_INFRA_RETRIES` sin consumir ronda ni publicar nada.
-Agotados los reintentos sigue siendo `CHANGES_REQUESTED` (fail-closed). El
-revisor corre con `--disallowedTools Monitor,ScheduleWakeup,CronCreate,Agent`
-porque cada despertar de una herramienta de segundo plano es un turno nuevo y
-`claude --print` devuelve sólo el último, perdiendo la revisión.
+A response without a well-formed verdict, or a `CHANGES_REQUESTED` with no
+numbered finding, is treated as reviewer infrastructure failure: it is retried
+up to `RALPH_MAX_INFRA_RETRIES` without consuming a round or publishing
+anything. After retries are exhausted it remains `CHANGES_REQUESTED`
+(fail-closed). The reviewer runs with
+`--disallowedTools Monitor,ScheduleWakeup,CronCreate,Agent` because each
+background-tool wake-up is a new turn and `claude --print` returns only the
+last one, losing the review.
 
-## Topes de uso
+## Usage limits
 
-Los adaptadores clasifican un tope sólo desde un evento de error o metadatos
-estructurados del proveedor. Respuestas, diffs, mensajes finales y salida de
-herramientas no son señales de uso. Un `retry_at` sólo se acepta como epoch o
-timestamp RFC3339 con zona dentro de esa señal; si falta, queda `null` y el
-reintento es inmediato, sin inventar una sesión o una semana.
+The adapters classify a limit only from an error event or structured provider
+metadata. Responses, diffs, final messages, and tool output are not usage
+signals. A `retry_at` is accepted only as an epoch or an RFC3339 timestamp with
+a timezone inside that signal; if absent, it remains `null` and the retry is
+immediate, without inventing a session or week.
 
-Cada issue admite como máximo `RALPH_MAX_LIMIT_RETRIES` reintentos. Un reset
-fiable se espera sólo hasta ese instante y queda acotado por
-`RALPH_DEADLINE_EPOCH` cuando existe. `auth_error` y `config_error` detienen la
-corrida y escriben checkpoint; `unknown` registra el error y no espera.
+Each issue allows at most `RALPH_MAX_LIMIT_RETRIES` retries. A reliable reset is
+awaited only until that instant and is bounded by `RALPH_DEADLINE_EPOCH` when it
+exists. `auth_error` and `config_error` stop the run and write a checkpoint;
+`unknown` records the error and does not wait.
 
-## Archivos
+## Files
 
-| Archivo | Rol |
+| File | Role |
 |---|---|
-| `once.sh` | Orquestador: selección de issues, ramas, merge, topes de uso |
-| `prompt_implement.md` | Codex: implementar el issue y abrir el PR |
-| `prompt_review.md` | Claude: revisar el PR y emitir el veredicto |
-| `prompt_revise.md` | Codex: atender los comentarios de la revisión |
-| `prompt_conflicts.md` | Codex: resolver los conflictos al poner la rama al día con la base |
-| `update.sh` | Descarga y verifica una release antes de actualizar la instalación |
-| `MANIFEST` | Paths de los archivos que forman la distribución |
-| `VERSION` | Release instalada; `update.sh --check` la compara con la última estable |
-| `last_run.md` | Checkpoint, generado al detenerse por límite/error global (no se versiona) |
+| `once.sh` | Orchestrator: issue selection, branches, merges, usage limits |
+| `prompt_implement.md` | Codex: implement the issue and open the PR |
+| `prompt_review.md` | Claude: review the PR and issue the verdict |
+| `prompt_revise.md` | Codex: address review comments |
+| `prompt_conflicts.md` | Codex: resolve conflicts when updating the branch with the base |
+| `update.sh` | Download and verify a release before updating the installation |
+| `MANIFEST` | Paths of files that make up the distribution |
+| `VERSION` | Installed release; `update.sh --check` compares it with the latest stable release |
+| `last_run.md` | Checkpoint, generated when stopping for a global limit/error (not versioned) |
 
-## Niveles de configuración
+## Configuration levels
 
-`ralph/` es **común e idéntica** en todos los repos que la usan: nunca se edita
-en el proyecto. Lo que varía vive fuera de ella:
+`ralph/` is **shared and identical** in every repository that uses it: it is
+never edited in the project. Variable configuration lives outside it:
 
-| Nivel | Ubicación | Contenido |
+| Level | Location | Contents |
 |---|---|---|
-| Común | `ralph/` | Script, prompts, contratos, tests, updater, `VERSION` |
-| Proyecto | `.ralph/config.env` | Base, labels, checks obligatorios, política de cierre, hook post-merge |
-| Proyecto | `.ralph/prompt_*.local.md` | Restricciones concretas de implementación/revisión, anexadas al prompt común |
-| Host | `~/.config/ralph/host.env` | Capacidad Linux/macOS, rutas (PATH de Homebrew, `gtimeout`), límites locales |
-| Credenciales | Login / keychain / entorno protegido | Autenticación de `gh`, `codex`, `claude`; nunca en config versionada |
+| Shared | `ralph/` | Script, prompts, contracts, tests, updater, `VERSION` |
+| Project | `.ralph/config.env` | Base, labels, required checks, close policy, post-merge hook |
+| Project | `.ralph/prompt_*.local.md` | Concrete implementation/review constraints appended to the shared prompt |
+| Host | `~/.config/ralph/host.env` | Linux/macOS capability, paths (Homebrew `PATH`, `gtimeout`), local limits |
+| Credentials | Login / keychain / protected environment | `gh`, `codex`, and `claude` authentication; never in versioned config |
 
-Al iniciar, Ralph resuelve la raíz con `git rev-parse --show-toplevel`, cambia
-allí su directorio de trabajo y carga `.ralph/config.env`. Después carga
-`${RALPH_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env}` si
-existe. La precedencia es entorno explícito > host > proyecto > defaults; para
-garantizarla, las variables `RALPH_*` que ya estaban en el entorno se capturan
-antes de hacer `source` y se restauran al terminar la carga. Los `.env` son
-código shell de confianza (se hacen `source`), no datos parseados: sólo deben
-contener código que el operador haya auditado.
+At startup, Ralph resolves the root with `git rev-parse --show-toplevel`, moves
+its working directory there, and loads `.ralph/config.env`. It then loads
+`${RALPH_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env}` if it
+exists. Precedence is explicit environment > host > project > defaults; to
+guarantee it, `RALPH_*` variables already in the environment are captured before
+`source` and restored after loading. `.env` files are trusted shell code (they
+are sourced), not parsed data: they must contain only code the operator has
+audited.
 
-Los prompts comunes se leen desde `ralph/` antes de cambiar a la rama de un
-issue. `load_prompt <name>` añade, si existe, `.ralph/<name>.local.md` bajo
-`# Project-specific requirements`; allí viven las restricciones propias del
-proyecto sin modificar los prompts distribuidos.
+Shared prompts are read from `ralph/` before switching to an issue branch.
+`load_prompt <name>` adds `.ralph/<name>.local.md`, when it exists, under
+`# Project-specific requirements`; project-specific constraints live there
+without modifying distributed prompts.
 
-## Configuración
+## Configuration
 
-Salvo `RALPH_TDD_SKILL`, que es obligatorio, todo es opcional; puede venir del
-entorno, `.ralph/config.env` o `host.env`:
+Except for the required `RALPH_TDD_SKILL`, everything is optional; values can
+come from the environment, `.ralph/config.env`, or `host.env`:
 
 | Variable | Default |
 |---|---|
 | `RALPH_LABEL` | `ready-for-agent` |
-| `RALPH_BASE_BRANCH` | trunk del repo (`main`/`master`) |
+| `RALPH_BASE_BRANCH` | repository trunk (`main`/`master`) |
 | `RALPH_BRANCH_PREFIX` | `ralph/issue-` |
 | `RALPH_MAX_ROUNDS` | `3` |
 | `RALPH_MAX_ISSUES` | `5` |
 | `RALPH_MAX_RUN_SECONDS` | `14400` |
 | `RALPH_CODEX_MODEL` | `gpt-5.6-luna` |
 | `RALPH_CODEX_EFFORT` | `xhigh` |
-| `RALPH_CODEX_SANDBOX` | `workspace-write` (en este modo Codex monta `.git` como sólo lectura; ralph lo habilita como `writable_root` y ejecuta una sonda de preflight; `danger-full-access` no se recomienda) |
+| `RALPH_CODEX_SANDBOX` | `workspace-write` (in this mode Codex mounts `.git` read-only; ralph enables it as `writable_root` and runs a preflight probe; `danger-full-access` is not recommended) |
 | `RALPH_CLAUDE_MODEL` | `opus` |
-| `RALPH_TDD_SKILL` | obligatorio: ruta a un `SKILL.md` legible para Codex |
-| `RALPH_SMOKE_TEST` | `0` (con `1`, prueba ambos modelos antes de consultar issues) |
-| `RALPH_REVIEWER_GH_TOKEN` | obligatorio para el revisor: token fine-grained de GitHub, limitado a este repositorio y con permisos de lectura |
-| `RALPH_REQUIRE_REVIEWER_TOKEN` | `1` (sólo `0` junto con `RALPH_REQUIRE_PROTECTION=0` en el sandbox) |
+| `RALPH_TDD_SKILL` | required: path to a `SKILL.md` readable by Codex |
+| `RALPH_SMOKE_TEST` | `0` (with `1`, test both models before querying issues) |
+| `RALPH_REVIEWER_GH_TOKEN` | required for the reviewer: a GitHub fine-grained token limited to this repository with read permissions |
+| `RALPH_REQUIRE_REVIEWER_TOKEN` | `1` (only `0` together with `RALPH_REQUIRE_PROTECTION=0` in the sandbox) |
 | `RALPH_MERGE_METHOD` | `--squash` |
 | `RALPH_MERGE_TIMEOUT_SECONDS` | `600` |
-| `RALPH_MERGE_PENDING_POLICY` | `stop` (`continue` es la alternativa explícita) |
+| `RALPH_MERGE_PENDING_POLICY` | `stop` (`continue` is the explicit alternative) |
 | `RALPH_NEEDS_HUMAN_LABEL` | `ralph-needs-human` |
 | `RALPH_MAX_INFRA_RETRIES` | `3` |
 | `RALPH_MAX_LIMIT_RETRIES` | `3` |
-| `RALPH_DEADLINE_EPOCH` | vacío (sin deadline global) |
+| `RALPH_DEADLINE_EPOCH` | empty (no global deadline) |
 | `RALPH_CI_POLICY` | `required` |
 | `RALPH_CI_TIMEOUT_SECONDS` | `1800` |
-| `RALPH_REQUIRED_CHECKS_JSON` | vacío (usa todos los checks reportados) |
-| `RALPH_AGENT_TIMEOUT_SECONDS` | `1800` (base del TTL del lock) |
+| `RALPH_REQUIRED_CHECKS_JSON` | empty (uses all reported checks) |
+| `RALPH_AGENT_TIMEOUT_SECONDS` | `1800` (lock TTL base) |
 | `RALPH_LOCK_REF` | `refs/ralph/lock` |
 | `RALPH_LOCK_TTL_SECONDS` | `2 × RALPH_AGENT_TIMEOUT_SECONDS` |
-| `RALPH_LOCK_HEARTBEAT_SECONDS` | mitad del TTL (mínimo `1`) |
-| `RALPH_LOCK_HOST` | nombre del host (`uname -n`) |
-| `RALPH_CLOSE_POLICY` | `verified` (valores admitidos: `verified` \| `never`) |
+| `RALPH_LOCK_HEARTBEAT_SECONDS` | half the TTL (minimum `1`) |
+| `RALPH_LOCK_HOST` | host name (`uname -n`) |
+| `RALPH_CLOSE_POLICY` | `verified` (accepted values: `verified` \| `never`) |
 | `RALPH_REQUIRE_PROTECTION` | `1` |
-| `RALPH_MERGE_IDENTITY` | vacío (login de `gh api user`) |
-| `RALPH_REVIEW_IDENTITY` | vacío (sin identidad revisora separada) |
-| `RALPH_ISSUE_ORDER` | vacío (orden por número) |
-| `RALPH_REPORT_ISSUE` | vacío (no publica el resumen; si se define, comenta `summary.md` en ese issue) |
-| `RALPH_POST_MERGE_CHECK` | vacío (sin verificación de producción) |
-| `RUN_DIR` | `$SCRIPT_DIR/runs/<RUN_ID>` (capturas, eventos, `summary.json`/`.md` y contratos de agentes; override explícito conservado para pruebas) |
+| `RALPH_MERGE_IDENTITY` | empty (`gh api user` login) |
+| `RALPH_REVIEW_IDENTITY` | empty (no separate reviewer identity) |
+| `RALPH_ISSUE_ORDER` | empty (order by number) |
+| `RALPH_REPORT_ISSUE` | empty (does not publish the summary; if set, comments `summary.md` on that issue) |
+| `RALPH_POST_MERGE_CHECK` | empty (no production verification) |
+| `RUN_DIR` | `$SCRIPT_DIR/runs/<RUN_ID>` (captures, events, `summary.json`/`.md`, and agent contracts; explicit override preserved for tests) |
 | `RALPH_CHECKPOINT_FILE` | `$SCRIPT_DIR/last_run.md` |
 | `RALPH_HOST_CONFIG` | `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env` |
 
-Con `RALPH_CODEX_SANDBOX=workspace-write`, ralph reemplaza cualquier
-`writable_roots` configurado por el usuario en `~/.codex/config.toml` por la
-raíz `.git` absoluta del repositorio actual. Antes del primer issue ejecuta una
-sonda sin modelo que escribe y borra un archivo allí; si `codex sandbox` no está
-disponible en la plataforma, avisa y continúa. `danger-full-access` evita esa
-restricción, pero no se recomienda porque expone todo el filesystem.
+With `RALPH_CODEX_SANDBOX=workspace-write`, ralph replaces any
+`writable_roots` configured by the user in `~/.codex/config.toml` with the
+current repository's absolute `.git` root. Before the first issue it runs a
+model-free probe that writes and deletes a file there; if `codex sandbox` is not
+available on the platform, it warns and continues. `danger-full-access` avoids
+that restriction, but is not recommended because it exposes the entire
+filesystem.
 
-El revisor recibe `RALPH_REVIEWER_GH_TOKEN` únicamente como `GH_TOKEN` de su
-proceso hijo. El preflight exige que sea distinto del `GH_TOKEN` del
-orquestador. Creá un token fine-grained con acceso sólo al repositorio objetivo
-y permisos de lectura para `Metadata` (obligatorio en GitHub), `Contents`,
-`Issues` y `Pull requests`; guardalo en el entorno protegido del host, nunca en
-`.ralph/config.env` ni en un archivo versionado. `RALPH_REQUIRE_REVIEWER_TOKEN=0`
-sólo se acepta junto con `RALPH_REQUIRE_PROTECTION=0`, reservado para el
-sandbox; en ese caso el revisor no hereda `GH_TOKEN`.
+The reviewer receives `RALPH_REVIEWER_GH_TOKEN` only as `GH_TOKEN` in its child
+process. Preflight requires it to differ from the orchestrator's `GH_TOKEN`.
+Create a fine-grained token with access only to the target repository and read
+permissions for `Metadata` (required by GitHub), `Contents`, `Issues`, and `Pull
+requests`; store it in the host's protected environment, never in
+`.ralph/config.env` or a versioned file. `RALPH_REQUIRE_REVIEWER_TOKEN=0` is
+accepted only together with `RALPH_REQUIRE_PROTECTION=0`, reserved for the
+sandbox; in that case the reviewer does not inherit `GH_TOKEN`.
 
-Los procesos de Codex, Claude y `RALPH_POST_MERGE_CHECK` heredan el entorno
-normal del host —incluidos `PATH`, credenciales y `TMPDIR`— excepto las
-variables `RALPH_*`: la configuración de `once.sh` no se exporta a los agentes
-ni al hook. `RALPH_POST_MERGE_CHECK` recibe el SHA del merge confirmado como
-su primer y único argumento posicional (`$1`); cualquier dato adicional debe
-provenir de su propio entorno no-`RALPH_*` o de archivos externos.
+Codex, Claude, and `RALPH_POST_MERGE_CHECK` processes inherit the host's normal
+environment —including `PATH`, credentials, and `TMPDIR`— except for `RALPH_*`
+variables: `once.sh` configuration is not exported to agents or the hook.
+`RALPH_POST_MERGE_CHECK` receives the confirmed merge SHA as its first and only
+positional argument (`$1`); any additional data must come from its own
+non-`RALPH_*` environment or external files.
 
-## Distribución y versión
+## Distribution and version
 
-`ralph/` se distribuye como **release etiquetada** del repo
-[`nicoamigosa/ralph`](https://github.com/nicoamigosa/ralph); `VERSION` dice
-cuál está instalada. No se usa subtree ni submodule ni copia desde `main`:
-ninguno fija ni verifica la versión que se ejecuta.
+`ralph/` is distributed as a **tagged release** of the repository
+[`nicoamigosa/ralph`](https://github.com/nicoamigosa/ralph); `VERSION` says
+which one is installed. No subtree, submodule, or copy from `main` is used: none
+pins or verifies the version being run.
 
-- Instalar/actualizar: `ralph/update.sh <VERSION>` descarga esa release,
-  verifica el tarball contra `SHA256SUMS`, rechaza modificaciones locales en
-  archivos comunes y aplica sólo los paths de `MANIFEST`; preserva `runs/`,
-  checkpoints y toda `.ralph/`. Mientras `once.sh` corre, el lock remoto
-  `refs/ralph/lock` impide actualizar. El updater nunca crea commits: el diff
-  queda para un PR normal.
-- Comprobar atraso: `ralph/update.sh --check` consulta las releases de GitHub,
-  ignora drafts y pre-releases, y compara `VERSION` con la última release
-  estable. Emite exactamente `actual` (código 0), `actualización disponible: vX.Y.Z`
-  (código 10) o `consulta fallida` (código 20); una consulta fallida
-  **nunca** significa estar al día.
+- Install/update: `ralph/update.sh <VERSION>` downloads that release, verifies
+  the tarball against `SHA256SUMS`, rejects local modifications to shared files,
+  and applies only the paths in `MANIFEST`; it preserves `runs/`, checkpoints,
+  and all of `.ralph/`. While `once.sh` runs, the remote lock
+  `refs/ralph/lock` prevents updates. The updater never creates commits: the
+  diff remains for a normal PR.
+- Check for updates: `ralph/update.sh --check` queries GitHub releases, ignores
+  drafts and pre-releases, and compares `VERSION` with the latest stable
+  release. It emits exactly `actual` (code 0), `actualización disponible: vX.Y.Z`
+  (code 10), or `consulta fallida` (code 20); a failed query **never** means the
+  installation is current.
 
-Cada release publica dos assets con nombres fijos: `ralph-v<VERSION>.tar.gz` y
-`SHA256SUMS`. El segundo contiene el SHA-256 del primero. Para poder detectar
-ediciones locales, `update.sh` también descarga y verifica el tarball de la
-versión actualmente instalada antes de comparar sus archivos del `MANIFEST`.
-Por eso los assets de releases anteriores deben conservarse.
+Each release publishes two assets with fixed names: `ralph-v<VERSION>.tar.gz` and
+`SHA256SUMS`. The latter contains the SHA-256 of the former. To detect local
+edits, `update.sh` also downloads and verifies the tarball for the currently
+installed version before comparing its `MANIFEST` files. Therefore, assets from
+previous releases must be retained.
 
-### Publicar una release
+### Publish a release
 
-Después de pasar `bash -n once.sh update.sh`, `shellcheck once.sh update.sh` y
-`bats tests/`, versioná `VERSION`, commiteá y creá el tag `v<VERSION>`. Construí
-el tarball desde `MANIFEST` para que no entren archivos fuera de la
-distribución:
+After `bash -n once.sh update.sh`, `shellcheck once.sh update.sh`, and
+`bats tests/` pass, version `VERSION`, commit, and create the `v<VERSION>` tag.
+Build the tarball from `MANIFEST` so files outside the distribution are not
+included:
 
 ```bash
 version="$(cat VERSION)"
@@ -588,54 +594,52 @@ gh release create "v$version" "$stage/ralph-v$version.tar.gz" \
   "$stage/SHA256SUMS" --title "ralph $version"
 ```
 
-La publicación se hace sólo después de que el tag exista en el remoto; el
-tarball y su checksum deben corresponder exactamente a ese tag.
+Publish only after the tag exists on the remote; the tarball and its checksum
+must correspond exactly to that tag.
 
-## Notas de diseño
+## Design notes
 
-- **Claude devuelve, Ralph publica y mergea.** Claude no usa `gh pr comment`:
-  su resultado final contiene el cuerpo completo de la revisión y Ralph lo
-  publica exactamente con `gh pr comment`. Después deja otro comentario remoto
-  marcado `<!-- ralph-state -->` con el ID devuelto, PR, fase, ronda, SHA
-  revisado, resultado y estado de merge. La reanudación reconstruye el último
-  registro marcado desde GitHub, por lo que un comentario ajeno posterior no
-  reemplaza la revisión que recibe Codex.
-- **La credencial del revisor es de sólo lectura.** `RALPH_REVIEWER_GH_TOKEN`
-  reemplaza el `GH_TOKEN` del orquestador sólo dentro del proceso de Claude,
-  para que el revisor pueda inspeccionar el PR sin poder publicar comentarios
-  ni mutaciones de GitHub. El token debe estar limitado al repositorio y a
-  permisos de lectura; `RALPH_REQUIRE_REVIEWER_TOKEN=0` es una excepción sólo
-  para el sandbox.
-- **Límite conocido de v1:** no hay aislamiento por contenedor. Claude sigue
-  ejecutándose con `--dangerously-skip-permissions` y puede acceder al workspace
-  y a las capacidades locales que el host le entregue; v1 aísla únicamente la
-  credencial GitHub usada por el revisor.
-- El registro remoto usa eventos inmutables: antes de cada agente guarda la fase
-  y la ronda actual, y sólo avanza la ronda después de completar la corrección.
-  Un tope, timeout o reinicio retoma la misma fase, ronda y SHA. El merge se
-  publica como `merge_pending` y `merged`, y sólo ante un `PASS` bien formado.
-  Este modo **no equivale a una required review de GitHub**: el servidor no
-  garantiza el PASS, sólo el script. Para que lo garantice hace falta una
-  identidad de revisión/merge distinta del implementador y un ruleset sin
-  bypass en la base; mientras no exista, el ruleset sólo puede exigir status
-  checks.
-- **El issue lo cierra el script, no el agente.** `Closes #N` sólo autocierra
-  cuando el PR va contra la rama por defecto; acá la base es configurable.
-- **El cierre depende de la política.** Con `RALPH_CLOSE_POLICY=verified`, el
-  script cierra sólo después de PASS, merge confirmado y un `Closes #N` en el
-  cuerpo del PR. Un `Part of #N`, o cualquier falta de esa declaración, deja el
-  issue abierto y comenta el merge. Con `RALPH_CLOSE_POLICY=never`, nunca usa
-  `gh issue close`, aunque el PR contenga `Closes #N`. El issue lo cierra el
-  script, no el agente; el autocierre nativo de GitHub de `Closes #N` sólo
-  aplica cuando el PR va contra la rama por defecto, pero `verified` hace
-  explícito el cierre tras la verificación.
-- **Codex corre con `network_access=true`** dentro del sandbox `workspace-write`,
-  que es lo mínimo que necesita para `git push` y `gh pr create`.
-- **La rama se pone al día con la base antes de cada revisión**, con `git merge`
-  y nunca `rebase`: el revisor ve lo que de verdad se va a mergear, y si hay
-  conflictos los resuelve Codex sin consumir ronda.
-- **CI verde es condición de merge además del PASS.** Con CI en rojo, el script
-  deja el run fallido como único ítem de revisión y Codex corrige.
-- **Un hook post-merge puede parar la corrida.** `RALPH_POST_MERGE_CHECK`
-  recibe el SHA mergeado; si devuelve ≠0, el issue queda etiquetado y ralph no
-  encadena otro despliegue sobre una producción que no verifica.
+- **Claude returns, Ralph publishes and merges.** Claude does not use `gh pr comment`:
+  its final result contains the complete review body, and Ralph publishes it
+  exactly with `gh pr comment`. It then leaves another remote comment marked
+  `<!-- ralph-state -->` with the returned ID, PR, phase, round, reviewed SHA,
+  result, and merge state. Resumption reconstructs the latest marked record
+  from GitHub, so a later unrelated comment does not replace the review Codex
+  receives.
+- **The reviewer credential is read-only.** `RALPH_REVIEWER_GH_TOKEN` replaces
+  the orchestrator's `GH_TOKEN` only inside Claude's process, so the reviewer
+  can inspect the PR without publishing comments or mutating GitHub. The token
+  must be limited to the repository and read permissions;
+  `RALPH_REQUIRE_REVIEWER_TOKEN=0` is an exception only for the sandbox.
+- **Known v1 limitation:** there is no container isolation. Claude still runs
+  with `--dangerously-skip-permissions` and can access the workspace and local
+  capabilities provided by the host; v1 isolates only the GitHub credential
+  used by the reviewer.
+- The remote log uses immutable events: before each agent it records the current
+  phase and round, and advances the round only after the fix is complete. A
+  limit, timeout, or restart resumes the same phase, round, and SHA. The merge
+  is published as `merge_pending` and `merged`, and only after a well-formed
+  `PASS`. This mode **is not equivalent to a GitHub required review**: the
+  server does not guarantee PASS, only the script. To guarantee it, a review/
+  merge identity separate from the implementer and a no-bypass ruleset on the
+  base are required; until then, the ruleset can require only status checks.
+- **The script closes the issue, not the agent.** `Closes #N` autocloses only
+  when the PR targets the default branch; the base here is configurable.
+- **Closing depends on policy.** With `RALPH_CLOSE_POLICY=verified`, the script
+  closes only after PASS, a confirmed merge, and `Closes #N` in the PR body. A
+  `Part of #N`, or any missing declaration, leaves the issue open and comments
+  on the merge. With `RALPH_CLOSE_POLICY=never`, it never uses `gh issue close`,
+  even if the PR contains `Closes #N`. The script closes the issue, not the
+  agent; GitHub's native `Closes #N` autoclose applies only when the PR targets
+  the default branch, while `verified` makes closure explicit after
+  verification.
+- **Codex runs with `network_access=true`** inside the `workspace-write`
+  sandbox, which is the minimum it needs for `git push` and `gh pr create`.
+- **The branch is updated with the base before each review**, using `git merge`
+  and never `rebase`: the reviewer sees exactly what will be merged, and Codex
+  resolves conflicts without consuming a round.
+- **Green CI is a merge condition in addition to PASS.** With red CI, the
+  script leaves the failed run as the sole review item and Codex fixes it.
+- **A post-merge hook can stop the run.** `RALPH_POST_MERGE_CHECK` receives the
+  merged SHA; if it returns ≠0, the issue is labeled and ralph does not chain
+  another deployment onto production that has not been verified.
