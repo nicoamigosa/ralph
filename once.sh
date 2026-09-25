@@ -3341,7 +3341,7 @@ process_issue() {
     elif [ "$rc" -ne 1 ]; then
       return "$rc"
     fi
-    prior_work="$(git log --oneline "$BASE_BRANCH..$branch" 2>/dev/null)"
+    prior_work="$(git log --oneline "origin/$BASE_BRANCH..$branch" 2>/dev/null)"
   else
     remote_branch_exists "$branch"
     rc=$?
@@ -3355,11 +3355,13 @@ process_issue() {
         return 70
       fi
       echo "📥 rama remota '$branch' recuperada con tracking; continúo con el trabajo existente."
-      prior_work="$(git log --oneline "$BASE_BRANCH..$branch" 2>/dev/null)"
+      prior_work="$(git log --oneline "origin/$BASE_BRANCH..$branch" 2>/dev/null)"
     elif [ "$rc" -ne 1 ]; then
       return "$rc"
     else
-      if ! git checkout -b "$branch" "$BASE_BRANCH" >/dev/null 2>&1; then
+      # Desde origin (recién traído), no desde la base local: puede ir atrasada
+      # respecto de merges hechos en GitHub. La base local no se toca.
+      if ! git checkout --no-track -b "$branch" "origin/$BASE_BRANCH" >/dev/null 2>&1; then
         echo "❌ No pude crear y hacer checkout de '$branch'; detengo la corrida."
         return 70
       fi
