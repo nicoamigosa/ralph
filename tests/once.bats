@@ -1520,6 +1520,7 @@ load test_helper
   git -C "$TEST_REPO" switch -q main
   git -C "$TEST_REPO" add summary.json
   git -C "$TEST_REPO" commit -q -m 'test summary'
+  git -C "$TEST_REPO" push -q origin main
 
   bash -c 'cd "$1" && exec bash "$2/once.sh"' _ "$TEST_REPO" "$PROJECT_ROOT" \
     > "$TEST_ROOT/runner.log" 2>&1 &
@@ -1752,6 +1753,7 @@ load test_helper
   printf '%s\n' 'Base review requirement.' > "$TEST_REPO/.ralph/prompt_review.local.md"
   git -C "$TEST_REPO" add .ralph
   git -C "$TEST_REPO" commit -q -m 'test base prompt'
+  git -C "$TEST_REPO" push -q origin main
 
   run_once
 
@@ -1881,6 +1883,32 @@ load test_helper
   [ "$(git -C "$TEST_REPO" config --get branch.ralph/issue-1.remote)" = origin ]
   [ "$(git -C "$TEST_REPO" config --get branch.ralph/issue-1.merge)" = refs/heads/ralph/issue-1 ]
   [[ "$output" == *"rama remota 'ralph/issue-1' recuperada"* ]]
+}
+
+@test "a new issue branch starts at origin/main even when the local main is behind" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CODEX_HEAD_FILE="$TEST_ROOT/codex-head"
+  export FAKE_CLAUDE_RESULT=$'1. Falta un test.\n<verdict>CHANGES_REQUESTED</verdict>'
+  export RALPH_MAX_ROUNDS=1
+
+  other="$TEST_ROOT/other-clone"
+  git clone -q -b main "$TEST_ORIGIN" "$other"
+  git -C "$other" config user.email "ralph-tests@example.invalid"
+  git -C "$other" config user.name "ralph tests"
+  printf '%s\n' 'merged on GitHub' > "$other/remote-advance.txt"
+  git -C "$other" add remote-advance.txt
+  git -C "$other" commit -q -m 'advance origin main'
+  git -C "$other" push -q origin main
+  advanced="$(git -C "$other" rev-parse HEAD)"
+  local_main_before="$(git -C "$TEST_REPO" rev-parse main)"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ -s "$FAKE_CODEX_HEAD_FILE" ]
+  git -C "$TEST_REPO" merge-base --is-ancestor "$advanced" "$(head -n 1 "$FAKE_CODEX_HEAD_FILE")"
+  [ "$(git -C "$TEST_REPO" rev-parse main)" = "$local_main_before" ]
 }
 
 @test "PR mergeado con issue abierto se reconcilia sin crear rama ni invocar agentes" {

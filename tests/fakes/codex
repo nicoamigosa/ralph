@@ -37,6 +37,10 @@ if [ -n "${FAKE_CODEX_PID_FILE:-}" ]; then
   printf '%s\n' "$$" > "$FAKE_CODEX_PID_FILE"
 fi
 
+if [ "${1:-}" = "exec" ] && [ -n "${FAKE_CODEX_HEAD_FILE:-}" ]; then
+  "$RALPH_TEST_REAL_GIT" rev-parse HEAD >> "$FAKE_CODEX_HEAD_FILE"
+fi
+
 if [ -n "${FAKE_CODEX_LOCK_SEEN_FILE:-}" ]; then
   "$RALPH_TEST_REAL_GIT" ls-remote origin refs/ralph/lock > "$FAKE_CODEX_LOCK_SEEN_FILE"
 fi
