@@ -255,17 +255,24 @@ load test_helper
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_SLEEP_SECONDS=10
   export FAKE_TIMEOUT_LOG="$TEST_ROOT/timeout.log"
+  export FAKE_TIMEOUT_DURATION_OVERRIDE=1
   export RALPH_AGENT_TIMEOUT_SECONDS=1800
   export RALPH_CHECKPOINT_FILE="$TEST_ROOT/last-run.md"
-  deadline="$(( $(date +%s) + 5 ))"
+  # El deadline queda lejos para que el arranque, lento con carga, no lo
+  # alcance antes de lanzar al agente; el timeout falso vence igual en 1s.
+  started_at="$(date +%s)"
+  deadline="$(( started_at + 900 ))"
   export RALPH_DEADLINE_EPOCH="$deadline"
 
   run_once
+  finished_at="$(date +%s)"
 
   [ "$status" -eq 1 ]
-  effective_seconds="$(awk '$1 == "--kill-after=30s" {print $2; exit}' "$FAKE_TIMEOUT_LOG")"
+  jq -e '.stop_reason == "timeout"' "$RUN_DIR/summary.json"
+  effective_seconds="$(awk '$1 == "--kill-after=30s" && /codex exec/ {print $2; exit}' "$FAKE_TIMEOUT_LOG")"
   [ -n "$effective_seconds" ]
-  [ "$effective_seconds" -le 5 ]
+  [ "$effective_seconds" -le "$(( deadline - started_at ))" ]
+  [ "$effective_seconds" -ge "$(( deadline - finished_at ))" ]
   [ "$effective_seconds" -lt "$RALPH_AGENT_TIMEOUT_SECONDS" ]
 }
 
@@ -1468,8 +1475,12 @@ load test_helper
   bash -c 'cd "$1" && exec bash "$2/once.sh"' _ "$TEST_REPO" "$PROJECT_ROOT" \
     > "$TEST_ROOT/runner.log" 2>&1 &
   runner_pid=$!
-  for _ in {1..50}; do
+  # Con carga el arranque tarda más de 5s. El fake de ps garantiza que el
+  # descubrimiento pase por el gate, así que se espera a que aparezca o a que
+  # el runner termine; el tope sólo evita colgar la suite.
+  for _ in {1..1200}; do
     [ -f "$FAKE_SLEEP_DISCOVERY_GATE_FILE" ] && break
+    kill -0 "$runner_pid" 2>/dev/null || break
     "$RALPH_TEST_REAL_SLEEP" 0.1
   done
   [ -f "$FAKE_SLEEP_DISCOVERY_GATE_FILE" ]
