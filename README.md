@@ -91,6 +91,13 @@ configured with `RALPH_MERGE_TIMEOUT_SECONDS`. If the PR remains queued until
 the timeout, it records `merge_pending`, preserves the branch and issue, and
 stops the run by default; `RALPH_MERGE_PENDING_POLICY=continue` allows it to
 continue with other independent issues.
+If GitHub rejects the merge request, Ralph records `merge_failed`, labels the PR
+`ralph-needs-human`, and writes the reason to the log and to a PR comment: the
+error from `gh pr merge`, plus an explicit note when the PR is a draft (GitHub
+refuses to merge drafts even when `mergeStateStatus` is `CLEAN`). Once a human
+removes the label, the next run treats `merge_failed` as a finished attempt,
+not a current review: it brings the branch up to date with the base and reviews
+the new `HEAD` in the same round before merging.
 If GitHub has already deleted the branch's remote ref after completing the
 merge, Ralph considers it deleted and continues with local deletion, the
 post-merge hook, and closing the issue.
