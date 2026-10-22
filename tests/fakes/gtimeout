@@ -9,10 +9,10 @@ if [ -n "${FAKE_TIMEOUT_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FAKE_TIMEOUT_LOG"
 fi
 
-if [ "${FAKE_PS_DELAY_AGENT_PGID:-0}" = "1" ] &&
-    printf '%s\n' "$*" | grep -Fq -- 'codex exec' &&
-    [ -n "${FAKE_PS_AGENT_PGID_SEEN_FILE:-}" ]; then
-  : > "${FAKE_PS_AGENT_PGID_SEEN_FILE}.timeout-started"
+# El log conserva el límite que pidió once.sh; la espera real puede acortarse
+# para que un test vea vencer el timeout sin depender del reloj de la corrida.
+if [ -n "${FAKE_TIMEOUT_DURATION_OVERRIDE:-}" ] && [ "${1:-}" = "--kill-after=30s" ]; then
+  set -- "$1" "$FAKE_TIMEOUT_DURATION_OVERRIDE" "${@:3}"
 fi
 
 if [ -n "${RALPH_TEST_REAL_TIMEOUT:-}" ]; then
