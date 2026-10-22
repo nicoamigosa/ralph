@@ -295,6 +295,8 @@ case "${1:-}" in
           fi
         elif printf '%s\n' "$*" | grep -q ' --json headRefOid'; then
           head_ref_oid
+        elif printf '%s\n' "$*" | grep -q ' --json isDraft'; then
+          printf '%s\n' "${FAKE_PR_IS_DRAFT:-false}"
         elif printf '%s\n' "$*" | grep -q ' --json state,mergeCommit'; then
           merge_state
         elif printf '%s\n' "$*" | grep -q ' --json mergeCommit'; then
@@ -358,6 +360,10 @@ case "${1:-}" in
         ;;
       merge)
         mutation "$*"
+        if [ "${FAKE_PR_MERGE_EXIT:-0}" -ne 0 ]; then
+          printf '%s\n' "${FAKE_PR_MERGE_STDERR:-fake merge failure}" >&2
+          exit "$FAKE_PR_MERGE_EXIT"
+        fi
         ;;
       comment)
         pr_comment "$@"

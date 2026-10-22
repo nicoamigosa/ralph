@@ -3003,6 +3003,117 @@ load test_helper
   ' "$FAKE_GH_STATE_FILE"
 }
 
+@test "merge_failed after a base advance resumes, reviews the new HEAD and merges" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT='<verdict>PASS</verdict>'
+  export FAKE_PR_MERGE_EXIT=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  failed_sha="$(jq -r '
+    [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last |
+      select(.status == "merge_failed") | .reviewed_sha
+  ' "$FAKE_GH_STATE_FILE")"
+  [ -n "$failed_sha" ]
+
+  git -C "$TEST_REPO" switch -q main
+  printf '%s\n' 'base advanced after the failed merge' > "$TEST_REPO/base-advance.txt"
+  git -C "$TEST_REPO" add base-advance.txt
+  git -C "$TEST_REPO" commit -q -m 'advance base after failed merge'
+  git -C "$TEST_REPO" push -q origin main
+  unset FAKE_PR_MERGE_EXIT
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"head_changed"* ]]
+  [[ "$output" == *"🔍 Claude revisa PR #101 (ronda 1/3)"* ]]
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 2 ]
+  new_sha="$(git -C "$TEST_ORIGIN" rev-parse refs/heads/ralph/issue-1)"
+  [ "$new_sha" != "$failed_sha" ]
+  git -C "$TEST_ORIGIN" merge-base --is-ancestor refs/heads/main "$new_sha"
+  grep -Fq "pr merge 101 --squash --match-head-commit $new_sha" "$GH_MUTATION_LOG"
+  jq -e --arg sha "$new_sha" '
+    [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last |
+      .status == "merged" and .round == 1 and .reviewed_sha == $sha
+  ' "$FAKE_GH_STATE_FILE"
+}
+
+@test "merge_failed resume does not merge when a third party moves HEAD after review" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULT='<verdict>PASS</verdict>'
+  export FAKE_PR_MERGE_EXIT=1
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'pr merge 101 ' "$GH_MUTATION_LOG")" -eq 1 ]
+
+  git -C "$TEST_REPO" switch -q main
+  printf '%s\n' 'base advanced after the failed merge' > "$TEST_REPO/base-advance.txt"
+  git -C "$TEST_REPO" add base-advance.txt
+  git -C "$TEST_REPO" commit -q -m 'advance base after failed merge'
+  git -C "$TEST_REPO" push -q origin main
+  unset FAKE_PR_MERGE_EXIT
+  unset RALPH_CI_POLICY
+  export FAKE_HEAD_CHANGED=1
+
+  run_once
+
+  [ "$status" -eq 70 ]
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 2 ]
+  [ "$(grep -c 'pr merge 101 ' "$GH_MUTATION_LOG")" -eq 1 ]
+  [[ "$output" == *"head_changed"* ]]
+}
+
+@test "a merge rejected because the PR is a draft says so in the log and on the PR" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_PR_MERGE_EXIT=1
+  export FAKE_PR_MERGE_STDERR='GraphQL: Pull Request is still a draft (mergePullRequest)'
+  export FAKE_PR_IS_DRAFT=true
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"el PR es borrador"* ]]
+  [[ "$output" == *"Pull Request is still a draft"* ]]
+  grep -Fq 'issues/101/labels' "$FAKE_API_LOG"
+  jq -e '[.comments[] | select(.pr == 101) | .body |
+    select(contains("borrador") and (contains("<!-- ralph-state -->") | not))] |
+    length == 1' "$FAKE_GH_STATE_FILE"
+  jq -e '
+    [.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+      .body | split("<!-- ralph-state -->")[1] | fromjson] | last |
+      .status == "merge_failed"
+  ' "$FAKE_GH_STATE_FILE"
+}
+
+@test "a failed merge logs the gh error" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_PR_MERGE_EXIT=1
+  export FAKE_PR_MERGE_STDERR='X Pull request #101 is not mergeable: the merge commit cannot be cleanly created.'
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"the merge commit cannot be cleanly created"* ]]
+  [[ "$output" != *"borrador"* ]]
+  jq -e '[.comments[] | select(.pr == 101) | .body |
+    select(contains("cannot be cleanly created") and (contains("<!-- ralph-state -->") | not))] |
+    length == 1' "$FAKE_GH_STATE_FILE"
+}
+
 @test "CI timeout preserves the passed review for the next run" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1

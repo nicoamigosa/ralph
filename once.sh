@@ -3279,7 +3279,7 @@ process_issue() {
   local rc issue_ctx commits pr round verdict review_body prior_work reviewed_sha
   local state_status state_phase infra_retries merged_sha ci_ok ci_rc backoff deadline_remaining deadline_now
   local pr_body prs open_pr_record merged_pr merged_pr_body
-  local review_rc
+  local review_rc merge_output merge_reason
   local remote_delete_error
 
   CURRENT_ISSUE="$num"
@@ -3560,7 +3560,11 @@ $PROMPT_IMPLEMENT"
     if [ "$state_status" = "pass" ] || [ "$state_status" = "merge_pending" ]; then
       verdict="<verdict>PASS</verdict>"
     else
-      if [ "$state_status" = "reviewing" ] || [ -z "$reviewed_sha" ]; then
+      # merge_failed cierra el intento anterior: su SHA no es una revisión
+      # vigente y la rama pudo ponerse al día con la base, así que se revisa
+      # HEAD de nuevo en la misma ronda.
+      if [ "$state_status" = "reviewing" ] || [ "$state_status" = "merge_failed" ] ||
+          [ -z "$reviewed_sha" ]; then
         reviewed_sha="$(git rev-parse HEAD 2>/dev/null)" || {
           echo "❌ No pude capturar el SHA a revisar; detengo la corrida."
           return 70
@@ -3681,8 +3685,8 @@ $PROMPT_REVIEW"
         "merge_pending" "open" "$review_body" || return $?
       checkout_or_fail "$BASE_BRANCH" || return 70
       check_run_deadline "la solicitud de merge" || return $?
-      if gh pr merge "$pr" "$MERGE_METHOD" \
-          --match-head-commit "$reviewed_sha" >/dev/null 2>&1; then
+      if merge_output="$(gh pr merge "$pr" "$MERGE_METHOD" \
+          --match-head-commit "$reviewed_sha" 2>&1)"; then
         wait_for_merge "$pr"
         rc=$?
         if [ "$rc" -eq 2 ]; then
@@ -3749,10 +3753,20 @@ $PROMPT_REVIEW"
           echo "🎉 #$num mergeado a $BASE_BRANCH y abierto."
         fi
       else
-        echo "⚠️  El merge de PR #$pr falló (¿conflictos, o checks pendientes?). Queda abierto."
+        # GitHub rechaza mergear un borrador aunque mergeStateStatus sea CLEAN;
+        # se dice explícitamente en lugar de dejar sólo el error de gh.
+        merge_reason="gh pr merge: ${merge_output:-sin detalle}"
+        if [ "$(gh pr view "$pr" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
+          merge_reason="el PR es borrador (márcalo listo con gh pr ready $pr). $merge_reason"
+        fi
+        echo "⚠️  El merge de PR #$pr falló: $merge_reason"
+        echo "   Queda abierto."
         publish_pr_state "$pr" "$num" "merge" "$round" "$reviewed_sha" \
           "merge_failed" "failed" "$review_body" || return $?
         add_label "$pr" "$NEEDS_HUMAN_LABEL"
+        gh pr comment "$pr" --body "🤖 Ralph no pudo mergear el SHA \`$reviewed_sha\` aprobado: $merge_reason
+
+Al quitar \`$NEEDS_HUMAN_LABEL\`, la próxima corrida pone la rama al día con \`$BASE_BRANCH\` y la revisa de nuevo." >/dev/null 2>&1 || true
       fi
       return 0
     fi
