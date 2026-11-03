@@ -25,6 +25,7 @@ load test_helper
 
 @test "preflight requires a dedicated reviewer token and explains how to create it" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export RALPH_REQUIRE_REVIEWER_TOKEN=1
   unset RALPH_REVIEWER_GH_TOKEN
 
   run_once
@@ -33,6 +34,8 @@ load test_helper
   [[ "$output" == *"RALPH_REVIEWER_GH_TOKEN"* ]]
   [[ "$output" == *"fine-grained"* ]]
   [[ "$output" == *"read-only"* ]]
+  [[ "$output" != *"command not found"* ]]
+  [ "${#lines[@]}" -eq 1 ]
   ! grep -Fq -- 'codex exec' "$FAKE_AGENT_LOG"
   ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
 }
