@@ -1487,10 +1487,54 @@ normalize_retry_at() {
   esac
 }
 
+# Sólo se llama después de reconocer un tope estructurado. La zona debe
+# existir y la hora debe sobrevivir un round-trip (rechaza huecos de DST).
+parse_provider_reset_epoch() {
+  local message="$1" pattern hour minute meridiem zone now day candidate clock system
+  pattern='resets ([0-9]{1,2})(:([0-9]{2}))?([aApP][mM])? \(([A-Za-z0-9_+/-]+)\)'
+  [[ "$message" =~ $pattern ]] || return 1
+  hour="$((10#${BASH_REMATCH[1]}))"
+  minute="${BASH_REMATCH[3]:-00}"
+  meridiem="${BASH_REMATCH[4],,}"
+  zone="${BASH_REMATCH[5]}"
+  [[ "$zone" != /* && "$zone" != *..* ]] || return 1
+  [ -f "/usr/share/zoneinfo/$zone" ] || return 1
+  [ "$((10#$minute))" -le 59 ] || return 1
+  if [ -n "$meridiem" ]; then
+    [ "$hour" -ge 1 ] && [ "$hour" -le 12 ] || return 1
+    hour=$((hour % 12))
+    [ "$meridiem" = pm ] && hour=$((hour + 12))
+  else
+    [ "$hour" -le 23 ] && [ -n "${BASH_REMATCH[3]}" ] || return 1
+  fi
+  printf -v clock '%02d:%s' "$hour" "$minute"
+  now="$(date +%s)" || return 1
+  system="$(uname -s)"
+  day="$(TZ="$zone" format_epoch "$now" +%Y-%m-%d)" || return 1
+  if [ "$system" = Darwin ]; then
+    candidate="$(TZ="$zone" date -j -f '%Y-%m-%d %H:%M:%S' "$day $clock:00" +%s 2>/dev/null)" || return 1
+  else
+    candidate="$(TZ="$zone" date --date="$day $clock:00" +%s 2>/dev/null)" || return 1
+  fi
+  if [ "$candidate" -le "$now" ]; then
+    if [ "$system" = Darwin ]; then
+      day="$(TZ="$zone" date -j -v+1d -f '%Y-%m-%d %H:%M:%S' "$day 12:00:00" +%Y-%m-%d)" || return 1
+      candidate="$(TZ="$zone" date -j -f '%Y-%m-%d %H:%M:%S' "$day $clock:00" +%s 2>/dev/null)" || return 1
+    else
+      day="$(TZ="$zone" date --date="$day +1 day" +%Y-%m-%d)" || return 1
+      candidate="$(TZ="$zone" date --date="$day $clock:00" +%s 2>/dev/null)" || return 1
+    fi
+  fi
+  [ "$(TZ="$zone" format_epoch "$candidate" '+%Y-%m-%d %H:%M')" = "$day $clock" ] || return 1
+  [ "$candidate" -gt "$now" ] || return 1
+  printf '%s\n' "$candidate"
+}
+
 provider_signal_from_event() {
   jq -c '
     if (.type == "error" or .type == "turn.failed") then
-      if (.error | type) == "object" then .error
+      if (.api_error_status | tostring) == "429" then .
+      elif (.error | type) == "object" then .error
       elif (.provider_error | type) == "object" then .provider_error
       elif (.metadata.error | type) == "object" then .metadata.error
       elif (.provider_metadata.error | type) == "object" then .provider_metadata.error
@@ -1498,10 +1542,11 @@ provider_signal_from_event() {
       elif (.provider_metadata.rate_limit | type) == "object" then .provider_metadata.rate_limit
       elif (.metadata | type) == "object" then .metadata
       elif (.provider_metadata | type) == "object" then .provider_metadata
-      elif ((.code // .kind // .status // .retry_at) != null) then .
+      elif ((.api_error_status // .code // .kind // .status // .retry_at) != null) then .
       else empty end
     elif (.type == "result" and .is_error == true) then
-      if (.error | type) == "object" then .error
+      if (.api_error_status | tostring) == "429" then .
+      elif (.error | type) == "object" then .error
       elif (.provider_error | type) == "object" then .provider_error
       elif (.metadata.error | type) == "object" then .metadata.error
       elif (.provider_metadata.error | type) == "object" then .provider_metadata.error
@@ -1509,7 +1554,7 @@ provider_signal_from_event() {
       elif (.provider_metadata.rate_limit | type) == "object" then .provider_metadata.rate_limit
       elif (.metadata | type) == "object" then .metadata
       elif (.provider_metadata | type) == "object" then .provider_metadata
-      elif ((.code // .kind // .status // .retry_at) != null) then .
+      elif ((.api_error_status // .code // .kind // .status // .retry_at) != null) then .
       else empty end
     else empty end
   ' <<<"$1"
@@ -1517,10 +1562,10 @@ provider_signal_from_event() {
 
 classify_provider_signal() {
   local signal="$1" code scope retry_at error_message
-  code="$(jq -r 'if (.rate_limit == true or (.rate_limit | type) == "object" or .rate_limited == true) then "rate_limit" else (.code // .error_code // .kind // .type // .status // "") end | tostring | ascii_downcase' <<<"$signal")"
+  code="$(jq -r 'if (.rate_limit == true or (.rate_limit | type) == "object" or .rate_limited == true) then "rate_limit" else (.api_error_status // .code // .error_code // .kind // .status // .type // "") end | tostring | ascii_downcase' <<<"$signal")"
   scope="$(jq -r '(.limit_scope // .scope // "") | tostring | ascii_downcase' <<<"$signal")"
   retry_at="$(normalize_retry_at "$signal")"
-  error_message="$(jq -r '(.message // .detail // .code // "provider error") | tostring' <<<"$signal")"
+  error_message="$(jq -r '(.message // .detail // .result // .code // "provider error") | tostring' <<<"$signal")"
 
   ADAPTER_ERROR="$error_message"
   ADAPTER_RETRY_AT="null"
@@ -1530,7 +1575,16 @@ classify_provider_signal() {
     rate_limit|rate_limited|rate_limit_exceeded|usage_limit|quota_exceeded|too_many_requests|429)
       ADAPTER_STATUS="rate_limited"
       ADAPTER_RETRYABLE=true
+      if [ -z "$retry_at" ]; then
+        retry_at="$(parse_provider_reset_epoch "$error_message" || true)"
+      fi
       [ -n "$retry_at" ] && ADAPTER_RETRY_AT="$retry_at"
+      if [ -z "$scope" ]; then
+        case "${error_message,,}" in
+          *'weekly limit'*) scope=weekly ;;
+          *'session limit'*) scope=session ;;
+        esac
+      fi
       case "$scope" in
         weekly|week) ADAPTER_LIMIT_SCOPE="weekly" ;;
         session|day|daily) ADAPTER_LIMIT_SCOPE="session" ;;
@@ -4161,6 +4215,7 @@ select_issues() {
           fi
           limit_retries=$((limit_retries + 1))
           check_run_deadline "el reintento por tope del issue #$num" || exit $?
+          write_checkpoint "tope del proveedor para #$num; pendiente reintentar la misma fase (${LIMIT_ERROR:-sin detalle})."
           wait_for_reset "$num"
           wait_rc=$?
           if [ "$wait_rc" -eq 2 ]; then

@@ -5,6 +5,15 @@ if [ -n "${FAKE_SLEEP_LOG:-}" ] && [ "${1:-}" != "0.01" ] && [ "${1:-}" != "0.1"
   printf '%s\n' "$*" >> "$FAKE_SLEEP_LOG"
 fi
 
+if [ -n "${FAKE_DATE_FIXED_FILE:-}" ] && [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+  if [ ! -f "$RALPH_CHECKPOINT_FILE" ]; then
+    printf '%s\n' missing-checkpoint >> "$FAKE_SLEEP_LOG"
+  fi
+  now="$(cat "$FAKE_DATE_FIXED_FILE")"
+  printf '%s\n' "$((now + $1))" > "$FAKE_DATE_FIXED_FILE"
+  exit 0
+fi
+
 if [ "${FAKE_SLEEP_NOOP:-0}" = "1" ]; then
   exit 0
 fi
