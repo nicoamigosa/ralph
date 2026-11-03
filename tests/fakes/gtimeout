@@ -24,6 +24,11 @@ if [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'timeout (GNU coreutils) test fallback'
+  exit 0
+fi
+
 case "${1:-}" in
   --kill-after=30s) ;;
   *) exit 125 ;;

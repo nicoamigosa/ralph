@@ -14,6 +14,7 @@ tests/fakes/curl
 tests/fakes/date
 tests/fakes/gh
 tests/fakes/git
+tests/fakes/gnutimeout
 tests/fakes/gtimeout
 tests/fakes/mktemp
 tests/fakes/post-merge-check

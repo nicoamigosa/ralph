@@ -61,6 +61,54 @@ load test_helper
   ! grep -Fq -- 'claude ' "$FAKE_AGENT_LOG"
 }
 
+@test "preflight rejects uutils timeout without a GNU alternative before invoking agents" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  install_timeout_candidates
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"gtimeout, gnutimeout, timeout"* ]]
+  [[ "$output" == *"brew install coreutils"* ]]
+  [[ "$output" == *"gnu-coreutils"* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+}
+
+@test "preflight uses GNU gnutimeout when timeout is uutils" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  install_timeout_candidates gnutimeout
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ -s "$FAKE_AGENT_LOG" ]
+  [ "$(sort -u "$FAKE_TIMEOUT_COMMAND_LOG")" = "gnutimeout" ]
+}
+
+@test "test helper selects a real GNU timeout instead of uutils" {
+  install_timeout_candidates gnutimeout
+
+  run bash -c 'source "$1/tests/test_helper.bash"; printf "%s\n" "$TEST_REAL_TIMEOUT"' _ "$PROJECT_ROOT"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = "$TEST_ROOT/bin/gnutimeout" ]
+}
+
+@test "preflight prefers GNU gtimeout over gnutimeout and timeout" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_CI_POLICY=none
+  install_timeout_candidates gtimeout gnutimeout timeout
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ -s "$FAKE_AGENT_LOG" ]
+  [ "$(sort -u "$FAKE_TIMEOUT_COMMAND_LOG")" = "gtimeout" ]
+}
+
 @test "reviewer receives the dedicated token instead of the orchestrator token" {
   export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
   export FAKE_CODEX_CREATE_PR=1
