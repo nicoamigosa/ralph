@@ -3608,3 +3608,172 @@ load test_helper
   [[ "$output" == *"Fallo fatal (rc=70)"* ]]
   [[ "$output" != *"unbound variable"* ]]
 }
+
+@test "Claude structured 429 calculates the next session reset in its IANA zone" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/claude-2.1.287-session-limit.json"
+  export FAKE_CLAUDE_EXIT=1
+  export FAKE_DATE_FIXED_EPOCH=1917194400 # 2030-10-02 14:00 America/New_York
+  export RALPH_MAX_RUN_SECONDS=60
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/checkpoint.md"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.status == "rate_limited" and .limit_scope == "session" and .retry_at == 1917198000' \
+    "$RUN_DIR/claude-2.result.json"
+  jq -e '.stop_reason == "deadline"' "$RUN_DIR/summary.json"
+  [ -f "$RALPH_CHECKPOINT_FILE" ]
+  run grep -F 'pr merge' "$GH_MUTATION_LOG"
+  [ "$status" -eq 1 ]
+}
+
+@test "Claude session reset rolls over to the next local day" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/claude-2.1.287-session-limit.json"
+  export FAKE_CLAUDE_EXIT=1
+  export FAKE_DATE_FIXED_EPOCH=1917201600 # 2030-10-02 16:00 America/New_York
+  export RALPH_MAX_RUN_SECONDS=60
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/checkpoint.md"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.status == "rate_limited" and .retry_at == 1917284400' "$RUN_DIR/claude-2.result.json"
+}
+
+@test "Claude structured weekly 429 preserves weekly scope" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_STDOUT_FILE="$PROJECT_ROOT/tests/fixtures/claude-2.1.287-weekly-limit.json"
+  export FAKE_CLAUDE_EXIT=1
+  export FAKE_DATE_FIXED_EPOCH=1917194400
+  export RALPH_MAX_LIMIT_RETRIES=0
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/checkpoint.md"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.status == "rate_limited" and .limit_scope == "weekly" and .retry_at == 1917198000' \
+    "$RUN_DIR/claude-2.result.json"
+}
+
+@test "Claude structured 429 without a reliable reset uses bounded immediate retries" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_STDOUT='{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"terminal_reason":"api_error","result":"quota exhausted; reset unavailable"}'
+  export FAKE_CLAUDE_EXIT=1
+  export RALPH_MAX_LIMIT_RETRIES=1
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/checkpoint.md"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.status == "rate_limited" and .limit_scope == "unknown" and .retry_at == null' \
+    "$RUN_DIR/claude-2.result.json"
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 2 ]
+  [ ! -s "$FAKE_SLEEP_LOG" ]
+  [[ "$output" == *"Tope sin retry_at fiable"* ]]
+  jq -e '.stop_reason == "usage_limit"' "$RUN_DIR/summary.json"
+  run grep -F 'pr merge' "$GH_MUTATION_LOG"
+  [ "$status" -eq 1 ]
+}
+
+@test "Claude structured 429 checkpoints then waits and reviews the same SHA without a new round" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_RESULTS="$(cat "$PROJECT_ROOT/tests/fixtures/claude-2.1.287-session-limit.json")|<verdict>PASS</verdict>"
+  export FAKE_DATE_FIXED_EPOCH=1917194400
+  export FAKE_DATE_FIXED_FILE="$TEST_ROOT/clock"
+  printf '%s\n' "$FAKE_DATE_FIXED_EPOCH" > "$FAKE_DATE_FIXED_FILE"
+  export RALPH_MAX_RUN_SECONDS=200000000
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/checkpoint.md"
+  export RALPH_CI_POLICY=none
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_CLAUDE_CALL_COUNT_FILE")" -eq 2 ]
+  [ -s "$FAKE_SLEEP_LOG" ]
+  run grep -F missing-checkpoint "$FAKE_SLEEP_LOG"
+  [ "$status" -eq 1 ]
+  [ "$(cat "$FAKE_DATE_FIXED_FILE")" -eq 1917198000 ]
+  jq -e '[.comments[] | select(.body | contains("<!-- ralph-state -->")) |
+    .body | split("<!-- ralph-state -->")[1] | fromjson] |
+    ([.[] | .round] | unique == [1]) and
+    ([.[] | .reviewed_sha] | unique | length == 1) and
+    (map(.status) | index("pass") != null) and (last.status == "merged")' "$FAKE_GH_STATE_FILE"
+  jq -e '.status == "rate_limited"' "$RUN_DIR/claude-2.result.json"
+  jq -e '.status == "ok" and .final_message == "<verdict>PASS</verdict>"' "$RUN_DIR/claude-3.result.json"
+  grep -Fq 'pr merge' "$GH_MUTATION_LOG"
+}
+
+@test "Claude non-429 api error remains unknown even when its text mentions a session reset" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_STDOUT="$(jq '.api_error_status = 500' "$PROJECT_ROOT/tests/fixtures/claude-2.1.287-session-limit.json")"
+  export FAKE_CLAUDE_EXIT=1
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  jq -e '.status == "unknown" and .retry_at == null and .limit_scope == "unknown"' \
+    "$RUN_DIR/claude-2.result.json"
+  [ "$(grep -c '^claude ' "$FAKE_AGENT_LOG")" -eq 1 ]
+  [ ! -s "$FAKE_SLEEP_LOG" ]
+  run grep -F 'pr merge' "$GH_MUTATION_LOG"
+  [ "$status" -eq 1 ]
+}
+
+@test "Codex equivalent structured 429 uses the session reset adapter contract" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_EXIT=1
+  export FAKE_CODEX_STDOUT='{"type":"error","api_error_status":429,"terminal_reason":"api_error","message":"session limit · resets 3pm (America/New_York)"}'
+  export FAKE_DATE_FIXED_EPOCH=1917194400
+  export RALPH_MAX_LIMIT_RETRIES=0
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/checkpoint.md"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.status == "rate_limited" and .limit_scope == "session" and .retry_at == 1917198000' \
+    "$RUN_DIR/codex-1.result.json"
+  run grep -F 'pr merge' "$GH_MUTATION_LOG"
+  [ "$status" -eq 1 ]
+}
+
+@test "Claude 429 rejects invalid reset zones and nonexistent local reset times" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_EXIT=1
+  export FAKE_DATE_FIXED_EPOCH=1899349200 # 2030-03-10 00:00 America/New_York
+  export RALPH_MAX_LIMIT_RETRIES=0
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/checkpoint.md"
+
+  for reset in '3pm (Invalid/Zone)' '25:00 (America/New_York)' '2:30am (America/New_York)' '3pm (../etc/passwd)'; do
+    export FAKE_CLAUDE_STDOUT="$(jq --arg message "session limit · resets $reset" '.result = $message' \
+      "$PROJECT_ROOT/tests/fixtures/claude-2.1.287-session-limit.json")"
+    run_once
+
+    [ "$status" -eq 0 ]
+    jq -e '.status == "rate_limited" and .retry_at == null' "$RUN_DIR/claude-2.result.json"
+  done
+}
+
+@test "Claude structured 429 accepts a named UTC zone and a midnight reset" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_STDOUT="$(jq '.result = "session limit · resets 12:30am (UTC)"' \
+    "$PROJECT_ROOT/tests/fixtures/claude-2.1.287-session-limit.json")"
+  export FAKE_CLAUDE_EXIT=1
+  export FAKE_DATE_FIXED_EPOCH=1917194400 # 2030-10-02 18:00 UTC
+  export RALPH_MAX_LIMIT_RETRIES=0
+  export RALPH_CHECKPOINT_FILE="$TEST_ROOT/checkpoint.md"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  jq -e '.status == "rate_limited" and .retry_at == 1917217800' "$RUN_DIR/claude-2.result.json"
+}

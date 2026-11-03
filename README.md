@@ -411,11 +411,12 @@ that issue.
 
 Supported outputs and their versioned fixtures are Codex CLI **0.154.x**
 (`tests/fixtures/codex-0.154.0-*.jsonl`) and Claude Code **2.1.x**
-(`tests/fixtures/claude-2.1.277-success.json`). Updating either format requires
+(`tests/fixtures/claude-2.1.277-success.json` and the issue-derived
+`claude-2.1.287-*-limit.json` regression fixtures). Updating either format requires
 updating the fixture and adapter first.
 
-The fixtures were captured from real executions on this host. Codex CLI reported
-version 0.154.0 with `codex --version`, and Claude Code reported version 2.1.277
+The success and truncated fixtures were captured from real executions on this
+host. Codex CLI reported version 0.154.0 with `codex --version`, and Claude Code reported version 2.1.277
 with `claude --version`.
 
 The exact Codex capture command was:
@@ -450,10 +451,30 @@ last one, losing the review.
 ## Usage limits
 
 The adapters classify a limit only from an error event or structured provider
-metadata. Responses, diffs, final messages, and tool output are not usage
-signals. A `retry_at` is accepted only as an epoch or an RFC3339 timestamp with
-a timezone inside that signal; if absent, it remains `null` and the retry is
-immediate, without inventing a session or week.
+metadata. Text in responses, diffs, final messages, and tool output alone
+does not establish a usage limit. Recognized signals include:
+
+| Structured error signal | Classification |
+|---|---|
+| `rate_limit`, `rate_limited`, or a rate/quota error code | `rate_limited` |
+| Claude `type=result`, `is_error=true`, `api_error_status=429` (including `terminal_reason=api_error`) | `rate_limited`, even with `subtype=success` |
+| Codex `error` / `turn.failed` with equivalent 429 metadata | `rate_limited` |
+| Authentication or configuration error code | `auth_error` / `config_error` |
+| Unrecognized error, including other `api_error_status` values | `unknown` |
+
+A `retry_at` is accepted as an epoch or an RFC3339 timestamp with a timezone
+inside that signal. Otherwise, a recognized limit's error text may supply
+`resets <time> (<IANA zone>)`, for example `resets 3pm (America/New_York)` or
+`resets 15:30 (Europe/Madrid)`. Ralph chooses the next occurrence of that local
+clock time, advancing the calendar date when necessary. Invalid zones, times,
+and nonexistent times during a daylight-saving transition leave `retry_at=null`;
+the retry is immediate and bounded by the existing retry cap. Explicit scope
+metadata takes precedence; otherwise `session limit` and `weekly limit` in the
+recognized error text select `session` and `weekly`, respectively. Other text
+leaves the scope `unknown`. Successful final messages never activate this parser.
+
+Before waiting, Ralph saves a checkpoint. A retry resumes the same phase, round,
+and reviewed SHA; it still requires a successful review with an explicit PASS.
 
 Each issue allows at most `RALPH_MAX_LIMIT_RETRIES` retries. A reliable reset is
 awaited only until that instant and is bounded by `RALPH_DEADLINE_EPOCH` when it

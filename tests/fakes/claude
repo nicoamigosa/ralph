@@ -68,6 +68,9 @@ if [ -n "${FAKE_CLAUDE_STDOUT_FILE:-}" ]; then
   cat "$FAKE_CLAUDE_STDOUT_FILE"
 elif [ -n "${FAKE_CLAUDE_STDOUT:-}" ]; then
   printf '%b\n' "$FAKE_CLAUDE_STDOUT"
+elif [[ "$claude_result" == '{'* ]]; then
+  printf '%s\n' "$claude_result"
+  if jq -e '.is_error == true' >/dev/null <<<"$claude_result"; then exit 1; fi
 elif [ "$claude_result" = '__rate_limit__' ]; then
   retry_at="$(( $($RALPH_TEST_REAL_DATE +%s) + 60 ))"
   jq -cn --argjson retry_at "$retry_at" \
