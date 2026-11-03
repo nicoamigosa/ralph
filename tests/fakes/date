@@ -16,6 +16,15 @@ if [ "${FAKE_UNAME_SYSTEM:-}" = "Darwin" ] && [ "${1:-}" = "-d" ]; then
   exit 99
 fi
 
+if [ -n "${FAKE_DATE_FIXED_EPOCH:-}" ] && [ "${1:-}" = "+%s" ]; then
+  if [ -f "${FAKE_DATE_FIXED_FILE:-}" ]; then
+    cat "$FAKE_DATE_FIXED_FILE"
+  else
+    printf '%s\n' "$FAKE_DATE_FIXED_EPOCH"
+  fi
+  exit 0
+fi
+
 if [ "${FAKE_DATE_FAST_FORWARD:-0}" = "1" ] && [ "${1:-}" = "+%s" ]; then
   date_call=0
   if [ -f "${FAKE_DATE_CALL_COUNT_FILE:-}" ]; then
