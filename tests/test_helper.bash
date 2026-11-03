@@ -5,7 +5,16 @@ TEST_REAL_TEE="$(command -v tee)"
 TEST_REAL_GIT="$(command -v git)"
 TEST_REAL_DATE="$(command -v date)"
 TEST_REAL_SLEEP="$(command -v sleep)"
-TEST_REAL_TIMEOUT="$(command -v gtimeout || command -v timeout || true)"
+TEST_REAL_TIMEOUT="$(
+  for candidate in gtimeout gnutimeout timeout; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+        version="$("$candidate" --version 2>/dev/null)" &&
+        [[ "${version%%$'\n'*}" == *"GNU coreutils"* ]]; then
+      command -v "$candidate"
+      break
+    fi
+  done
+)"
 TEST_REAL_MKTEMP="$(command -v mktemp)"
 TEST_REAL_UNAME="$(command -v uname)"
 TEST_REAL_PS="$(command -v ps)"
@@ -100,4 +109,33 @@ teardown() {
 
 run_once() {
   run bash -c 'cd "$1" && bash "$2/once.sh"' _ "$TEST_REPO" "$PROJECT_ROOT"
+}
+
+install_timeout_candidates() {
+  export FAKE_GNU_TIMEOUT_NAMES=" $* "
+  export FAKE_TIMEOUT_COMMAND_LOG="$TEST_ROOT/timeout-commands.log"
+  export FAKE_TIMEOUT_DELEGATE="$PROJECT_ROOT/tests/fakes/timeout"
+  mkdir "$TEST_ROOT/bin"
+  local candidate
+  for candidate in gtimeout gnutimeout timeout; do
+    cat > "$TEST_ROOT/bin/$candidate" <<'SH'
+#!/usr/bin/env bash
+candidate="${0##*/}"
+case "${1:-}" in
+  --version)
+    if [[ "$FAKE_GNU_TIMEOUT_NAMES" == *" $candidate "* ]]; then
+      printf '%s\n' 'timeout (GNU coreutils) 9.5'
+    else
+      printf '%s\n' 'timeout (uutils coreutils) 0.10.0' 'GNU coreutils compatibility'
+    fi
+    exit 0
+    ;;
+  --help) exit 0 ;;
+esac
+printf '%s\n' "$candidate" >> "$FAKE_TIMEOUT_COMMAND_LOG"
+exec "$FAKE_TIMEOUT_DELEGATE" "$@"
+SH
+    chmod +x "$TEST_ROOT/bin/$candidate"
+  done
+  export PATH="$TEST_ROOT/bin:$PATH"
 }
