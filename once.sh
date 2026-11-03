@@ -713,6 +713,17 @@ handle_signal() {
   exit "$exit_code"
 }
 
+# Must be defined before installing the EXIT trap: preflight can fail early.
+release_remote_lock() {
+  [ "$LOCK_HELD" -eq 1 ] || return 0
+  if git push -q --force-with-lease="$LOCK_REF:$LOCK_COMMIT" \
+      origin ":$LOCK_REF" >/dev/null 2>&1; then
+    LOCK_HELD=0
+  else
+    echo "⚠️  No pude liberar el lock remoto; no borro un lock que pudo reclamar otro proceso." >&2
+  fi
+}
+
 cleanup_on_exit() {
   local exit_code=$?
   [ "$SIGNAL_EXITING" -eq 1 ] || terminate_agent_processes
@@ -950,16 +961,6 @@ lock_mark_acquired() {
   LOCK_HELD=1
   LOCK_COMMIT="$oid"
   LOCK_NEXT_HEARTBEAT_MONOTONIC=$((SECONDS + LOCK_HEARTBEAT_SECONDS))
-}
-
-release_remote_lock() {
-  [ "$LOCK_HELD" -eq 1 ] || return 0
-  if git push -q --force-with-lease="$LOCK_REF:$LOCK_COMMIT" \
-      origin ":$LOCK_REF" >/dev/null 2>&1; then
-    LOCK_HELD=0
-  else
-    echo "⚠️  No pude liberar el lock remoto; no borro un lock que pudo reclamar otro proceso." >&2
-  fi
 }
 
 renew_remote_lock() {

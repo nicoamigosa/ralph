@@ -325,7 +325,9 @@ unique issues started in the run; an issue failure is not reported as
 `no_ready_issues`.
 
 On exit, the trap preserves the original code and finalizes `summary.json` and
-`summary.md`. The JSON includes `run_id`, `stop_reason`, `issues_started`,
+`summary.md`. Early preflight failures report their error without Bash cleanup
+errors; cleanup releases the remote lock only if it was acquired. The JSON
+includes `run_id`, `stop_reason`, `issues_started`,
 `merged`, `open_prs`, `needs_human`, `blocked`, `errors`, `elapsed_seconds`, and
 `usage` with `codex_tokens` and `claude_estimated_usd`. `versions.codex`,
 `versions.claude`, and `versions.gh` preserve the versions observed during
