@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# once.sh consulta su propio pgid (`$$`, un ancestro de este proceso) y el del
+# lanzador del agente (un hijo suyo). Sólo la consulta del agente se retrasa:
+# decidirlo por parentesco no depende de cuánto haya avanzado el agente.
+pid_is_caller_ancestor() {
+  local target="$1" pid="$PPID"
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+    [ "$pid" = "$target" ] && return 0
+    pid="$("$RALPH_TEST_REAL_PS" -o ppid= -p "$pid" | tr -d '[:space:]')" || pid=""
+  done
+  return 1
+}
+
 if [ "${FAKE_PS_DELAY_AGENT_PGID:-0}" = "1" ] \
     && [ "${1:-}" = "-o" ] && [ "${2:-}" = "pgid=" ] \
-    && [ "${3:-}" = "-p" ]; then
-  queried_pid="${4:-}"
-  agent_pid=""
-  timeout_started_file="${FAKE_PS_AGENT_PGID_SEEN_FILE:-}.timeout-started"
-  if [ -n "${FAKE_CODEX_PID_FILE:-}" ] && [ -f "$FAKE_CODEX_PID_FILE" ]; then
-    agent_pid="$(tr -d '[:space:]' < "$FAKE_CODEX_PID_FILE")"
-  fi
-  if { [ -n "$agent_pid" ] || [ -f "$timeout_started_file" ]; } \
-      && [ "$queried_pid" != "$agent_pid" ] \
-      && [ ! -f "${FAKE_PS_AGENT_PGID_SEEN_FILE:-}" ]; then
-    : > "$FAKE_PS_AGENT_PGID_SEEN_FILE"
-    printf '\n'
-    exit 0
-  fi
+    && [ "${3:-}" = "-p" ] \
+    && [ ! -f "${FAKE_PS_AGENT_PGID_SEEN_FILE:-}" ] \
+    && ! pid_is_caller_ancestor "${4:-}"; then
+  : > "$FAKE_PS_AGENT_PGID_SEEN_FILE"
+  printf '\n'
+  exit 0
 fi
 
 exec "$RALPH_TEST_REAL_PS" "$@"
