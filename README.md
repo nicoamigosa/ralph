@@ -56,8 +56,11 @@ When either limit expires, Ralph saves a checkpoint, ends without starting
 another agent or merging, and records `stop_reason=deadline` or
 `stop_reason=max_issues`. CI and provider reset waits are bounded by the same
 deadline. Preflight requires a GNU implementation of `timeout`: it chooses
-`gtimeout` when available (Homebrew `coreutils` on macOS), then `timeout` on
-Linux; if neither is usable, it stops the run with installation instructions.
+`gtimeout`, `gnutimeout`, then `timeout`, accepting only a command whose first
+line of `--version` contains `GNU coreutils`. If none qualifies (for example,
+only uutils is available), preflight stops before invoking agents: install
+`brew install coreutils` on macOS or the `gnu-coreutils`/`coreutils` package on
+Linux. The error names all three commands in that order.
 
 `RALPH_CLAUDE_MAX_BUDGET_USD` adds `--max-budget-usd` to every Claude
 invocation, including the smoke test. `RALPH_RUN_BUDGET_USD` is an estimated

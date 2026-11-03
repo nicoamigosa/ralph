@@ -833,15 +833,16 @@ esac
 [ "$LOCK_HEARTBEAT_SECONDS" -gt 0 ] || fail "RALPH_LOCK_HEARTBEAT_SECONDS debe ser un entero positivo."
 
 select_timeout_command() {
-  local candidate
-  for candidate in gtimeout timeout; do
+  local candidate version
+  for candidate in gtimeout gnutimeout timeout; do
     if command -v "$candidate" >/dev/null 2>&1 &&
-        "$candidate" --help >/dev/null 2>&1; then
+        version="$("$candidate" --version 2>/dev/null)" &&
+        [[ "${version%%$'\n'*}" == *"GNU coreutils"* ]]; then
       TIMEOUT_COMMAND="$(command -v "$candidate")"
       return 0
     fi
   done
-  fail "Falta un timeout GNU usable. En macOS instalá 'brew install coreutils' (gtimeout); en Linux instalá el paquete 'coreutils'."
+  fail "Falta un timeout GNU usable (gtimeout, gnutimeout, timeout). En macOS instalá 'brew install coreutils'; en Linux instalá 'gnu-coreutils' o 'coreutils'."
 }
 
 load_prompt() {
