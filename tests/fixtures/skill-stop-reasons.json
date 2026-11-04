@@ -1,0 +1,20 @@
+[
+  {"reason":"running", "meaning":"en curso", "next":"Esperar"},
+  {"reason":"completed", "meaning":"corrida completada", "next":"Reanudar"},
+  {"reason":"run_failed", "meaning":"corrida fallida", "next":"Corregir"},
+  {"reason":"no_ready_issues", "meaning":"sin candidatos", "next":"Reanudar"},
+  {"reason":"max_issues", "meaning":"límite de issues", "next":"Reanudar"},
+  {"reason":"deadline", "meaning":"plazo agotado", "next":"Reanudar"},
+  {"reason":"budget", "meaning":"presupuesto estimado agotado", "next":"Corregir"},
+  {"reason":"usage_limit", "meaning":"límite del proveedor", "next":"Esperar"},
+  {"reason":"timeout", "meaning":"tiempo de agente agotado", "next":"Reanudar"},
+  {"reason":"ci_infrastructure", "meaning":"infraestructura de CI", "next":"Corregir"},
+  {"reason":"merge_pending", "meaning":"merge sin confirmar", "next":"Revisar"},
+  {"reason":"production_unverified", "meaning":"post-merge sin verificar", "next":"Revisar"},
+  {"reason":"issue_failed", "meaning":"issue fallido", "next":"Revisar"},
+  {"reason":"issues_failed", "meaning":"issues fallidos", "next":"Revisar"},
+  {"reason":"signal:TERM", "meaning":"interrumpida por señal", "next":"Reanudar"},
+  {"reason":"signal:INT", "meaning":"interrumpida por señal", "next":"Reanudar"},
+  {"reason":"signal:HUP", "meaning":"interrumpida por señal", "next":"Reanudar"},
+  {"reason":"future_reason", "meaning":"motivo desconocido", "next":"Corregir"}
+]

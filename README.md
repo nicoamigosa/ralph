@@ -591,7 +591,8 @@ sandbox; in that case the reviewer does not inherit `GH_TOKEN`.
 
 Codex, Claude, and `RALPH_POST_MERGE_CHECK` processes inherit the host's normal
 environment —including `PATH`, credentials, and `TMPDIR`— except for `RALPH_*`
-variables: `once.sh` configuration is not exported to agents or the hook.
+configuration and the Claude Code session variables described in the skill
+section below. `once.sh` configuration is not exported to agents or the hook.
 `RALPH_POST_MERGE_CHECK` receives the confirmed merge SHA as its first and only
 positional argument (`$1`); any additional data must come from its own
 non-`RALPH_*` environment or external files.
@@ -697,3 +698,78 @@ must correspond exactly to that tag.
 - **A post-merge hook can stop the run.** `RALPH_POST_MERGE_CHECK` receives the
   merged SHA; if it returns ≠0, the issue is labeled and ralph does not chain
   another deployment onto production that has not been verified.
+
+## Claude Code skill: /ralph
+
+`update.sh <VERSION>` installs a relative project link,
+`.claude/skills/ralph` → `../../ralph/skills/ralph`, when that release includes
+the skill. Repeating the update preserves the link; a foreign file, directory,
+or symlink at that destination causes the update to fail before applying files.
+Symlinked parent directories are also rejected. The link stays uncommitted with
+the release diff for a normal PR; nothing is installed in `~/.claude/skills`.
+Restart Claude Code if needed to discover the new project skill.
+When upgrading with an older updater that predates the skill, run the newly
+installed `ralph/update.sh <VERSION>` once more with the same version to create
+the link; old releases cannot perform this new installation step.
+
+The skill has `disable-model-invocation: true`: invoke it explicitly. Its Bash
+helper only checks configuration, presents artifacts and launches `once.sh`;
+all selection, review, checks and merge decisions remain in `once.sh`.
+
+- `/ralph` or `/ralph plan`: checks updates and authentication, reports presence
+  of `RALPH_TDD_SKILL` and `RALPH_REVIEWER_GH_TOKEN` without their values, then
+  runs the existing read-only selector. It does not launch agents or mutate
+  GitHub. An update-query failure is reported as failure, never as current.
+- `/ralph run`: displays the plan and asks for explicit confirmation. After
+  confirmation it launches with `nohup` and all three standard streams
+  redirected, in a separate session with `setsid` or a separate process group
+  using Bash job control on macOS without `setsid`.
+  The launch log under `ralph/runs/launch.*` captures early errors;
+  the PID is not a success verdict. The run survives the interactive session;
+  `runs/<id>/` and `last_run.md` remain the sources of its result. The helper
+  rejects disabled protection or a disabled reviewer-token requirement.
+- `/ralph report [run-id]`: reads the named run, or the latest run ID with a
+  summary. It explains issues, PRs, merges, protection, estimated Claude cost
+  and stop reason, then proposes one next step without executing it. Missing,
+  malformed or unknown data is never evidence of success. It may inspect
+  adapter results, events, logs, the checkpoint and read-only GitHub queries
+  to explain the cause; it never publishes another report comment.
+
+The helper and `once.sh` share the configuration loader and its precedence:
+exported `RALPH_*` values override project config and host config. Configure
+host paths in `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env` (or the explicit
+`RALPH_HOST_CONFIG`) and secrets in the protected environment. Other `*.env`
+files are not sourced automatically. The skill never prints tokens or config
+contents. Child agents and post-merge hooks also have `CLAUDECODE`,
+`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_*`,
+`CLAUDE_CODE_PARENT_*`, `CLAUDE_CODE_SSE_*`, `CLAUDE_CODE_REMOTE` and
+`CLAUDE_CODE_REMOTE_*` removed to avoid inheriting parent session state/routing.
+`CLAUDE_CODE_EFFORT_LEVEL` is removed because it overrides the explicit
+`--effort` flag. Other `CLAUDE_CODE_*` variables remain host configuration:
+OAuth credentials, cloud-provider selection and TLS settings are needed for
+standalone authentication/connectivity and are not parent session markers.
+See the [Claude Code environment reference](https://code.claude.com/docs/en/env-vars)
+for the child-session marker, effort precedence and authentication variables.
+
+Report interpretation follows these `summary.json` reasons:
+
+| `stop_reason` | Meaning and suggested action |
+| --- | --- |
+| `running` | Still running; wait for the result. |
+| `completed` | Run finished; start a new confirmed run when needed. |
+| `run_failed` | Run failed outside an issue; inspect configuration and artifacts. |
+| `no_ready_issues` | No selectable issues; run again when ready. |
+| `max_issues` | Unique issue cap; resume with a new confirmed run. |
+| `deadline` | Global deadline; resume from the checkpoint. |
+| `budget` | Estimated Claude budget reached; review budget configuration. |
+| `usage_limit` | Provider limit; inspect adapter `retry_at` / `limit_scope` and wait for reset. |
+| `timeout` | Agent timed out; inspect checkpoint before resuming. |
+| `ci_infrastructure` | CI could not run; correct infrastructure before resuming. |
+| `merge_pending` | Merge not confirmed; inspect the PR before another run. |
+| `production_unverified` | Post-merge check failed; inspect the merged PR and hook. |
+| `issue_failed`, `issues_failed` | One or more issues failed; inspect the PR and checkpoint. |
+| `signal:TERM`, `signal:INT`, `signal:HUP` | Interrupted; inspect checkpoint before resuming. |
+
+A recorded `needs_human` PR takes precedence over a generic resume suggestion.
+Unknown reasons require inspecting configuration/artifacts; unknown usage stays
+unknown, not zero. Early failures may have only the launch log and no summary.

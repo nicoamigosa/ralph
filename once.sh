@@ -90,48 +90,9 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" \
   || fail "No pude resolver la raíz del repositorio git."
 cd "$REPO_ROOT" || fail "No pude cambiar a la raíz del repositorio '$REPO_ROOT'."
 
-declare -A EXPLICIT_RALPH_ENV=()
-declare -a EXPLICIT_RALPH_NAMES=()
-EXPLICIT_HOST_CONFIG=0
-while IFS= read -r env_name; do
-  case "$env_name" in
-    RALPH_*)
-      EXPLICIT_RALPH_NAMES+=("$env_name")
-      EXPLICIT_RALPH_ENV["$env_name"]="${!env_name}"
-      [ "$env_name" = RALPH_HOST_CONFIG ] && EXPLICIT_HOST_CONFIG=1
-      ;;
-  esac
-done < <(compgen -e)
-
-restore_explicit_ralph_env() {
-  local env_name
-  for env_name in "${EXPLICIT_RALPH_NAMES[@]}"; do
-    printf -v "$env_name" '%s' "${EXPLICIT_RALPH_ENV[$env_name]}"
-    declare -gx "$env_name"
-  done
-}
-
-load_env_file() {
-  local env_file="$1" required="${2:-0}"
-  if [ -e "$env_file" ] && [ ! -f "$env_file" ]; then
-    fail "La configuración '$env_file' debe ser un archivo regular."
-  fi
-  if [ -f "$env_file" ]; then
-    # Los archivos .env son código shell de confianza, no datos parseados.
-    # shellcheck disable=SC1090
-    if ! source "$env_file"; then
-      fail "No pude cargar la configuración '$env_file'."
-    fi
-  elif [ "$required" -eq 1 ]; then
-    fail "No existe la configuración requerida '$env_file'."
-  fi
-}
-
-load_env_file "$REPO_ROOT/.ralph/config.env"
-restore_explicit_ralph_env
-HOST_CONFIG_PATH="${RALPH_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env}"
-load_env_file "$HOST_CONFIG_PATH" "$EXPLICIT_HOST_CONFIG"
-restore_explicit_ralph_env
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/config.sh
+source "$SCRIPT_DIR/lib/config.sh" || fail 'No pude cargar la configuración compartida de Ralph.'
 
 LABEL="${RALPH_LABEL:-ready-for-agent}"
 # Este es el tamaño de página de la consulta, no un límite de ejecución: cada
@@ -1895,7 +1856,12 @@ build_clean_ralph_env_args() {
   while IFS= read -r env_name; do
     case "$env_name" in
       RALPH_TEST_REAL_*) ;;
-      RALPH_*) CLEAN_RALPH_ENV_ARGS+=(-u "$env_name") ;;
+      # Keep host auth/provider/TLS configuration. Session routing must not
+      # leak, and CLAUDE_CODE_EFFORT_LEVEL overrides the explicit --effort.
+      RALPH_*|CLAUDECODE|CLAUDE_CODE_ENTRYPOINT|CLAUDE_CODE_CHILD_SESSION|\
+      CLAUDE_CODE_SESSION_*|CLAUDE_CODE_PARENT_*|CLAUDE_CODE_SSE_*|\
+      CLAUDE_CODE_REMOTE|CLAUDE_CODE_REMOTE_*|CLAUDE_CODE_EFFORT_LEVEL)
+        CLEAN_RALPH_ENV_ARGS+=(-u "$env_name") ;;
     esac
   done < <(compgen -e)
 }
