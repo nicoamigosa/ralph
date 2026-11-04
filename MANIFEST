@@ -60,3 +60,9 @@ tests/fixtures/two-issues.json
 tests/once.bats
 tests/test_helper.bash
 tests/update.bats
+lib/config.sh
+skills/ralph/scripts/ralph.sh
+tests/skill.bats
+skills/ralph/SKILL.md
+tests/fixtures/skill-stop-reasons.json
+.shellcheckrc

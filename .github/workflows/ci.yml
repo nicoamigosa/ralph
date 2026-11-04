@@ -34,10 +34,13 @@ jobs:
           echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
 
       - name: Check Bash syntax
-        run: bash -n once.sh
+        run: |
+          for script in once.sh update.sh lib/config.sh skills/ralph/scripts/ralph.sh; do
+            bash -n "$script"
+          done
 
       - name: Run ShellCheck
-        run: shellcheck once.sh
+        run: shellcheck once.sh update.sh lib/config.sh skills/ralph/scripts/ralph.sh
 
       - name: Run Bats
         run: bats tests/

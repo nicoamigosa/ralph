@@ -3780,3 +3780,52 @@ load test_helper
   [ "$status" -eq 0 ]
   jq -e '.status == "rate_limited" and .retry_at == 1917217800' "$RUN_DIR/claude-2.result.json"
 }
+
+@test "reviewer does not inherit Claude Code parent session variables" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_FULL_ENV_FILE="$TEST_ROOT/claude-env"
+  export RALPH_CI_POLICY=none
+  export CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_SESSION_ID=parent
+  export CLAUDE_CODE_PARENT_SESSION_ID=parent CLAUDE_CODE_CHILD_SESSION=1
+  export CLAUDE_CODE_SSE_PORT=12345 CLAUDE_CODE_REMOTE_SESSION_ID=parent
+  export CLAUDE_CODE_EFFORT_LEVEL=low
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  ! grep -Eq '^CLAUDECODE=|^CLAUDE_CODE_(ENTRYPOINT=|SESSION_|PARENT_|CHILD_SESSION=|SSE_|REMOTE_|EFFORT_LEVEL=)' "$FAKE_CLAUDE_FULL_ENV_FILE"
+}
+
+@test "reviewer retains configured Claude OAuth and provider routing" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export FAKE_CLAUDE_FULL_ENV_FILE="$TEST_ROOT/claude-env"
+  export RALPH_CI_POLICY=none
+  export CLAUDE_CODE_OAUTH_TOKEN=fake-claude-oauth
+  export CLAUDE_CODE_OAUTH_REFRESH_TOKEN=fake-claude-refresh
+  export CLAUDE_CODE_USE_BEDROCK=1 CLAUDE_CODE_USE_VERTEX=0 CLAUDE_CODE_USE_FOUNDRY=0
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  grep -Fxq 'CLAUDE_CODE_OAUTH_TOKEN=fake-claude-oauth' "$FAKE_CLAUDE_FULL_ENV_FILE"
+  grep -Fxq 'CLAUDE_CODE_OAUTH_REFRESH_TOKEN=fake-claude-refresh' "$FAKE_CLAUDE_FULL_ENV_FILE"
+  grep -Fxq 'CLAUDE_CODE_USE_BEDROCK=1' "$FAKE_CLAUDE_FULL_ENV_FILE"
+  grep -Fxq 'CLAUDE_CODE_USE_VERTEX=0' "$FAKE_CLAUDE_FULL_ENV_FILE"
+  grep -Fxq 'CLAUDE_CODE_USE_FOUNDRY=0' "$FAKE_CLAUDE_FULL_ENV_FILE"
+}
+
+@test "missing shared configuration loader stops before agents or GitHub mutations" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  cp "$PROJECT_ROOT/once.sh" "$TEST_ROOT/once.sh"
+  cp "$PROJECT_ROOT"/prompt_*.md "$TEST_ROOT/"
+
+  run bash -c 'cd "$1" && bash "$2/once.sh"' _ "$TEST_REPO" "$TEST_ROOT"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'configuración compartida'* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}

@@ -209,3 +209,61 @@ make_release_fixture() {
   [ "$status" -eq 20 ]
   [ "$output" = 'consulta fallida' ]
 }
+
+@test "update links the project skill relatively and leaves an idempotent uncommitted diff" {
+  make_release_fixture
+  mkdir -p "$TEST_REPO/ralph"
+  while IFS= read -r path; do
+    case "$path" in ''|'#'*) continue ;; esac
+    mkdir -p "$TEST_REPO/ralph/$(dirname "$path")"
+    cp "$TEST_REPO/$path" "$TEST_REPO/ralph/$path"
+  done < "$TEST_REPO/MANIFEST"
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  export RALPH_RELEASE_BASE_URL='https://releases.invalid/ralph'
+  before_head="$(git -C "$TEST_REPO" rev-parse HEAD)"
+
+  run bash "$TEST_REPO/ralph/update.sh" 1.2.0
+
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$TEST_REPO/.claude/skills/ralph")" = '../../ralph/skills/ralph' ]
+  [ -f "$TEST_REPO/.claude/skills/ralph/SKILL.md" ]
+  [ "$(git -C "$TEST_REPO" rev-parse HEAD)" = "$before_head" ]
+  run bash "$TEST_REPO/ralph/update.sh" 1.2.0
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$TEST_REPO/.claude/skills/ralph")" = '../../ralph/skills/ralph' ]
+}
+
+@test "update refuses foreign skill destinations before applying the release" {
+  make_release_fixture
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  export RALPH_RELEASE_BASE_URL='https://releases.invalid/ralph'
+  mkdir -p "$TEST_REPO/.claude/skills/ralph"
+  printf 'keep\n' > "$TEST_REPO/.claude/skills/ralph/own.txt"
+
+  run bash "$TEST_REPO/update.sh" 1.2.0
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'no es un enlace nuestro'* ]]
+  [ "$(cat "$TEST_REPO/VERSION")" = 1.1.0 ]
+  [ "$(cat "$TEST_REPO/.claude/skills/ralph/own.txt")" = keep ]
+  rm -r "$TEST_REPO/.claude/skills/ralph"
+  ln -s missing-foreign-target "$TEST_REPO/.claude/skills/ralph"
+  run bash "$TEST_REPO/update.sh" 1.2.0
+  [ "$status" -ne 0 ]
+  [ "$(readlink "$TEST_REPO/.claude/skills/ralph")" = missing-foreign-target ]
+  [ "$(cat "$TEST_REPO/VERSION")" = 1.1.0 ]
+}
+
+@test "update rejects a non-directory skill parent before replacing files" {
+  make_release_fixture
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  export RALPH_RELEASE_BASE_URL='https://releases.invalid/ralph'
+  mkdir -p "$TEST_REPO/.claude"
+  printf 'keep parent\n' > "$TEST_REPO/.claude/skills"
+
+  run bash "$TEST_REPO/update.sh" 1.2.0
+
+  [ "$status" -ne 0 ]
+  [ "$(cat "$TEST_REPO/VERSION")" = 1.1.0 ]
+  [ "$(cat "$TEST_REPO/.claude/skills")" = 'keep parent' ]
+}

@@ -1,0 +1,2 @@
+# Analyze the shared configuration loader when checking each entry point.
+external-sources=true

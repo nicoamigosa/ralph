@@ -332,6 +332,26 @@ apply_package() {
   done < <(manifest_paths "$package_root/MANIFEST")
 }
 
+check_skill_link() {
+  SKILL_LINK="$PROJECT_ROOT/.claude/skills/ralph"
+  local install_path="${SCRIPT_DIR#"$PROJECT_ROOT"/}" parent
+  [ "$SCRIPT_DIR" != "$PROJECT_ROOT" ] || install_path='.'
+  SKILL_TARGET="../../$install_path/skills/ralph"
+  if [ -L "$PROJECT_ROOT/.claude" ] || [ -L "$PROJECT_ROOT/.claude/skills" ]; then
+    fail 'No se instala la skill bajo un enlace simbólico ajeno.'
+  fi
+  for parent in "$PROJECT_ROOT/.claude" "$PROJECT_ROOT/.claude/skills"; do
+    if [ -e "$parent" ] && [ ! -d "$parent" ]; then
+      fail 'Un padre de .claude/skills/ralph existe y no es un directorio.'
+    fi
+  done
+  if [ -e "$SKILL_LINK" ] || [ -L "$SKILL_LINK" ]; then
+    if [ ! -L "$SKILL_LINK" ] || [ "$(readlink "$SKILL_LINK")" != "$SKILL_TARGET" ]; then
+      fail 'El destino .claude/skills/ralph ya existe y no es un enlace nuestro.'
+    fi
+  fi
+}
+
 if [ "$#" -eq 1 ] && [ "$1" = '--check' ]; then
   check_update
   exit $?
@@ -371,5 +391,14 @@ else
 fi
 
 check_local_files "$current_root"
+if manifest_contains "$target_root/MANIFEST" skills/ralph/SKILL.md; then
+  check_skill_link
+fi
 apply_package "$target_root"
+if manifest_contains "$target_root/MANIFEST" skills/ralph/SKILL.md; then
+  mkdir -p "$PROJECT_ROOT/.claude/skills"
+  if [ ! -L "$SKILL_LINK" ]; then
+    ln -s "$SKILL_TARGET" "$SKILL_LINK"
+  fi
+fi
 printf '✅ Ralph actualizado a v%s.\n' "$TARGET_VERSION"
