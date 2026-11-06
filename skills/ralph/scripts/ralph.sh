@@ -3,11 +3,33 @@
 set +x
 set +v
 set -euo pipefail
+usage() {
+  cat <<'HELP'
+Uso: ralph.sh [plan [--json]|run --confirmed|report [run-id] [--json]]
+  plan: comprueba actualización, requisitos y selector de sólo lectura.
+  run --confirmed: lanza once.sh después de confirmar explícitamente el plan.
+  report [run-id]: interpreta summary.json; sin ID usa el último resumen.
+  --json: objeto schema=1 en stdout para plan/report; texto por defecto.
+Códigos de salida:
+  0: éxito (en run sólo lanzamiento, no resultado de la corrida)
+  2: uso incorrecto o confirmación ausente
+  3: configuración ausente o inválida
+  4: autenticación de GitHub ausente o inválida
+  5: resumen ausente, ilegible o incompleto
+  6: fallo de once.sh durante plan
+  20: consulta de actualización fallida
+El código 10 de update.sh --check (actualización disponible) no bloquea plan.
+HELP
+}
+if [ "${1:-}" = --help ] && [ "$#" -eq 1 ]; then
+  usage
+  exit 0
+fi
 HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 RALPH_DIR="$(cd "$HELPER_DIR/../../.." && pwd -P)"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
-fail() { printf '%s\n' "$*" >&2; exit 1; }
+fail() { printf '%s\n' "$*" >&2; exit "${ERROR_CODE:-3}"; }
 
 launch() {
   local launch_pid
@@ -34,7 +56,14 @@ check_config() (
   # shellcheck source-path=SCRIPTDIR
   # shellcheck source=../../../lib/config.sh
   source "$RALPH_DIR/lib/config.sh" >/dev/null 2>&1
-  gh auth status >/dev/null 2>&1 || fail 'gh auth status: ausente o inválido'
+  if [ "${1:-plan}" = json ]; then
+    local rc=0
+    if gh auth status >/dev/null 2>&1; then printf '%s\n' 'gh auth status: presente'; else rc=4; fi
+    if [ -n "${RALPH_TDD_SKILL:-}" ]; then printf '%s\n' 'RALPH_TDD_SKILL: presente'; else [ "$rc" -ne 0 ] || rc=3; fi
+    if [ -n "${RALPH_REVIEWER_GH_TOKEN:-}" ]; then printf '%s\n' 'RALPH_REVIEWER_GH_TOKEN: presente'; else [ "$rc" -ne 0 ] || rc=3; fi
+    return "$rc"
+  fi
+  gh auth status >/dev/null 2>&1 || ERROR_CODE=4 fail 'gh auth status: ausente o inválido'
   printf '%s\n' 'gh auth status: presente'
   [ -n "${RALPH_TDD_SKILL:-}" ] || fail 'RALPH_TDD_SKILL: ausente'
   printf '%s\n' 'RALPH_TDD_SKILL: presente'
@@ -47,16 +76,47 @@ check_config() (
   fi
 )
 
+# JSON contains only selected fields, never raw configuration or diagnostics.
+plan_json() {
+  local update_rc=0 config_rc=0 once_rc=0 update_output config_output dry_output=''
+  update_output="$(bash "$RALPH_DIR/update.sh" --check 2>/dev/null)" || update_rc=$?
+  config_output="$(check_config json 2>/dev/null)" || config_rc=$?
+  if [ "$update_rc" -eq 0 ] || [ "$update_rc" -eq 10 ]; then
+    if [ "$config_rc" -eq 0 ]; then
+      dry_output="$(RALPH_DRY_RUN=1 bash "$RALPH_DIR/once.sh" 2>/dev/null)" || once_rc=$?
+    fi
+  fi
+  jq -n --arg update "$update_output" --argjson update_rc "$update_rc" \
+    --arg config "$config_output" --argjson config_rc "$config_rc" \
+    --arg dry "$dry_output" --argjson once_rc "$once_rc" '
+    ($dry | split("\n") | map(select(test("^#[0-9]+ priority=")) |
+      capture("^#(?<number>[0-9]+) priority=(?<priority>[0-9]+) host=(?<host>[^ ]+) current=(?<current>[^ ]+) parents=(?<parents>[^ ]+) blockers=(?<blockers>[^ ]+) needs-human=(?<needs_human>yes|no) pr=(?<pr>[^ ]+)( excluded=(?<reason>[^ ]+))?$") |
+      .number |= tonumber | .priority |= tonumber |
+      .pr |= (if . == "none" then null else tonumber end))) as $rows |
+    {schema:1, mode:"plan", success: (($update_rc == 0 or $update_rc == 10) and $config_rc == 0 and $once_rc == 0),
+     update:{status:(if $update_rc == 0 then "current" elif $update_rc == 10 then "available" else "unknown" end),
+       version: ((try ($update | capture("^actualización disponible: (?<v>v[0-9]+\\.[0-9]+\\.[0-9]+)$").v) catch null) // null)},
+     requirements:{gh_auth:($config | contains("gh auth status: presente")),
+       tdd_skill:($config | contains("RALPH_TDD_SKILL: presente")),
+       reviewer_token:($config | contains("RALPH_REVIEWER_GH_TOKEN: presente"))},
+     candidates:(if ($update_rc == 0 or $update_rc == 10) and $once_rc == 0 and $config_rc == 0 then [$rows[] | select(.reason == null)] else null end),
+     excluded:(if ($update_rc == 0 or $update_rc == 10) and $once_rc == 0 and $config_rc == 0 then [$rows[] | select(.reason != null)] else null end)}'
+  case "$update_rc" in 0|10) ;; *) return 20 ;; esac
+  [ "$config_rc" -eq 0 ] || return "$config_rc"
+  [ "$once_rc" -eq 0 ] || return 6
+}
+
 plan() {
   local rc=0
   bash "$RALPH_DIR/update.sh" --check || rc=$?
-  case "$rc" in 0|10) ;; *) return "$rc" ;; esac
+  case "$rc" in 0|10) ;; *) return 20 ;; esac
   check_config
-  RALPH_DRY_RUN=1 bash "$RALPH_DIR/once.sh"
+  RALPH_DRY_RUN=1 bash "$RALPH_DIR/once.sh" || return 6
 }
 
 report() {
   local run_id="${1:-}" summary path
+  local json="${2:-false}"
   if [ -z "$run_id" ]; then
     for path in "$RALPH_DIR"/runs/*/summary.json; do
       [ -f "$path" ] || continue
@@ -64,10 +124,12 @@ report() {
       run_id="${run_id##*/}"
     done
   fi
-  case "$run_id" in ''|*[!A-Za-z0-9_-]*) fail 'run-id ausente o inválido' ;; esac
+  [ -n "$run_id" ] || ERROR_CODE=5 fail 'run-id ausente o inválido'
+  case "$run_id" in *[!A-Za-z0-9_-]*) ERROR_CODE=2 fail 'run-id ausente o inválido' ;; esac
+  ERROR_CODE=5
   summary="$RALPH_DIR/runs/$run_id/summary.json"
   [ -f "$summary" ] || fail 'No existe summary.json para esa corrida'
-  jq -er '
+  jq -er --argjson json "$json" '
     if .schema != 1 or (.run_id | type) != "string" or .run_id == "" or
        (.stop_reason | type) != "string" or .stop_reason == "" or
        (.issues_started | type) != "number" or
@@ -97,6 +159,13 @@ report() {
       else "Corregir la configuración o infraestructura indicada en los artefactos antes de reanudar."
       end;
     .stop_reason as $reason |
+    if $json then
+      {schema:1, mode:"report", run_id, stop_reason, issues_started, issues,
+       merged, open_prs, needs_human, blocked,
+       protection:(.protection // null),
+       usage:{claude_estimated_usd:(.usage.claude_estimated_usd // null),
+         codex_tokens:(.usage.codex_tokens // null)}, next_step:next_step($reason)}
+    else
     "Corrida: \(.run_id)\nstop_reason: \(.stop_reason) — \(.stop_reason | meaning)",
     "Issues iniciados: \(.issues_started // "desconocido")",
     "Issues: \(.issues | tojson)",
@@ -107,24 +176,43 @@ report() {
     "Protección: \((.protection // "desconocida") | tojson)",
     "Claude USD estimado: \(.usage.claude_estimated_usd // "desconocido"); Codex tokens: \(.usage.codex_tokens // "desconocido")",
     "Siguiente paso: \(next_step($reason))"
+    end
   ' "$summary" || fail 'No se pudo interpretar summary.json; resultado desconocido'
 }
 
+ERROR_CODE=2
 case "${1:-plan}" in
   plan)
-    [ "$#" -le 1 ] || fail 'Uso: ralph.sh plan'
-    plan
+    if [ "$#" -eq 2 ] && [ "$2" = --json ]; then
+      ERROR_CODE=3
+      plan_json
+    else
+      [ "$#" -le 1 ] || fail 'Uso: ralph.sh plan [--json]'
+      ERROR_CODE=3
+      plan
+    fi
     ;;
   run)
     if [ "$#" -ne 2 ] || [ "$2" != --confirmed ]; then
       fail 'Ejecuta plan y pide confirmación explícita antes de run --confirmed.'
     fi
+    ERROR_CODE=3
     check_config run
     launch
     ;;
   report)
-    [ "$#" -le 2 ] || fail 'Uso: ralph.sh report [run-id]'
-    report "${2:-}"
+    shift
+    report_id='' report_json=false
+    if [ "${1:-}" != --json ] && [ "$#" -gt 0 ]; then
+      report_id="$1"
+      shift
+    fi
+    if [ "${1:-}" = --json ]; then
+      report_json=true
+      shift
+    fi
+    [ "$#" -eq 0 ] || fail 'Uso: ralph.sh report [run-id] [--json]'
+    report "$report_id" "$report_json"
     ;;
   *) fail 'Uso: ralph.sh [plan|run --confirmed|report [run-id]]' ;;
 esac

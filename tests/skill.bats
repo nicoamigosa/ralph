@@ -166,3 +166,151 @@ SH
   [ "$status" -eq 0 ]
   [[ "$output" == *'Corrida: linked'* ]]
 }
+
+@test "skill plan json reports selector candidates exclusions and requirement presence" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  mkdir -p "$FAKE_RELEASE_ROOT"
+  printf '%s\n' '[{"tag_name":"v99.0.0","draft":false,"prerelease":false}]' > "$FAKE_RELEASE_ROOT/releases.json"
+
+  run bash -c 'cd "$1" && bash "$2/skills/ralph/scripts/ralph.sh" plan --json' _ "$TEST_REPO" "$PROJECT_ROOT"
+
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  jq -e '.schema == 1 and .update.status == "available" and
+    .requirements.gh_auth and .requirements.tdd_skill and .requirements.reviewer_token and
+    ([.candidates[].number] == [4,6]) and
+    ([.excluded[] | {number,reason}] == [{number:2,reason:"parent"},{number:5,reason:"needs-human"},{number:10,reason:"blocked-by:4"}])' <<<"$output"
+  [[ "$output" != *'fake-reviewer-token'* ]]
+  [[ "$output" != *'fake-orchestrator-token'* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "skill report json exposes summary evidence and unknown usage without secrets" {
+  mkdir -p "$TEST_ROOT/install/skills/ralph/scripts" "$TEST_ROOT/install/runs/fixture"
+  cp "$PROJECT_ROOT/skills/ralph/scripts/ralph.sh" "$TEST_ROOT/install/skills/ralph/scripts/"
+  jq -n '{schema:1,run_id:"fixture",stop_reason:"completed",issues_started:1,
+    issues:[{number:42,status:"merged"}],merged:[{issue:42,pr:101}],open_prs:[],
+    needs_human:[],blocked:[],errors:[],usage:{claude_estimated_usd:0.25},
+    protection:{required:true,status:"passed"},untrusted:"fake-reviewer-token fake-orchestrator-token"}' > "$TEST_ROOT/install/runs/fixture/summary.json"
+  helper="$TEST_ROOT/install/skills/ralph/scripts/ralph.sh"
+
+  run bash -c 'cd "$1" && bash "$2" report fixture --json' _ "$TEST_REPO" "$helper"
+
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  jq -e '.schema == 1 and .run_id == "fixture" and .stop_reason == "completed" and
+    .issues[0].number == 42 and .merged[0].pr == 101 and .open_prs == [] and
+    .protection.status == "passed" and .usage.claude_estimated_usd == 0.25 and
+    .usage.codex_tokens == null and (.next_step | startswith("Reanudar"))' <<<"$output"
+  [[ "$output" != *'fake-reviewer-token'* ]]
+  [[ "$output" != *'fake-orchestrator-token'* ]]
+  run bash -c 'cd "$1" && bash "$2" report --json' _ "$TEST_REPO" "$helper"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  jq -e '.run_id == "fixture"' <<<"$output"
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "skill helper returns usage code 2 for invalid arguments and missing confirmation" {
+  for args in 'plan --bad' 'run' 'report ../outside' 'unknown'; do
+    read -r -a argv <<<"$args"
+    run bash -c 'cd "$1" && shift && bash "$@"' _ "$TEST_REPO" "$PROJECT_ROOT/skills/ralph/scripts/ralph.sh" "${argv[@]}"
+    [ "$status" -eq 2 ]
+  done
+}
+
+@test "skill plan json returns configuration code 3 and checks each requirement independently" {
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  mkdir -p "$FAKE_RELEASE_ROOT"
+  printf '%s\n' '[{"tag_name":"v99.0.0","draft":false,"prerelease":false}]' > "$FAKE_RELEASE_ROOT/releases.json"
+  unset RALPH_TDD_SKILL
+
+  run bash -c 'cd "$1" && bash "$2/skills/ralph/scripts/ralph.sh" plan --json' _ "$TEST_REPO" "$PROJECT_ROOT"
+
+  [ "$status" -eq 3 ]
+  [ -n "$output" ]
+  jq -e '.success == false and .requirements.gh_auth == true and
+    .requirements.tdd_skill == false and .requirements.reviewer_token == true and
+    .candidates == null and .excluded == null' <<<"$output"
+  [ ! -s "$FAKE_AGENT_LOG" ]
+}
+
+@test "skill helper returns authentication code 4 without authentication diagnostics" {
+  export FAKE_GH_AUTH_STATUS_EXIT=1 FAKE_GH_AUTH_STATUS_OUTPUT=fake-reviewer-token
+  export RALPH_REQUIRE_PROTECTION=1
+
+  run bash -c 'cd "$1" && bash "$2/skills/ralph/scripts/ralph.sh" run --confirmed' _ "$TEST_REPO" "$PROJECT_ROOT"
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'gh auth status: ausente o inválido'* ]]
+  [[ "$output" != *'fake-reviewer-token'* ]]
+}
+
+@test "skill report returns summary code 5 for absent malformed or incomplete evidence" {
+  mkdir -p "$TEST_ROOT/install/skills/ralph/scripts" "$TEST_ROOT/install/runs/bad"
+  cp "$PROJECT_ROOT/skills/ralph/scripts/ralph.sh" "$TEST_ROOT/install/skills/ralph/scripts/"
+  helper="$TEST_ROOT/install/skills/ralph/scripts/ralph.sh"
+  run bash -c 'cd "$1" && bash "$2" report missing --json' _ "$TEST_REPO" "$helper"
+  [ "$status" -eq 5 ]
+  for summary in '' invalid-json '{}'; do
+    printf '%s\n' "$summary" > "$TEST_ROOT/install/runs/bad/summary.json"
+    run bash -c 'cd "$1" && bash "$2" report bad --json' _ "$TEST_REPO" "$helper"
+    [ "$status" -eq 5 ]
+    [[ "$output" == *'resultado desconocido'* ]]
+  done
+}
+
+@test "skill plan returns once failure code 6 and no partial candidates" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases" FAKE_ISSUE_VIEW_FAIL_NUM=4 FAKE_ISSUE_VIEW_FAIL_FIELD=state
+  mkdir -p "$FAKE_RELEASE_ROOT"
+  printf '%s\n' '[{"tag_name":"v99.0.0","draft":false,"prerelease":false}]' > "$FAKE_RELEASE_ROOT/releases.json"
+
+  run bash -c 'cd "$1" && bash "$2/skills/ralph/scripts/ralph.sh" plan --json' _ "$TEST_REPO" "$PROJECT_ROOT"
+
+  [ "$status" -eq 6 ]
+  [ -n "$output" ]
+  jq -e '.success == false and .candidates == null and .excluded == null' <<<"$output"
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "skill help documents modes json and distinct exit codes" {
+  run bash -c 'cd "$1" && bash "$2/skills/ralph/scripts/ralph.sh" --help' _ "$TEST_REPO" "$PROJECT_ROOT"
+
+  [ "$status" -eq 0 ]
+  for text in 'plan [--json]' 'run --confirmed' 'report [run-id] [--json]' \
+    '0: éxito' '2: uso incorrecto' '3: configuración' '4: autenticación' \
+    '5: resumen' '6: fallo de once.sh' '20: consulta de actualización' '10'; do
+    [[ "$output" == *"$text"* ]]
+  done
+}
+
+@test "skill plan json reports current version and failed update queries without inventing a plan" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  mkdir -p "$FAKE_RELEASE_ROOT"
+  jq -n --arg version "v$(cat "$PROJECT_ROOT/VERSION")" '[{tag_name:$version,draft:false,prerelease:false}]' > "$FAKE_RELEASE_ROOT/releases.json"
+  helper="$PROJECT_ROOT/skills/ralph/scripts/ralph.sh"
+
+  run bash -c 'cd "$1" && bash "$2" plan --json' _ "$TEST_REPO" "$helper"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  jq -e '.success == true and .update.status == "current" and .candidates[0].number == 4' <<<"$output"
+  printf '%s\n' invalid-json > "$FAKE_RELEASE_ROOT/releases.json"
+  run bash -c 'cd "$1" && bash "$2" plan --json' _ "$TEST_REPO" "$helper"
+  [ "$status" -eq 20 ]
+  [ -n "$output" ]
+  jq -e '.success == false and .update.status == "unknown" and .candidates == null and .excluded == null' <<<"$output"
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "skill report without any summary returns summary code 5" {
+  mkdir -p "$TEST_ROOT/install/skills/ralph/scripts"
+  cp "$PROJECT_ROOT/skills/ralph/scripts/ralph.sh" "$TEST_ROOT/install/skills/ralph/scripts/"
+
+  run bash -c 'cd "$1" && bash "$2/install/skills/ralph/scripts/ralph.sh" report --json' _ "$TEST_REPO" "$TEST_ROOT"
+
+  [ "$status" -eq 5 ]
+}
