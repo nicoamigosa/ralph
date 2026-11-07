@@ -735,6 +735,18 @@ all selection, review, checks and merge decisions remain in `once.sh`.
   adapter results, events, logs, the checkpoint and read-only GitHub queries
   to explain the cause; it never publishes another report comment.
 
+For machine interpretation use `bash ralph/skills/ralph/scripts/ralph.sh plan --json`
+or `bash ralph/skills/ralph/scripts/ralph.sh report [run-id] --json`. Both expose
+stable `schema: 1` objects: update status, requirement presence and selector rows
+for plan; summary evidence and one proposed next step for report. Unknown values
+are `null`; text output remains the default for display. `--help` documents all
+modes and exit codes: **0** success, **2** incorrect usage, **3** missing/invalid
+configuration, **4** authentication, **5** missing/unreadable/incomplete summary,
+**6** failure of `once.sh` during plan, **20** failed update lookup. Updater code
+**10** (update available) does not block plan. Run code 0 confirms only launch;
+verify the `📁 Corrida <id>` line in its launch log and consult the summary for
+the final result.
+
 The helper and `once.sh` share the configuration loader and its precedence:
 exported `RALPH_*` values override project config and host config. Configure
 host paths in `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env` (or the explicit
