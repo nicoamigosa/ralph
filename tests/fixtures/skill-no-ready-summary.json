@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "run_id": "fixture",
+  "stop_reason": "no_ready_issues",
+  "issues_started": 0,
+  "issues": [],
+  "merged": [],
+  "open_prs": [],
+  "needs_human": [],
+  "blocked": [{"issue": 105, "blockers": [104]}, {"issue": 106, "blockers": [104]}],
+  "errors": [],
+  "usage": {"codex_tokens": null, "claude_estimated_usd": null}
+}

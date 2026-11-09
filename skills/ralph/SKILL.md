@@ -28,9 +28,13 @@ los descartes exactamente como los explica el selector (dependencias, sección
 Blocked by inválida, host, needs-human). No invoques agentes ni escribas en
 GitHub. Ante un error informa del fallo; no lo interpretes como plan vacío.
 
-El helper y once.sh comparten la carga de `.ralph/config.env` y
-`${RALPH_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env}`;
-prevalecen las variables RALPH_* exportadas. No leas ni imprimas `.env`, tokens,
+El helper y once.sh comparten la carga de `.ralph/config.env`,
+`${RALPH_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env}` y
+`${RALPH_REVIEWER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/reviewer.env}`.
+La ruta del revisor es opcional por defecto; si se exporta explícitamente,
+debe existir y ser un archivo regular. Estas rutas las carga el código, nunca
+el modelo.
+Prevalecen las variables RALPH_* exportadas. No leas ni imprimas `.env`, tokens,
 `env`, `set`, trazas de shell o diagnósticos de autenticación. No cargues otros
 `*.env` por glob: pueden pertenecer a identidades distintas.
 

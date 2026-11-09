@@ -86,6 +86,13 @@ SH
     [[ "$output" == *'101'* ]]
     [[ "$output" == *'0.25'* ]]
     [[ "$output" == *'desconocido'* ]]
+    run bash -c 'cd "$1" && bash "$2" report fixture --json' _ "$TEST_REPO" "$helper"
+    [ "$status" -eq 0 ]
+    if [ "$reason" = completed ]; then
+      jq -e '.next_step == null' <<<"$output"
+    else
+      jq -e --arg next "$next" '.next_step | startswith($next)' <<<"$output"
+    fi
   done < <(jq -r '.[] | [.reason,.meaning,.next] | @tsv' "$PROJECT_ROOT/tests/fixtures/skill-stop-reasons.json")
   run bash -c 'cd "$1" && bash "$2" report' _ "$TEST_REPO" "$helper"
   [ "$status" -eq 0 ]
@@ -203,7 +210,7 @@ SH
   jq -e '.schema == 1 and .run_id == "fixture" and .stop_reason == "completed" and
     .issues[0].number == 42 and .merged[0].pr == 101 and .open_prs == [] and
     .protection.status == "passed" and .usage.claude_estimated_usd == 0.25 and
-    .usage.codex_tokens == null and (.next_step | startswith("Reanudar"))' <<<"$output"
+    .usage.codex_tokens == null and .next_step == null' <<<"$output"
   [[ "$output" != *'fake-reviewer-token'* ]]
   [[ "$output" != *'fake-orchestrator-token'* ]]
   run bash -c 'cd "$1" && bash "$2" report --json' _ "$TEST_REPO" "$helper"
@@ -313,4 +320,57 @@ SH
   run bash -c 'cd "$1" && bash "$2/install/skills/ralph/scripts/ralph.sh" report --json' _ "$TEST_REPO" "$TEST_ROOT"
 
   [ "$status" -eq 5 ]
+}
+
+@test "skill plan loads reviewer token from the default XDG reviewer config without exposing it" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/dry-run.json"
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  mkdir -p "$FAKE_RELEASE_ROOT" "$XDG_CONFIG_HOME/ralph"
+  printf '%s\n' '[{"tag_name":"v99.0.0","draft":false,"prerelease":false}]' > "$FAKE_RELEASE_ROOT/releases.json"
+  printf '%s\n' 'RALPH_REVIEWER_GH_TOKEN=fake-file-reviewer-token' > "$XDG_CONFIG_HOME/ralph/reviewer.env"
+  unset RALPH_REVIEWER_GH_TOKEN
+
+  run bash -c 'cd "$1" && bash "$2/skills/ralph/scripts/ralph.sh" plan' _ "$TEST_REPO" "$PROJECT_ROOT"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RALPH_REVIEWER_GH_TOKEN: presente'* ]]
+  [[ "$output" != *'fake-file-reviewer-token'* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "skill helper rejects an explicitly missing reviewer config before plan or run" {
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  mkdir -p "$FAKE_RELEASE_ROOT"
+  printf '%s\n' '[{"tag_name":"v99.0.0","draft":false,"prerelease":false}]' > "$FAKE_RELEASE_ROOT/releases.json"
+  export RALPH_REVIEWER_CONFIG="$TEST_ROOT/missing-reviewer.env"
+
+  for args in 'plan' 'plan --json' 'run --confirmed'; do
+    read -r -a argv <<<"$args"
+    run bash -c 'cd "$1" && shift && bash "$@"' _ "$TEST_REPO" "$PROJECT_ROOT/skills/ralph/scripts/ralph.sh" "${argv[@]}"
+    [ "$status" -eq 3 ]
+  done
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "skill report without candidates names blocked issues instead of suggesting resume in text and json" {
+  mkdir -p "$TEST_ROOT/install/skills/ralph/scripts" "$TEST_ROOT/install/runs/fixture"
+  cp "$PROJECT_ROOT/skills/ralph/scripts/ralph.sh" "$TEST_ROOT/install/skills/ralph/scripts/"
+  cp "$PROJECT_ROOT/tests/fixtures/skill-no-ready-summary.json" "$TEST_ROOT/install/runs/fixture/summary.json"
+  helper="$TEST_ROOT/install/skills/ralph/scripts/ralph.sh"
+
+  run bash -c 'cd "$1" && bash "$2" report fixture --json' _ "$TEST_REPO" "$helper"
+  [ "$status" -eq 0 ]
+  next="$(jq -r '.next_step' <<<"$output")"
+  [[ "$next" == *'#105'* ]]
+  [[ "$next" == *'#106'* ]]
+  [[ "$next" == *'ready-for-agent'* ]]
+  [[ "$next" != *'Reanudar'* ]]
+  [[ "$next" != *'/ralph run'* ]]
+
+  run bash -c 'cd "$1" && bash "$2" report fixture' _ "$TEST_REPO" "$helper"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Siguiente paso: $next"* ]]
+  [ ! -s "$GH_MUTATION_LOG" ]
 }

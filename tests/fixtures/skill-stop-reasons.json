@@ -1,8 +1,8 @@
 [
   {"reason":"running", "meaning":"en curso", "next":"Esperar"},
-  {"reason":"completed", "meaning":"corrida completada", "next":"Reanudar"},
+  {"reason":"completed", "meaning":"corrida completada", "next":"ninguno"},
   {"reason":"run_failed", "meaning":"corrida fallida", "next":"Corregir"},
-  {"reason":"no_ready_issues", "meaning":"sin candidatos", "next":"Reanudar"},
+  {"reason":"no_ready_issues", "meaning":"sin candidatos", "next":"Revisar"},
   {"reason":"max_issues", "meaning":"límite de issues", "next":"Reanudar"},
   {"reason":"deadline", "meaning":"plazo agotado", "next":"Reanudar"},
   {"reason":"budget", "meaning":"presupuesto estimado agotado", "next":"Corregir"},
