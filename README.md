@@ -508,12 +508,17 @@ never edited in the project. Variable configuration lives outside it:
 | Project | `.ralph/config.env` | Base, labels, required checks, close policy, post-merge hook |
 | Project | `.ralph/prompt_*.local.md` | Concrete implementation/review constraints appended to the shared prompt |
 | Host | `~/.config/ralph/host.env` | Linux/macOS capability, paths (Homebrew `PATH`, `gtimeout`), local limits |
+| Reviewer | `${RALPH_REVIEWER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/reviewer.env}` | Optional trusted reviewer configuration; keep outside version control |
 | Credentials | Login / keychain / protected environment | `gh`, `codex`, and `claude` authentication; never in versioned config |
 
 At startup, Ralph resolves the root with `git rev-parse --show-toplevel`, moves
 its working directory there, and loads `.ralph/config.env`. It then loads
 `${RALPH_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env}` if it
-exists. Precedence is explicit environment > host > project > defaults; to
+exists, then loads
+`${RALPH_REVIEWER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/reviewer.env}`
+if it exists. Both host and reviewer paths must be regular files when present;
+an explicitly exported path must exist. Precedence is explicit environment >
+reviewer > host > project > defaults; to
 guarantee it, `RALPH_*` variables already in the environment are captured before
 `source` and restored after loading. `.env` files are trusted shell code (they
 are sourced), not parsed data: they must contain only code the operator has
@@ -527,7 +532,7 @@ without modifying distributed prompts.
 ## Configuration
 
 Except for the required `RALPH_TDD_SKILL`, everything is optional; values can
-come from the environment, `.ralph/config.env`, or `host.env`:
+come from the environment, `.ralph/config.env`, `host.env`, or `reviewer.env`:
 
 | Variable | Default |
 |---|---|
@@ -571,6 +576,7 @@ come from the environment, `.ralph/config.env`, or `host.env`:
 | `RUN_DIR` | `$SCRIPT_DIR/runs/<RUN_ID>` (captures, events, `summary.json`/`.md`, and agent contracts; explicit override preserved for tests) |
 | `RALPH_CHECKPOINT_FILE` | `$SCRIPT_DIR/last_run.md` |
 | `RALPH_HOST_CONFIG` | `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env` |
+| `RALPH_REVIEWER_CONFIG` | `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/reviewer.env` (optional; an explicitly exported path must exist) |
 
 With `RALPH_CODEX_SANDBOX=workspace-write`, ralph replaces any
 `writable_roots` configured by the user in `~/.codex/config.toml` with the
@@ -748,9 +754,11 @@ verify the `📁 Corrida <id>` line in its launch log and consult the summary fo
 the final result.
 
 The helper and `once.sh` share the configuration loader and its precedence:
-exported `RALPH_*` values override project config and host config. Configure
+exported `RALPH_*` values override project, host, and reviewer config. Configure
 host paths in `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/host.env` (or the explicit
-`RALPH_HOST_CONFIG`) and secrets in the protected environment. Other `*.env`
+`RALPH_HOST_CONFIG`) and the reviewer token in the protected environment or
+`RALPH_REVIEWER_CONFIG` (default `${XDG_CONFIG_HOME:-$HOME/.config}/ralph/reviewer.env`).
+The code loads these explicit paths; the model never reads them. Other `*.env`
 files are not sourced automatically. The skill never prints tokens or config
 contents. Child agents and post-merge hooks also have `CLAUDECODE`,
 `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_*`,
@@ -768,9 +776,9 @@ Report interpretation follows these `summary.json` reasons:
 | `stop_reason` | Meaning and suggested action |
 | --- | --- |
 | `running` | Still running; wait for the result. |
-| `completed` | Run finished; start a new confirmed run when needed. |
+| `completed` | Run finished; no pending step (`next_step: null` in JSON, `Siguiente paso: ninguno` in text). |
 | `run_failed` | Run failed outside an issue; inspect configuration and artifacts. |
-| `no_ready_issues` | No selectable issues; run again when ready. |
+| `no_ready_issues` | Review blocked or excluded issues in the summary (including blocked issue numbers), or label more issues `ready-for-agent`. |
 | `max_issues` | Unique issue cap; resume with a new confirmed run. |
 | `deadline` | Global deadline; resume from the checkpoint. |
 | `budget` | Estimated Claude budget reached; review budget configuration. |

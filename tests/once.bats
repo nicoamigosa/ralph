@@ -3829,3 +3829,44 @@ load test_helper
   [ ! -s "$FAKE_AGENT_LOG" ]
   [ ! -s "$GH_MUTATION_LOG" ]
 }
+
+@test "preflight rejects missing or nonregular reviewer config before agents or mutations" {
+  export RALPH_REVIEWER_CONFIG="$TEST_ROOT/missing-reviewer.env"
+
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'No existe la configuración requerida'* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+
+  mkdir -p "$RALPH_REVIEWER_CONFIG"
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'debe ser un archivo regular'* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}
+
+@test "exported reviewer token overrides reviewer config and preserves identity isolation" {
+  export GH_FIXTURE="$PROJECT_ROOT/tests/fixtures/happy-path.json"
+  export FAKE_CODEX_CREATE_PR=1
+  export RALPH_REVIEWER_CONFIG="$TEST_ROOT/reviewer.env"
+  printf '%s\n' 'RALPH_REVIEWER_GH_TOKEN=fake-orchestrator-token' > "$RALPH_REVIEWER_CONFIG"
+
+  run_once
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'fake-orchestrator-token'* ]]
+
+  : > "$FAKE_AGENT_LOG"
+  : > "$GH_MUTATION_LOG"
+  unset RALPH_REVIEWER_GH_TOKEN
+  run_once
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'debe ser distinto del token del orquestador'* ]]
+  [ ! -s "$FAKE_AGENT_LOG" ]
+  [ ! -s "$GH_MUTATION_LOG" ]
+}

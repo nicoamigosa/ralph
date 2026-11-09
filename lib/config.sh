@@ -3,12 +3,14 @@
 declare -A EXPLICIT_RALPH_ENV=()
 declare -a EXPLICIT_RALPH_NAMES=()
 EXPLICIT_HOST_CONFIG=0
+EXPLICIT_REVIEWER_CONFIG=0
 while IFS= read -r env_name; do
   case "$env_name" in
     RALPH_*)
       EXPLICIT_RALPH_NAMES+=("$env_name")
       EXPLICIT_RALPH_ENV["$env_name"]="${!env_name}"
       [ "$env_name" = RALPH_HOST_CONFIG ] && EXPLICIT_HOST_CONFIG=1
+      [ "$env_name" = RALPH_REVIEWER_CONFIG ] && EXPLICIT_REVIEWER_CONFIG=1
       ;;
   esac
 done < <(compgen -e)
@@ -43,3 +45,6 @@ HOST_CONFIG_PATH="${RALPH_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/h
 load_env_file "$HOST_CONFIG_PATH" "$EXPLICIT_HOST_CONFIG"
 restore_explicit_ralph_env
 
+REVIEWER_CONFIG_PATH="${RALPH_REVIEWER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph/reviewer.env}"
+load_env_file "$REVIEWER_CONFIG_PATH" "$EXPLICIT_REVIEWER_CONFIG"
+restore_explicit_ralph_env

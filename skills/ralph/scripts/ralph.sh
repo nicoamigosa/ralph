@@ -149,10 +149,16 @@ report() {
        (if startswith("signal:") then "interrumpida por señal" else "motivo desconocido" end);
     def next_step($reason):
       if .stop_reason == "running" then "Esperar el resultado de esta corrida."
+      elif .stop_reason == "completed" then null
+      elif .stop_reason == "no_ready_issues" then
+        "Revisar los issues bloqueados o excluidos del resumen" +
+        (if (.blocked | length) > 0 then
+          " (" + ([.blocked[] | select(.issue != null) | "#" + (.issue | tostring)] | unique | join(", ")) + ")"
+         else "" end) + "; o etiquetar más issues con ready-for-agent."
       elif (.needs_human // [] | length) > 0 then
         "Revisar el PR #\(.needs_human[0].pr // "desconocido") en ralph-needs-human."
       elif .stop_reason == "usage_limit" then "Esperar al reset documentado en retry_at del adaptador."
-      elif (["completed","no_ready_issues","max_issues","deadline","timeout"] | index($reason)) != null or
+      elif (["max_issues","deadline","timeout"] | index($reason)) != null or
            (.stop_reason | startswith("signal:")) then "Reanudar con /ralph run tras consultar last_run.md."
       elif (["merge_pending","production_unverified","issue_failed","issues_failed"] | index($reason)) != null then
         "Revisar el PR #\((.open_prs[0].pr // .merged[-1].pr) // "desconocido") y su checkpoint antes de reanudar."
@@ -175,7 +181,7 @@ report() {
     "Bloqueados: \((.blocked // []) | tojson)",
     "Protección: \((.protection // "desconocida") | tojson)",
     "Claude USD estimado: \(.usage.claude_estimated_usd // "desconocido"); Codex tokens: \(.usage.codex_tokens // "desconocido")",
-    "Siguiente paso: \(next_step($reason))"
+    "Siguiente paso: \(next_step($reason) // "ninguno")"
     end
   ' "$summary" || fail 'No se pudo interpretar summary.json; resultado desconocido'
 }
