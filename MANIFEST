@@ -65,4 +65,5 @@ skills/ralph/scripts/ralph.sh
 tests/skill.bats
 skills/ralph/SKILL.md
 tests/fixtures/skill-stop-reasons.json
+tests/fixtures/skill-no-ready-summary.json
 .shellcheckrc
