@@ -26,6 +26,8 @@ tests/fakes/uname
 tests/fixtures/SKILL.md
 tests/fixtures/blocker-reopened.json
 tests/fixtures/claude-2.1.277-success.json
+tests/fixtures/claude-2.1.287-session-limit.json
+tests/fixtures/claude-2.1.287-weekly-limit.json
 tests/fixtures/codex-0.154.0-success.jsonl
 tests/fixtures/codex-0.154.0-truncated.jsonl
 tests/fixtures/complete-selection.json
@@ -58,6 +60,14 @@ tests/fixtures/section-refs.json
 tests/fixtures/two-issues-second-without-pr.json
 tests/fixtures/two-issues.json
 tests/once.bats
+tests/manifest.bats
+tests/integration/bin/claude
+tests/integration/bin/codex
+tests/integration/fixtures/claude-error.json
+tests/integration/fixtures/claude-pass.json
+tests/integration/fixtures/claude-rejection.json
+tests/integration/fixtures/codex-success.jsonl
+tests/integration/run.sh
 tests/test_helper.bash
 tests/update.bats
 lib/config.sh

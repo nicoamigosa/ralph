@@ -628,6 +628,12 @@ edits, `update.sh` also downloads and verifies the tarball for the currently
 installed version before comparing its `MANIFEST` files. Therefore, assets from
 previous releases must be retained.
 
+`bats tests/` checks that every tracked file under `tests/`, `lib/`, and
+`skills/`, plus `once.sh`, `update.sh`, and `prompt_*.md`, appears in `MANIFEST`.
+It also checks that every manifest entry exists as a regular file, reporting
+the path of any missing file. Add new distributable files to `MANIFEST` when
+adding them to Git.
+
 ### Publish a release
 
 After `bash -n once.sh update.sh`, `shellcheck once.sh update.sh`, and
