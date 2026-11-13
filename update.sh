@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+# Bash parses the complete function before any installed file can be replaced.
+main() {
 set -euo pipefail
 
 fail() {
@@ -321,14 +324,19 @@ has_symlink_component() {
 }
 
 apply_package() {
-  local package_root="$1" path destination
+  local package_root="$1" path destination temporary
   while IFS= read -r path; do
     destination="$SCRIPT_DIR/$path"
     has_symlink_component "$path" && \
       fail "No se puede reemplazar un archivo bajo un enlace simbólico: $path."
-    mkdir -p "$(dirname "$destination")"
-    cp -p "$package_root/$path" "$destination" \
-      || fail "No pude reemplazar el archivo distribuido: $path."
+    mkdir -p "$(dirname "$destination")" \
+      || fail "No pude crear el directorio para el archivo distribuido: $path."
+    temporary="$(mktemp "$(dirname "$destination")/.ralph-update.XXXXXX")" \
+      || fail "No pude crear el temporal para el archivo distribuido: $path."
+    if ! cp -p "$package_root/$path" "$temporary" || ! mv -f "$temporary" "$destination"; then
+      rm -f "$temporary"
+      fail "No pude reemplazar el archivo distribuido: $path. La instalación puede estar parcialmente actualizada."
+    fi
   done < <(manifest_paths "$package_root/MANIFEST")
 }
 
@@ -352,6 +360,18 @@ check_skill_link() {
   fi
 }
 
+# Internal protocol: execute version-specific steps from the installed release.
+if [ "$#" -eq 1 ] && [ "$1" = '--post-install' ]; then
+  if manifest_contains "$SCRIPT_DIR/MANIFEST" skills/ralph/SKILL.md; then
+    check_skill_link
+    mkdir -p "$PROJECT_ROOT/.claude/skills"
+    if [ ! -L "$SKILL_LINK" ]; then
+      ln -s "$SKILL_TARGET" "$SKILL_LINK"
+    fi
+  fi
+  return 0
+fi
+
 if [ "$#" -eq 1 ] && [ "$1" = '--check' ]; then
   check_update
   exit $?
@@ -371,8 +391,7 @@ check_remote_lock
 
 WORK_DIR="$(mktemp -d "$TMP_ROOT/ralph-update.XXXXXX")" \
   || fail "No pude crear el temporal para la actualización."
-cleanup() { rm -rf "$WORK_DIR"; }
-trap cleanup EXIT
+trap 'rm -rf "$WORK_DIR"' EXIT
 
 target_archive="$WORK_DIR/target.tar.gz"
 target_sums="$WORK_DIR/target.SHA256SUMS"
@@ -395,10 +414,9 @@ if manifest_contains "$target_root/MANIFEST" skills/ralph/SKILL.md; then
   check_skill_link
 fi
 apply_package "$target_root"
-if manifest_contains "$target_root/MANIFEST" skills/ralph/SKILL.md; then
-  mkdir -p "$PROJECT_ROOT/.claude/skills"
-  if [ ! -L "$SKILL_LINK" ]; then
-    ln -s "$SKILL_TARGET" "$SKILL_LINK"
-  fi
-fi
+bash "$SCRIPT_DIR/update.sh" --post-install \
+  || fail "No pude completar los pasos posteriores de la release instalada; vuelve a ejecutar update.sh $TARGET_VERSION."
 printf '✅ Ralph actualizado a v%s.\n' "$TARGET_VERSION"
+}
+
+main "$@"; exit
