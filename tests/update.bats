@@ -52,6 +52,87 @@ make_release_fixture() {
   fi)
 }
 
+repack_target_release() {
+  local stage_root="$TEST_ROOT/stage-1.2.0/ralph-v1.2.0"
+  tar -czf "$TEST_ROOT/releases/ralph-v1.2.0.tar.gz" \
+    -C "$(dirname "$stage_root")" "$(basename "$stage_root")"
+  printf '%s  %s\n' "$(test_sha256 "$TEST_ROOT/releases/ralph-v1.2.0.tar.gz")" \
+    ralph-v1.2.0.tar.gz >> "$TEST_ROOT/releases/SHA256SUMS.new"
+  while read -r hash asset; do
+    [ "$asset" = ralph-v1.2.0.tar.gz ] || printf '%s  %s\n' "$hash" "$asset"
+  done < "$TEST_ROOT/releases/SHA256SUMS" >> "$TEST_ROOT/releases/SHA256SUMS.new"
+  mv "$TEST_ROOT/releases/SHA256SUMS.new" "$TEST_ROOT/releases/SHA256SUMS"
+}
+
+@test "update survives replacing its running script with a different size" {
+  make_release_fixture
+  target_script="$TEST_ROOT/stage-1.2.0/ralph-v1.2.0/update.sh"
+  {
+    for ((i = 0; i < 2000; i++)); do
+      printf '# Destination release padding to change script offsets\n'
+    done
+    cat "$target_script"
+  } > "$target_script.new"
+  mv "$target_script.new" "$target_script"
+  repack_target_release
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  export RALPH_RELEASE_BASE_URL='https://releases.invalid/ralph'
+
+  run bash "$TEST_REPO/update.sh" 1.2.0
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'✅ Ralph actualizado'* ]]
+  [[ "$output" != *'command not found'* ]]
+  cmp "$target_script" "$TEST_REPO/update.sh"
+  [ "$(cat "$TEST_REPO/VERSION")" = 1.2.0 ]
+}
+
+@test "update runs destination release post-install steps" {
+  make_release_fixture
+  target_script="$TEST_ROOT/stage-1.2.0/ralph-v1.2.0/update.sh"
+  # Only the destination knows this new post-install step.
+  sed '/^check_skill_link() {/a\
+  printf "destination post-install\\n"' "$target_script" > "$target_script.new"
+  mv "$target_script.new" "$target_script"
+  repack_target_release
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  export RALPH_RELEASE_BASE_URL='https://releases.invalid/ralph'
+
+  run bash "$TEST_REPO/update.sh" 1.2.0
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'destination post-install'* ]]
+  [ -f "$TEST_REPO/.claude/skills/ralph/SKILL.md" ]
+}
+
+@test "update reports an explicit failure when an atomic replacement fails" {
+  make_release_fixture
+  mkdir -p "$TEST_ROOT/bin"
+  export TEST_REAL_MV="$(command -v mv)"
+  cat > "$TEST_ROOT/bin/mv" <<'FAKE'
+#!/usr/bin/env bash
+if [[ "${!#}" == */once.sh ]]; then
+  printf 'simulated replacement failure\n' >&2
+  exit 1
+fi
+exec "$TEST_REAL_MV" "$@"
+FAKE
+  chmod +x "$TEST_ROOT/bin/mv"
+  export PATH="$TEST_ROOT/bin:$PATH"
+  export FAKE_RELEASE_ROOT="$TEST_ROOT/releases"
+  export RALPH_RELEASE_BASE_URL='https://releases.invalid/ralph'
+
+  run bash "$TEST_REPO/update.sh" 1.2.0
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'No pude reemplazar el archivo distribuido: once.sh.'* ]]
+  [[ "$output" != *'✅ Ralph actualizado'* ]]
+  [ "$(cat "$TEST_REPO/VERSION")" = 1.2.0 ]
+  cmp "$TEST_REPO/once.sh" "$PROJECT_ROOT/once.sh"
+  run find "$TEST_REPO" -name '.ralph-update.*' -print
+  [ -z "$output" ]
+}
+
 @test "update replaces only manifest files and preserves project state" {
   make_release_fixture
   mkdir -p "$TEST_REPO/runs" "$TEST_REPO/.ralph"

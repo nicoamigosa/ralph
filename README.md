@@ -622,6 +622,19 @@ pins or verifies the version being run.
   (code 10), or `consulta fallida` (code 20); a failed query **never** means the
   installation is current.
 
+The updater replaces each file atomically and asks the newly installed
+`update.sh` to run the destination release's post-install steps, including the
+project skill link. A failed replacement or post-install step returns an error;
+an interrupted update can leave a partially updated installation.
+
+When upgrading **from version 1.3.0 or earlier**, the old updater can overwrite
+its running script and report a false error after applying the package (for
+example, `command not found`). Check `cat ralph/VERSION`, then rerun
+`ralph/update.sh <VERSION>` with that installed version. This idempotent run
+verifies the installed files against the release and completes its post-install
+steps, including `.claude/skills/ralph`. Confirm it exits with 0 and prints
+`✅ Ralph actualizado`; the version file alone does not verify the whole update.
+
 Each release publishes two assets with fixed names: `ralph-v<VERSION>.tar.gz` and
 `SHA256SUMS`. The latter contains the SHA-256 of the former. To detect local
 edits, `update.sh` also downloads and verifies the tarball for the currently
